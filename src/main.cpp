@@ -4633,8 +4633,14 @@ void compute_alias_deps(Type const &type, unordered_set<AliasDef*> &deps)
 	{
 		[&](TopType) {},
 		[&](BuiltinType const&) {},
-		[&](PointerType const&) {},
-		[&](ManyPointerType const&) {},
+		[&](PointerType const &t)
+		{
+			compute_alias_deps(*t.target_type, deps);
+		},
+		[&](ManyPointerType const &t)
+		{
+			compute_alias_deps(*t.element_type, deps);
+		},
 		[&](StructType const &t)
 		{
 			for(Member const &member: t.def->members)
