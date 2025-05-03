@@ -34,9 +34,9 @@ proc main() -> i32
 	// `make CONSTRUCTOR @ ADDRESS` runs the given constructor at the specified memory address.
 
 	// `make` works for primitive types:
-	let p: ^mut i32 = make i32(5) @ malloc(size_of(i32));
+	/*let p: ^mut i32 = make i32(5) @ malloc(size_of(i32));
 	// Equivalently:
-	/*let q: ^mut i32 = make i32(5) @ malloc(); // Automatically passes size_of(i32) to malloc()
+	let q: ^mut i32 = make i32(5) @ malloc(); // Automatically passes size_of(i32) to malloc()
 
 	// `make` works for structs:
 	p_foo: ^mut Foo = make Foo(23, false) @ malloc();

@@ -1,20 +1,20 @@
 #include <cstdint>
+#include <cassert>
+#include <utility>
 #include <iostream>
-#include <charconv>
-#include <memory>
+#include <fstream>
 #include <ostream>
 #include <sstream>
+#include <charconv>
+#include <memory>
+#include <type_traits>
 #include <string>
 #include <string_view>
-#include <type_traits>
-#include <unordered_set>
-#include <utility>
 #include <variant>
 #include <vector>
 #include <optional>
-#include <cassert>
 #include <unordered_map>
-#include <fstream>
+#include <unordered_set>
 
 #include "utils.hpp"
 
@@ -537,15 +537,13 @@ enum BuiltinType
 	USIZE,
 };
 
-struct TopType {};
-
 using Type = variant<
-	TopType,
 	BuiltinType,
 	struct UnresolvedId,
 	struct PointerType,
 	struct ManyPointerType,
 	struct StructType,
+	struct ProcType,
 	struct AliasType
 >;
 
@@ -591,6 +589,12 @@ struct StructType
 	StructDef *def;
 };
 
+struct ProcType
+{
+	vector<Type> params;
+	OwnPtr<Type> ret;
+};
+
 struct AliasType
 {
 	AliasDef *def;
@@ -601,12 +605,19 @@ Type clone(Type const &type)
 {
 	return type | match
 	{
-		[&](TopType) -> Type { return TopType(); },
 		[&](BuiltinType const &t) -> Type { return t; },
 		[&](UnresolvedId const &t) -> Type { return t; },
 		[&](PointerType const &t) -> Type { return PointerType(clone(*t.target_type), t.mutability); },
 		[&](ManyPointerType const &t) -> Type { return ManyPointerType(clone(*t.element_type), t.mutability); },
 		[&](StructType const &t) -> Type { return StructType(t.def); },
+		[&](ProcType const &t) -> Type
+		{
+			vector<Type> params;
+			for(Type const &p: t.params)
+				params.push_back(clone(p));
+
+			return ProcType(std::move(params), std::make_unique<Type>(clone(*t.ret)));
+		},
 		[&](AliasType const &t) -> Type { return AliasType(t.def); },
 	};
 }
@@ -1475,7 +1486,6 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 {
 	type | match
 	{
-		[&](TopType) { os << "#Top"; },
 		[&](BuiltinType const &t) { os << str(t); },
 		[&](UnresolvedId const &t) { os << RangeFmt(t.qname, "."); },
 		[&](PointerType const &t)
@@ -1487,6 +1497,10 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 		},
 		[&](ManyPointerType const &t) { os << "[^]" << *t.element_type; },
 		[&](StructType const &t) { os << t.def->get_qname(); },
+		[&](ProcType const &t)
+		{
+			os << "proc(" << RangeFmt(t.params, ", ") << ") -> " << *t.ret;
+		},
 		[&](AliasType const &t) { os << t.def->name; },
 	};
 
@@ -1991,6 +2005,23 @@ Type parse_type(Parser &parser, Module &mod)
 			Mutability mutability = try_consume(parser, Lexeme::MUT) ? Mutability::MUTABLE : Mutability::CONST;
 			Type element_type = parse_type(parser, mod);
 			return ManyPointerType(std::move(element_type), mutability);
+		}
+
+		case Lexeme::PROC:
+		{
+			vector<Type> params;
+			consume(parser, Lexeme::LEFT_PAREN);
+			while(parser.peek() != Lexeme::RIGHT_PAREN)
+			{
+				params.push_back(parse_type(parser, mod));
+				if(parser.peek() != Lexeme::RIGHT_PAREN)
+					consume(parser, Lexeme::COMMA);
+			}
+			consume(parser, Lexeme::RIGHT_PAREN);
+			consume(parser, Lexeme::THIN_ARROW);
+			Type ret = parse_type(parser, mod);
+
+			return ProcType(std::move(params), std::make_unique<Type>(std::move(ret)));
 		}
 
 		default: throw ParseError("Invalid token while parsing type: "s + str(tok.kind));
@@ -2747,7 +2778,6 @@ bool equiv(Type const &a, Type const &b)
 {
 	return *strip_alias(a) | match
 	{
-		[&](TopType) { return std::holds_alternative<TopType>(*strip_alias(b)); },
 		[&](BuiltinType const &ta)
 		{
 			if(BuiltinType const *tb = std::get_if<BuiltinType>(strip_alias(b)))
@@ -2776,6 +2806,25 @@ bool equiv(Type const &a, Type const &b)
 
 			return false;
 		},
+		[&](ProcType const &ta)
+		{
+			if(ProcType const *tb = std::get_if<ProcType>(strip_alias(b)))
+			{
+				if(ta.params.size() != tb->params.size())
+					return false;
+
+				for(size_t i = 0; i < ta.params.size(); ++i)
+				{
+					if(not equiv(ta.params[i], tb->params[i]))
+						return false;
+				}
+
+				if(not equiv(*ta.ret, *tb->ret))
+					return false;
+			}
+
+			return false;
+		},
 		[&](AliasType const&) -> bool { UNREACHABLE; },
 		[&](UnresolvedId const&) -> bool { assert(!"equiv: UnresolvedId"); },
 	};
@@ -2797,70 +2846,40 @@ namespace std
 		size_t operator () (::Type const &type) const
 		{
 			size_t h = ::compute_hash(type.index());
-			*strip_alias(type) | match
+			*::strip_alias(type) | match
 			{
-				[&](TopType) {},
-				[&](BuiltinType const &t)
+				[&](::BuiltinType const &t)
 				{
 					::combine_hashes(h, ::compute_hash((int)t));
 				},
-				[&](PointerType const &t)
+				[&](::PointerType const &t)
 				{
 					::combine_hashes(h, ::compute_hash((int)t.mutability));
 					::combine_hashes(h, ::compute_hash(*t.target_type));
 				},
-				[&](ManyPointerType const &t)
+				[&](::ManyPointerType const &t)
 				{
 					::combine_hashes(h, ::compute_hash((int)t.mutability));
 					::combine_hashes(h, ::compute_hash(*t.element_type));
 				},
-				[&](StructType const &t)
+				[&](::StructType const &t)
 				{
 					::combine_hashes(h, ::compute_hash(t.def));
 				},
-				[&](AliasType const&) { UNREACHABLE; },
-				[&](UnresolvedId const&) { assert(!"hash<Type>: UnresolvedId"); },
+				[&](::ProcType const &t)
+				{
+					for(::Type const &p: t.params)
+						::combine_hashes(h, ::compute_hash(p));
+
+					::combine_hashes(h, ::compute_hash(*t.ret));
+				},
+				[&](::AliasType const&) { UNREACHABLE; },
+				[&](::UnresolvedId const&) { assert(!"hash<Type>: UnresolvedId"); },
 			};
 
 			return h;
 		}
 	};
-}
-
-StructDef* compute_lub(StructDef *a, StructDef *b)
-{
-	if(a == b)
-		return a;
-
-	while(b)
-	{
-		if(a->is_case_member_of(b))
-			return b;
-
-		b = b->try_get_parent();
-	}
-
-	return nullptr;
-}
-
-Type compute_lub(Type const &a, Type const &b)
-{
-	Type const* a_stripped = strip_alias(a);
-	Type const* b_stripped = strip_alias(b);
-
-	if(equiv(*a_stripped, *b_stripped))
-		return clone(*a_stripped);
-
-	if(StructType const *a_struct_type = std::get_if<StructType>(a_stripped))
-	{
-		if(StructType const *b_struct_type = std::get_if<StructType>(b_stripped))
-		{
-			if(StructDef *lub = compute_lub(a_struct_type->def, b_struct_type->def))
-				return StructType(lub);
-		}
-	}
-
-	return TopType();
 }
 
 bool is_struct_assignable(StructDef *dest, StructDef *src)
@@ -2883,10 +2902,6 @@ bool is_type_assignable(Type const &dest, Type const &src)
 {
 	return *strip_alias(src) | match
 	{
-		[&](TopType)
-		{
-			return std::holds_alternative<TopType>(*strip_alias(dest));
-		},
 		[&](BuiltinType const &src_t)
 		{
 			if(BuiltinType const *dest_int_type = std::get_if<BuiltinType>(strip_alias(dest)))
@@ -2921,6 +2936,7 @@ bool is_type_assignable(Type const &dest, Type const &src)
 
 			return false;
 		},
+		[&](ProcType const&) -> bool { assert(!"is_type_assignable: ProcType: TODO"); },
 		[&](AliasType const&) -> bool { UNREACHABLE; },
 		[&](UnresolvedId const&) -> bool { assert(!"is_type_assignable: UnresolvedId"); },
 	};
@@ -2944,7 +2960,6 @@ bool is_instantiable(Type const &type)
 {
 	return *strip_alias(type) | match
 	{
-		[&](TopType) { return true; },
 		[&](BuiltinType const &t)
 		{
 			return t != BuiltinType::NEVER;
@@ -2961,6 +2976,7 @@ bool is_instantiable(Type const &type)
 		{
 			return !t.def->contains_never;
 		},
+		[&](ProcType const&) { return false; },
 		[&](AliasType const&) -> bool { UNREACHABLE; },
 		[&](UnresolvedId const&) -> bool { assert(!"is_instantiable: UnresolvedId"); },
 	};
@@ -2972,7 +2988,6 @@ MemoryLayout compute_layout(Type const &type, unordered_set<StructDef*> &seen)
 {
 	return *strip_alias(type) | match
 	{
-		[&](TopType) -> MemoryLayout { assert(!"is_instantiable: TopType"); },
 		[&](BuiltinType const &t)
 		{
 			return get_layout(t);
@@ -2995,6 +3010,7 @@ MemoryLayout compute_layout(Type const &type, unordered_set<StructDef*> &seen)
 				[&](ExtensionOf) -> MemoryLayout { assert(!"TODO: compute_layout(StructType): ExtensionOf"); },
 			};
 		},
+		[&](ProcType const&) -> MemoryLayout { assert(!"is_instantiable: ProcType"); },
 		[&](AliasType const&) -> MemoryLayout { UNREACHABLE; },
 		[&](UnresolvedId const&) -> MemoryLayout { assert(!"is_instantiable: UnresolvedId"); },
 	};
@@ -3103,7 +3119,6 @@ void resolve_identifiers(Type &type, Scope *scope)
 {
 	type | match
 	{
-		[&](TopType&) {},
 		[&](BuiltinType&) {},
 		[&](PointerType &t)
 		{
@@ -3114,6 +3129,13 @@ void resolve_identifiers(Type &type, Scope *scope)
 			resolve_identifiers(*t.element_type, scope);
 		},
 		[&](StructType&) {},
+		[&](ProcType &t)
+		{
+			for(Type &p: t.params)
+				resolve_identifiers(p, scope);
+
+			resolve_identifiers(*t.ret, scope);
+		},
 		[&](AliasType&) {},
 		[&](UnresolvedId &t)
 		{
@@ -3354,10 +3376,6 @@ bool is_cast_ok(Type const &dest_type, Type const &src_type)
 
 	return *strip_alias(src_type) | match
 	{
-		[&](TopType)
-		{
-			return std::holds_alternative<TopType>(*strip_alias(dest_type));
-		},
 		[&](BuiltinType const &src_t)
 		{
 			if(BuiltinType const *dest_t = std::get_if<BuiltinType>(strip_alias(dest_type)))
@@ -3392,6 +3410,7 @@ bool is_cast_ok(Type const &dest_type, Type const &src_type)
 
 			return false;
 		},
+		[&](ProcType const&) -> bool { assert(!"is_cast_ok: ProcType: TODO"); },
 		[&](AliasType const&) -> bool { UNREACHABLE; },
 		[&](UnresolvedId const&) -> bool { assert(!"is_cast_ok: UnresolvedId"); },
 	};
@@ -4004,7 +4023,6 @@ string generate_c_to_str(Type const &type)
 {
 	return type | match
 	{
-		[&](TopType) -> string { assert(!"generate_c_to_str: TopType"); },
 		[&](BuiltinType const &t) { return generate_c_to_str(t); },
 		[&](PointerType const &t)
 		{
@@ -4029,6 +4047,7 @@ string generate_c_to_str(Type const &type)
 
 			return "struct " + get_fq_name(t.def);
 		},
+		[&](ProcType const&) -> string { assert(!"generate_c_to_str: ProcType: TODO"); },
 		[&](AliasType const &t)
 		{
 			return t.def->name;
@@ -4542,7 +4561,6 @@ void compute_struct_deps(Type const &type, unordered_set<StructDef*> &deps)
 {
 	type | match
 	{
-		[&](TopType) {},
 		[&](BuiltinType const&) {},
 		[&](PointerType const&) {},
 		[&](ManyPointerType const&) {},
@@ -4565,11 +4583,18 @@ void compute_struct_deps(Type const &type, unordered_set<StructDef*> &deps)
 
 			deps.insert(t.def);
 		},
+		[&](ProcType const &t)
+		{
+			for(Type const &p: t.params)
+				compute_struct_deps(p, deps);
+
+			compute_struct_deps(*t.ret, deps);
+		},
 		[&](AliasType const &t)
 		{
 			compute_struct_deps(t.def->type, deps);
 		},
-		[&](UnresolvedId const&) { assert(!"compute_type_deps: UnresolvedId"); },
+		[&](UnresolvedId const&) { assert(!"compute_struct_deps: UnresolvedId"); },
 	};
 }
 
@@ -4631,7 +4656,6 @@ void compute_alias_deps(Type const &type, unordered_set<AliasDef*> &deps)
 {
 	type | match
 	{
-		[&](TopType) {},
 		[&](BuiltinType const&) {},
 		[&](PointerType const &t)
 		{
@@ -4658,12 +4682,19 @@ void compute_alias_deps(Type const &type, unordered_set<AliasDef*> &deps)
 				};
 			}
 		},
+		[&](ProcType const &t)
+		{
+			for(Type const &p: t.params)
+				compute_alias_deps(p, deps);
+
+			compute_alias_deps(*t.ret, deps);
+		},
 		[&](AliasType const &t)
 		{
 			compute_alias_deps(t.def->type, deps);
 			deps.insert(t.def);
 		},
-		[&](UnresolvedId const&) { assert(!"compute_type_deps: UnresolvedId"); },
+		[&](UnresolvedId const&) { assert(!"compute_alias_deps: UnresolvedId"); },
 	};
 }
 
