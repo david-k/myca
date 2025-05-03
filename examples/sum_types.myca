@@ -1,0 +1,165 @@
+typealias c_char = i8;
+
+struct Json
+{
+	id: i32,
+
+	case Null {},
+	case Bool {value: bool},
+	case Int {value: i32},
+	case Array {elements: [^]Json, count: i32},
+
+	name: [^]c_char
+}
+
+typealias JInt = Json.Int;
+
+proc mk_int(value: i32) -> Json
+{
+	return Json.Int(.id=42, value, .name=c"int");
+}
+
+/*proc get_prime_factor(json: Json) -> i32
+{
+	match json {
+		case Json.Null(...) {
+			return 2;
+		}
+		// When matching struct members, the variable name must match the member name
+		case Json.Bool(value, ...) {
+			return 3;
+		}
+		// Though you can also assign a different name like so:
+		case Json.Int(.value = v &, ...) {
+			return 5 * v^;
+		}
+		case Json.Array(elements, count) {
+			return 7 * count;
+		}
+	}
+}*/
+
+proc get_prime_factor_2(json: Json) -> i32
+{
+	match json {
+		case Json.Null {
+			return 2;
+		}
+		case Json.Bool {
+			return 3;
+		}
+		case Json.Int -> v {
+			return 5 * v.value;
+		}
+		case Json.Array -> v {
+			return 7 * v.count;
+		}
+	}
+}
+
+// TODO I should be required to use `^mut Json`
+proc increase_jint(json: ^mut Json)
+{
+	match json^ {
+		case Json.Null {}
+		case Json.Bool {}
+		case Json.Int -> v &mut {
+			v^.value = v^.value + 1;
+		}
+		case Json.Array {}
+	}
+}
+
+
+proc basic_pattern_op()
+{
+	let mut b = true;
+
+	let p &mut = b; // p : &mut bool
+	// Equivalent to:
+	let q = &mut b;
+
+	// Analogously:
+	let r ^ = p; // r : bool
+	// Equivalent to:
+	let s = p^;
+
+	// In general, we have
+	//
+	//     <let-stmt>   ::= `let` <pattern> `=` <expr> `;`
+	//     <pattern>    ::= <identifier> <pattern-op>?
+	//     <pattern-op> ::= `&mut` | `^`
+	//
+	// The pattern-op, if present, is applied to the RHS expression of the let-stmt.
+	// I feel this is more intuitive that Rust's `ref` and `&` patterns, and we don't need an additinal keyword.
+}
+
+/*proc match_capture(json: Json) -> bool
+{
+	match json {
+		case Json.Null {
+			return false;
+		}
+		case Json.Bool -> v {
+			return v.value;
+		}
+		case Json.Int -> v &mut {
+			if v^.value == 0 {
+				return false;
+			}
+
+			return true;
+		}
+		case Json.Array -> v {
+			if v.count == 0 {
+				return false;
+			}
+
+			return true;
+		}
+	}
+}*/
+
+/*proc match_capture_global(json: Json) -> bool
+{
+	match json -> v &mut {
+		case Json.Null {
+			return false;
+		}
+		case Json.Bool {
+			return v^.value;
+		}
+		case Json.Int {
+			if v^.value == 0 {
+				return false;
+			}
+
+			return true;
+		}
+		case Json.Array {
+			if v^.count == 0 {
+				return false;
+			}
+
+			return true;
+		}
+	}
+}*/
+
+proc main() -> i32
+{
+	basic_pattern_op();
+
+	let mut jint = JInt(23, 9, c"Jo");
+
+	let jint_id = jint.id;
+	let jint_value = jint.value;
+
+	let mut json = jint as Json;
+
+	let n = Json.Null(99, c"Hi");
+	json = n;
+
+	increase_jint(&mut jint as ^mut Json);
+	return json.id + get_prime_factor_2(jint);
+}

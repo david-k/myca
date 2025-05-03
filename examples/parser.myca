@@ -1,0 +1,104 @@
+// Stdlib
+//========================================================================================
+struct Option[T] {
+	case None
+	case Some{T}
+}
+
+
+trait Error {
+	proc description(^self) -> Option[String] {
+		return /* name of the error */;
+	}
+}
+
+
+// Since all alternatives of `IOError` implement the `Error` trait, it is also automatically
+// implemented for `IOError` as well
+typedef IOError = #Error struct BadFD
+                | #Error struct Again
+
+
+proc print(text: String) -> Unit|IOError {
+
+}
+
+// `AnyError` is the implicitly created union type of all error types
+
+proc foo() -> Unit|AnyError {
+	// If a function returns a union type such that exactly one alternative does not derive from
+	// Error while all others do, then you can use the questionmark operator
+	print("Hello, World!\n")?;
+}
+
+
+// AST
+//========================================================================================
+struct SourceLocation {
+	pos: i64,
+	line: i64,
+	col: i64,
+}
+
+struct BinaryOp {
+	case Eq,
+	case And,
+	case Or,
+	case Implies,
+}
+
+let binary_op_name: [BinaryOp]String = {
+	.Eq = "=",
+	.And = "∧",
+	.Or = "∨",
+	.Implies = "⇒",
+}
+
+struct Expr {
+	case Var {
+		var: ^Decl
+		bruijn_idx: i64
+	},
+
+	case App {
+		func: Decl
+		args: []Self
+	},
+
+	case Binary {
+		left: ^Self
+		right: ^Self
+		op: BinaryOp
+	},
+
+	loc: SourceLocation = SourceLocation(),
+}
+
+struct TypedExpr(Expr) {
+	type: Type // Added to all cases
+}
+
+
+proc print(expr: ^Expr, w: ^mut Writer) -> Unit|Error // ?
+{
+	expr^ match {
+		case Var(var, ...) => w.print(var^.name)?,
+		case App(func, args) =>
+		{
+			w.print(func.name)?;
+
+			w.print("(")?;
+			// TODO: Print args
+			w.print(")")?;
+		}
+		case Binary(left, right, op) =>
+		{
+			w.print("(")?;
+			left.print(w)?;
+			w.print(binary_op_name[op])?;
+			right.print(w)?;
+			w.print(")")?;
+		}
+	}
+}
+

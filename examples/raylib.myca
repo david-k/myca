@@ -1,0 +1,36 @@
+typealias c_char = i8;
+typealias c_int = i32;
+
+struct Color
+{
+	r: u8,
+	g: u8,
+	b: u8,
+	a: u8,
+}
+
+extern proc InitWindow(width: c_int, height: c_int, title: [^]c_char);
+extern proc CloseWindow();
+extern proc WindowShouldClose() -> bool;
+extern proc BeginDrawing();
+extern proc EndDrawing();
+extern proc ClearBackground(color: Color);
+extern proc DrawText(text: [^]c_char, x: c_int, y: c_int, font_size: c_int, color: Color);
+
+proc main() -> i32
+{
+	InitWindow(800, 600, c"Does this really work?");
+
+	let DARKRED = Color(128, 0, 0, 255);
+	let LIGHTGRAY = Color(.r=200, .g=200, .b=200, .a=255);
+	while not WindowShouldClose()
+	{
+		BeginDrawing();
+			ClearBackground(DARKRED);
+			DrawText(c"The sky is the limit", .x=200, .y=100, .font_size=30, LIGHTGRAY);
+		EndDrawing();
+	}
+
+	CloseWindow();
+	return 0;
+}

@@ -1,0 +1,58 @@
+// Lib C
+//==============================================================================
+struct c_void { _: Never }
+
+extern proc malloc(size: usize) -> ^mut c_void;
+extern proc free(ptr: ^mut c_void);
+
+
+//==============================================================================
+struct Foo
+{
+	i: i32,
+	b: bool,
+}
+
+/*module
+{
+	// #PrivateInit
+	struct Bar
+	{
+		a: i32,
+		b: i32,
+	}
+
+	constructor proc Bar.new(self, a: i32)
+	{
+		self.a = a;
+		self.b = a + 1;
+	}
+}*/
+
+proc main() -> i32
+{
+	// `make CONSTRUCTOR @ ADDRESS` runs the given constructor at the specified memory address.
+
+	// `make` works for primitive types:
+	let p: ^mut i32 = make i32(5) @ malloc(size_of(i32));
+	// Equivalently:
+	/*let q: ^mut i32 = make i32(5) @ malloc(); // Automatically passes size_of(i32) to malloc()
+
+	// `make` works for structs:
+	p_foo: ^mut Foo = make Foo(23, false) @ malloc();
+	
+	// `make` works for structs with custom constructors:
+	p_bar: ^mut Bar = make Bar.new(42) @ malloc();
+
+	free(p);
+	free(q);
+	free(p_foo);
+	free(p_bar);
+
+
+	// When creating a dynamic array using `make`, only the left-most array size can be dynamic
+	n := 10;
+	arr: [][2]i32 = make [n][2]i32(1,2) @ malloc();*/
+
+	return 0;
+}
