@@ -31,28 +31,31 @@ struct Foo
 
 proc main() -> i32
 {
-	// `make CONSTRUCTOR @ ADDRESS` runs the given constructor at the specified memory address.
+	// `make {VALUE|CONSTRUCTOR} @ ADDRESS` runs the given constructor at the specified memory address.
 
 	// `make` works for primitive types:
-	/*let p: ^mut i32 = make i32(5) @ malloc(size_of(i32));
+	let p: ^mut i32 = make (5 as i32) @ malloc(size_of(i32));
 	// Equivalently:
-	let q: ^mut i32 = make i32(5) @ malloc(); // Automatically passes size_of(i32) to malloc()
+	let q: ^mut i32 = make 5 @ malloc(); // Automatically passes size_of(i32) to malloc()
 
 	// `make` works for structs:
-	p_foo: ^mut Foo = make Foo(23, false) @ malloc();
+	let p_foo: ^mut Foo = make Foo(23, false) @ malloc();
 	
+	// TODO
+	//
 	// `make` works for structs with custom constructors:
-	p_bar: ^mut Bar = make Bar.new(42) @ malloc();
+	//p_bar: ^mut Bar = make Bar.new(42) @ malloc();
 
 	free(p);
 	free(q);
 	free(p_foo);
-	free(p_bar);
+	//free(p_bar);
 
 
 	// When creating a dynamic array using `make`, only the left-most array size can be dynamic
-	n := 10;
-	arr: [][2]i32 = make [n][2]i32(1,2) @ malloc();*/
+	let n = 10;
+	let arr2: []i32 = make[n] 42 @ malloc();
+	//let arr2: [][2]i32 = make[n] {1,2}::[2]i32 @ malloc();
 
-	return 0;
+	return p_foo^.i;
 }

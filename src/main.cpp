@@ -424,6 +424,7 @@ unordered_map<string_view, Lexeme> const KEYWORDS = {
 	{"typealias", Lexeme::TYPEALIAS},
 	{"extern", Lexeme::EXTERN},
 	{"size_of", Lexeme::SIZE_OF},
+	{"make", Lexeme::MAKE},
 };
 
 
@@ -815,6 +816,12 @@ struct SizeOfExpr
 	Type type;
 };
 
+struct MakeExpr
+{
+	OwnPtr<Expr> init;
+	OwnPtr<Expr> addr;
+};
+
 
 class Expr : public variant
 <
@@ -831,7 +838,8 @@ class Expr : public variant
 	struct AssignmentExpr,
 	struct AsExpr,
 	struct CallExpr,
-	struct SizeOfExpr
+	struct SizeOfExpr,
+	struct MakeExpr
 > {
 public:
 	template<typename T>
@@ -1636,6 +1644,13 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 		{
 			os << "size_of(" << e.type << ")";
 		},
+		[&](MakeExpr const &e)
+		{
+			os << "make ";
+			print(os, *e.init, listener);
+			os << " @ ";
+			print(os, *e.addr, listener);
+		},
 	};
 
 	if(listener)
@@ -2237,6 +2252,18 @@ Expr parse_prefix_expr(Parser &parser, Module &mod)
 			consume(parser, Lexeme::RIGHT_PAREN);
 
 			return with_location(SizeOfExpr(std::move(type)));
+		}
+
+		case Lexeme::MAKE:
+		{
+			Expr init = parse_expr(parser, mod);
+			consume(parser, Lexeme::AT);
+			Expr addr = parse_expr(parser, mod);
+
+			return with_location(MakeExpr(
+				std::make_unique<Expr>(std::move(init)),
+				std::make_unique<Expr>(std::move(addr))
+			));
 		}
 
 		default:
@@ -3217,6 +3244,11 @@ void resolve_identifiers(Expr &expr, Scope *scope)
 		{
 			resolve_identifiers(e.type, scope);
 		},
+		[&](MakeExpr &e)
+		{
+			resolve_identifiers(*e.init, scope);
+			resolve_identifiers(*e.addr, scope);
+		},
 	};
 }
 
@@ -3442,6 +3474,8 @@ Parameter* find_var_member(StructDef *struct_, string const &field)
 	};
 }
 
+void add_size_to_alloc_call(Expr &addr, Expr &&size_expr);
+
 void typecheck(Expr &expr, Module &mod)
 {
 	expr | match
@@ -3658,7 +3692,36 @@ void typecheck(Expr &expr, Module &mod)
 		{
 			expr.type = BuiltinType::USIZE;
 		},
+		[&](MakeExpr &e)
+		{
+			typecheck(*e.init, mod);
+
+			add_size_to_alloc_call(*e.addr, Expr(SizeOfExpr(clone(*e.init->type)), {}));
+			typecheck(*e.addr, mod);
+
+			expr.type = PointerType(clone(*e.init->type), Mutability::MUTABLE);
+		},
 	};
+}
+
+void add_size_to_alloc_call(Expr &addr, Expr &&size_expr)
+{
+	if(CallExpr *addr_call = std::get_if<CallExpr>(&addr))
+	{
+		vector<Parameter> const &params = addr_call->callee_params();
+		if(
+			addr_call->args.size() == 0 &&
+			params.size() == 1 &&
+			equiv(*params[0].var->type, Type(BuiltinType::USIZE))
+		)
+		{
+			addr_call->args.push_back(Argument{
+				.expr = std::make_unique<Expr>(std::move(size_expr)),
+				.name = nullopt,
+				.param_idx = 0,
+			});
+		}
+	}
 }
 
 Type apply_pattern_op(PatternOp const &op, Expr const &expr, Type const &expr_type)
@@ -4227,6 +4290,18 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		[&](SizeOfExpr const &e)
 		{
 			return "sizeof(" + generate_c_to_str(e.type) + ")";
+		},
+		[&](MakeExpr const &e)
+		{
+			string addr_val = generate_c(*e.addr, backend);
+
+			string result_var = backend.new_tmp_var();
+			backend << *expr.type << " " << result_var << " = " << generate_c_cast(*expr.type, addr_val, *e.addr->type) << ";" << LineEnd;
+
+			string init_val = generate_c(*e.init, backend);
+			backend << "*" << result_var << " = " << init_val << ";" << LineEnd;
+
+			return result_var;
 		},
 	};
 }
