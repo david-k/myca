@@ -604,7 +604,9 @@ struct StructType
 struct ProcType
 {
 	ProcTypeDef *def;
-	ProcTypeDef const *canonical_def = nullptr; // Available after resolve_identifiers()
+
+	// Available after resolve_identifiers()
+	ProcTypeDef const *canonical_def = nullptr;
 };
 
 struct AliasType
@@ -810,17 +812,14 @@ struct Argument
 
 struct CallExpr
 {
-	Callable callable;
+	OwnPtr<Expr> callable;
 	vector<Argument> args;
 
-	CallExpr(Callable callable, vector<Argument> args) :
-		callable(std::move(callable)),
+	CallExpr(Expr &&callable, vector<Argument> args) :
+		callable(std::make_unique<Expr>(std::move(callable))),
 		args(std::move(args)) {}
 
-	vector<Parameter>& callee_params();
-	vector<Parameter> const& callee_params() const;
-	Type callee_return_type() const;
-	
+	vector<Parameter> *callable_params = nullptr;
 };
 
 struct SizeOfExpr
@@ -1556,45 +1555,6 @@ private:
 };
 
 
-vector<Parameter>& CallExpr::callee_params()
-{
-	return callable | match
-	{
-		[](ProcDef *def)   -> vector<Parameter>& { return def->type.params; },
-		[](StructDef *def) -> vector<Parameter>&
-		{
-			assert(def->constructor);
-			return def->constructor->params;
-		},
-		[](UnresolvedId) -> vector<Parameter>& { assert(!"callee_params: UnresolvedId"); },
-	};
-}
-
-vector<Parameter> const& CallExpr::callee_params() const
-{
-	return callable | match
-	{
-		[](ProcDef *def)   -> vector<Parameter> const& { return def->type.params; },
-		[](StructDef *def) -> vector<Parameter> const&
-		{
-			assert(def->constructor);
-			return def->constructor->params;;
-		},
-		[](UnresolvedId) -> vector<Parameter> const& { assert(!"callee_params: UnresolvedId"); },
-	};
-}
-
-Type CallExpr::callee_return_type() const
-{
-	return callable | match
-	{
-		[&](ProcDef *def) -> Type { return clone(def->type.ret); },
-		[&](StructDef *struct_) -> Type { return StructType(struct_); },
-		[](UnresolvedId) -> Type { assert(!"callee_return_type: UnresolvedId"); },
-	};
-}
-
-
 //==============================================================================
 // Printing
 //==============================================================================
@@ -1779,12 +1739,7 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 		},
 		[&](CallExpr const &e)
 		{
-			e.callable | match
-			{
-				[&](ProcDef *def) { os << def->name; },
-				[&](StructDef *def) { os << def->get_qname(); },
-				[&](UnresolvedId id) { os << RangeFmt(id.qname, "."); },
-			};
+			print(os, *e.callable, listener);
 			os << "(";
 			os << RangeFmt(e.args, ", ", [&](Argument const &arg)
 			{
@@ -2245,39 +2200,43 @@ optional<OperatorInfo> get_operator_info(Lexeme tok)
 		case Lexeme::DOT:
 			return OperatorInfo{.precedence = 0, .assoc = Associativity::LEFT};
 
+		// Procedure/constructor calls
+		case Lexeme::LEFT_PAREN:
+			return OperatorInfo{.precedence = 1, .assoc = Associativity::LEFT};
+
 		// Pointer dereference
 		case Lexeme::CIRCUMFLEX:
-			return OperatorInfo{.precedence = 1, .assoc = Associativity::LEFT};
+			return OperatorInfo{.precedence = 2, .assoc = Associativity::LEFT};
 
 		// Indexing
 		case Lexeme::LEFT_BRACKET:
-			return OperatorInfo{.precedence = 1, .assoc = Associativity::LEFT};
+			return OperatorInfo{.precedence = 2, .assoc = Associativity::LEFT};
 
 		// Address of
 		case Lexeme::AMPERSAND:
-			return OperatorInfo{.precedence = 2, .assoc = Associativity::LEFT};
+			return OperatorInfo{.precedence = 3, .assoc = Associativity::LEFT};
 
 		// Logical NOT
 		case Lexeme::NOT:
-			return OperatorInfo{.precedence = 3, .assoc = Associativity::LEFT};
+			return OperatorInfo{.precedence = 4, .assoc = Associativity::LEFT};
 
 		// Multiplication/division
 		case Lexeme::STAR:
 		case Lexeme::SLASH:
-			return OperatorInfo{.precedence = 4, .assoc = Associativity::LEFT};
+			return OperatorInfo{.precedence = 5, .assoc = Associativity::LEFT};
 
 		// Addition/subtraction
 		case Lexeme::PLUS:
 		case Lexeme::MINUS:
-			return OperatorInfo{.precedence = 5, .assoc = Associativity::LEFT};
+			return OperatorInfo{.precedence = 6, .assoc = Associativity::LEFT};
 
 		// Casting
 		case Lexeme::AS:
-			return OperatorInfo{.precedence = 6, .assoc = Associativity::LEFT};
+			return OperatorInfo{.precedence = 7, .assoc = Associativity::LEFT};
 
 		// Assignment
 		case Lexeme::EQ:
-			return OperatorInfo{.precedence = 7, .assoc = Associativity::RIGHT};
+			return OperatorInfo{.precedence = 8, .assoc = Associativity::RIGHT};
 
 		default:
 			return nullopt;
@@ -2331,44 +2290,7 @@ Expr parse_prefix_expr(Parser &parser, Module &mod)
 				return expr;
 			}
 
-			// Try parse callable
-			variant<NotFound, ProcDef*, StructDef*> def = mod.scope()->resolve_qname(qname);
-			Callable callable = def | match
-			{
-				[&](ProcDef *proc) -> Callable { return proc; },
-				[&](StructDef *struct_) -> Callable { return struct_; },
-				[&](NotFound) -> Callable { return UnresolvedId(qname); },
-			};
-
-			if(!try_consume(parser, Lexeme::LEFT_PAREN))
-			{
-				callable | match
-				{
-					[](ProcDef*) { throw ParseError("Expected opening parenthesis after function name"); },
-					[](StructDef*) { throw ParseError("Expected opening parenthesis after struct constructor"); },
-					[](UnresolvedId const &id) { throw ParseError("Undeclared identifier: " + str(RangeFmt(id.qname, "."))); },
-				};
-			}
-
-			vector<Argument> args;
-			while(parser.peek() != Lexeme::RIGHT_PAREN)
-			{
-				if(try_consume(parser, Lexeme::DOT))
-				{
-					string_view param_name = consume(parser, Lexeme::IDENTIFIER).text;
-					consume(parser, Lexeme::EQ);
-					Expr arg_expr = parse_expr(parser, mod);
-					args.push_back(Argument{.expr = std::make_unique<Expr>(std::move(arg_expr)), .name = string(param_name)});
-				}
-				else
-					args.push_back(Argument{.expr = std::make_unique<Expr>(parse_expr(parser, mod)), .name = nullopt});
-
-				if(parser.peek() != Lexeme::RIGHT_PAREN)
-					consume(parser, Lexeme::COMMA);
-			}
-			consume(parser, Lexeme::RIGHT_PAREN);
-
-			return with_location(CallExpr(callable, std::move(args)));
+			return with_location(UnresolvedId(std::move(qname)));
 		}
 
 		case Lexeme::LEFT_PAREN:
@@ -2458,6 +2380,29 @@ Expr parse_infix_expr(Parser &parser, Module &mod, Expr &&left)
 				std::move(left),
 				parse_expr(parser, mod, *get_operator_info(tok.kind))
 			));
+		}
+
+		case Lexeme::LEFT_PAREN:
+		{
+			vector<Argument> args;
+			while(parser.peek() != Lexeme::RIGHT_PAREN)
+			{
+				if(try_consume(parser, Lexeme::DOT))
+				{
+					string_view param_name = consume(parser, Lexeme::IDENTIFIER).text;
+					consume(parser, Lexeme::EQ);
+					Expr arg_expr = parse_expr(parser, mod);
+					args.push_back(Argument{.expr = std::make_unique<Expr>(std::move(arg_expr)), .name = string(param_name)});
+				}
+				else
+					args.push_back(Argument{.expr = std::make_unique<Expr>(parse_expr(parser, mod)), .name = nullopt});
+
+				if(parser.peek() != Lexeme::RIGHT_PAREN)
+					consume(parser, Lexeme::COMMA);
+			}
+			consume(parser, Lexeme::RIGHT_PAREN);
+
+			return with_location(CallExpr(std::move(left), std::move(args)));
 		}
 
 		case Lexeme::CIRCUMFLEX: return with_location(DerefExpr(std::move(left)));
@@ -3429,23 +3374,9 @@ void resolve_identifiers(Expr &expr, Scope *scope)
 		},
 		[&](CallExpr &e)
 		{
+			resolve_identifiers(*e.callable, scope);
 			for(Argument &arg: e.args)
 				resolve_identifiers(*arg.expr, scope);
-
-			e.callable | match
-			{
-				[&](ProcDef *proc) { expr.type = clone(proc->type.ret); },
-				[&](StructDef *struct_) { expr.type = StructType(struct_); },
-				[&](UnresolvedId id)
-				{
-					if(StructDef *def = scope->try_lookup_def<StructDef>(id.qname))
-						e.callable = def;
-					else if(ProcDef *def = scope->try_lookup_def<ProcDef>(id.qname))
-						e.callable = def;
-					else
-						throw ParseError("Undeclared identifier: "s + str(RangeFmt(id.qname, ".")));
-				},
-			};
 		},
 		[&](SizeOfExpr &e)
 		{
@@ -3850,18 +3781,36 @@ void typecheck(Expr &expr, Module &mod)
 		},
 		[&](CallExpr &e)
 		{
-			e.callable | match
+			typecheck(*e.callable, mod);
+
+			*e.callable->type | match
 			{
-				[](StructDef *def)
+				[&](ProcType &t)
 				{
-					if(!def->constructor)
-						throw ParseError("Struct does not provide a constructor: " + def->name);
+					e.callable_params = &t.def->params;
+					expr.type = clone(t.def->ret);
 				},
-				[](auto const&) {},
+				[&](auto&)
+				{
+					*e.callable | match
+					{
+						[&](StructExpr &struct_expr)
+						{
+							if(!struct_expr.def->constructor)
+								throw ParseError("Struct does not provide a constructor: " + struct_expr.def->name);
+
+							e.callable_params = &struct_expr.def->constructor->params;
+							expr.type = StructType(struct_expr.def);
+						},
+						[&](auto&)
+						{
+							throw ParseError("Expression is not callable");
+						},
+					};
+				},
 			};
 
-			vector<Parameter> &params = e.callee_params();
-			if(e.args.size() > params.size())
+			if(e.args.size() > e.callable_params->size())
 				throw ParseError("Too many arguments");
 
 			unordered_set<size_t> assigned_params;
@@ -3874,7 +3823,7 @@ void typecheck(Expr &expr, Module &mod)
 				// Find the corresponding parameter depending on whether the argument is named or not
 				if(arg.name)
 				{
-					if(optional<size_t> param_idx_opt = find_by_name(params, *arg.name))
+					if(optional<size_t> param_idx_opt = find_by_name(*e.callable_params, *arg.name))
 					{
 						arg.param_idx = *param_idx_opt;
 						if(*param_idx_opt != i)
@@ -3895,26 +3844,19 @@ void typecheck(Expr &expr, Module &mod)
 				if(!res.second)
 					throw ParseError("Multiple arguments for same parameter");
 
-				Parameter &param = params[*arg.param_idx];
+				Parameter &param = e.callable_params->at(*arg.param_idx);
 				if(!is_expr_assignable(param.type, *arg.expr))
 					throw ParseError("Procedure/struct argument has invalid type");
 			}
 
-			for(size_t param_idx = 0; param_idx < params.size(); ++param_idx)
+			for(size_t param_idx = 0; param_idx < e.callable_params->size(); ++param_idx)
 			{
 				if(!assigned_params.contains(param_idx))
 				{
-					if(!params[param_idx].default_value)
+					if(!e.callable_params->at(param_idx).default_value)
 						throw ParseError("Missing value for procedure/struct argument in call");
 				}
 			}
-
-			e.callable | match
-			{
-				[&](ProcDef *proc) { expr.type = clone(proc->type.ret); },
-				[&](StructDef *struct_) { expr.type = StructType(struct_); },
-				[](UnresolvedId) { assert(!"typecheck(Expr): UnresolvedId"); },
-			};
 		},
 		[&](SizeOfExpr&)
 		{
@@ -3936,18 +3878,21 @@ void add_size_to_alloc_call(Expr &addr, Expr &&size_expr)
 {
 	if(CallExpr *addr_call = std::get_if<CallExpr>(&addr))
 	{
-		vector<Parameter> const &params = addr_call->callee_params();
-		if(
-			addr_call->args.size() == 0 &&
-			params.size() == 1 &&
-			equiv(params[0].type, Type(BuiltinType::USIZE))
-		)
+		if(ProcExpr *proc_expr = std::get_if<ProcExpr>(addr_call->callable.get()))
 		{
-			addr_call->args.push_back(Argument{
-				.expr = std::make_unique<Expr>(std::move(size_expr)),
-				.name = nullopt,
-				.param_idx = 0,
-			});
+			vector<Parameter> const &params = proc_expr->def->type.params;
+			if(
+				addr_call->args.size() == 0 &&
+				params.size() == 1 &&
+				equiv(params[0].type, Type(BuiltinType::USIZE))
+			)
+			{
+				addr_call->args.push_back(Argument{
+					.expr = std::make_unique<Expr>(std::move(size_expr)),
+					.name = nullopt,
+					.param_idx = 0,
+				});
+			}
 		}
 	}
 }
@@ -4489,7 +4434,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](CallExpr const &e)
 		{
-			vector<Parameter> const &params = e.callee_params();
+			vector<Parameter> const &params = *e.callable_params;
 
 			// Evaluate arguments in the order they were provided
 			vector<string> arg_vals(params.size());
@@ -4510,7 +4455,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 			}
 
 			// Create a variable to store the procedure's return value
-			Type ret_type = e.callee_return_type();
+			Type const &ret_type = *expr.type;
 			string result_var;
 			if(!equiv(ret_type, BuiltinType::UNIT) && need_result)
 			{
@@ -4519,7 +4464,8 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 			}
 
 			// Make the call
-			backend << callee_name(e.callable) << "(";
+			string callable_val = generate_c(*e.callable, backend);
+			backend << callable_val << "(";
 			backend << RangeFmt(arg_vals, ", ", [&](auto &arg_val) { backend << arg_val; });
 			backend << ");" << LineEnd;
 
