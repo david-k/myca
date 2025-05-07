@@ -1,0 +1,75 @@
+/*struct M:?mut Slice'T
+{
+	ptr: [^]M T,
+	length: usize,
+}*/
+
+
+struct Array'T
+{
+	ptr: [^]mut T,
+	length: usize,
+	capacity: usize,
+}
+
+// &own is essentially equivalent to an r-value reference in C++
+/*proc Array.add(self &mut, val: &own T)
+{
+	self.ptr[self.length] = val;
+	self.length += 1;
+}*/
+
+
+typealias Arr = Array'(i32);
+
+proc main() -> i32
+{
+	let mut val = 3;
+	let arr = Arr(
+		.ptr = &mut val as [^]mut i32,
+		.length = 1,
+		.capacity = 1,
+	);
+
+	let arrb: Array'(i32) = arr;
+
+	let p = arrb.ptr;
+
+	// []&mut T == ?mut Slice'T
+
+	//let a: []mut i32;
+	//let b: []i32 = a;
+
+	return foo();
+}
+
+
+
+
+proc foo() -> i32
+{
+	let bv = Vec2'bool(true, false);
+
+	let vec = Vec2i(1, 2);
+
+	let player = Player'i32(
+		.pos = vec
+	);
+
+	let v = player.pos;
+	return v.y;
+}
+
+struct Vec2'S
+{
+	x: S,
+	y: S,
+}
+
+struct Player'T
+{
+	pos: Vec2'T,
+	health: i32 = 100,
+}
+
+typealias Vec2i = Vec2'i32;

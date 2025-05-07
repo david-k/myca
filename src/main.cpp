@@ -522,7 +522,9 @@ struct VarDef;
 struct ProcDef;
 struct ProcTypeDef;
 struct StructDef;
+struct StructInstanceDef;
 struct AliasDef;
+class Scope;
 
 
 //--------------------------------------------------------------------
@@ -543,20 +545,25 @@ enum BuiltinType
 	USIZE,
 };
 
-using Type = variant<
-	BuiltinType,
-	struct UnresolvedId,
-	struct VarType,
-	struct PointerType,
-	struct ManyPointerType,
-	struct StructType,
-	struct ProcType,
-	struct AliasType
->;
+class Type;
 
-struct UnresolvedId
+struct TypeArgList
+{
+	vector<Type> args;
+
+	size_t size() const;
+	vector<Type>::iterator begin();
+	vector<Type>::iterator end();
+
+	vector<Type>::const_iterator begin() const;
+	vector<Type>::const_iterator end() const;
+};
+
+struct UnresolvedType
 {
 	QName qname;
+	TypeArgList args;
+	Scope *scope;
 };
 
 struct VarType
@@ -599,6 +606,7 @@ struct ManyPointerType
 struct StructType
 {
 	StructDef *def;
+	TypeArgList type_args;
 };
 
 struct ProcType
@@ -615,20 +623,86 @@ struct AliasType
 };
 
 
+class Type : public variant
+<
+	BuiltinType,
+	struct UnresolvedType,
+	struct VarType,
+	struct PointerType,
+	struct ManyPointerType,
+	struct StructType,
+	struct ProcType,
+	struct AliasType
+>
+{
+public:
+	using variant::variant;
+};
+
+TypeArgList clone(TypeArgList const &list);
+bool equiv(Type const &a, Type const &b);
+
 Type clone(Type const &type)
 {
 	return type | match
 	{
 		[&](BuiltinType const &t) -> Type { return t; },
 		[&](VarType const &t) -> Type { return t; },
-		[&](UnresolvedId const &t) -> Type { return t; },
+		[&](UnresolvedType const &t) -> Type { return UnresolvedType(t.qname, clone(t.args), t.scope); },
 		[&](PointerType const &t) -> Type { return PointerType(clone(*t.target_type), t.mutability); },
 		[&](ManyPointerType const &t) -> Type { return ManyPointerType(clone(*t.element_type), t.mutability); },
-		[&](StructType const &t) -> Type { return t; },
+		[&](StructType const &t) -> Type { return StructType(t.def, clone(t.type_args)); },
 		[&](ProcType const &t) -> Type { return t; },
 		[&](AliasType const &t) -> Type { return AliasType(t.def); },
 	};
 }
+
+
+bool operator == (TypeArgList const &a, TypeArgList const &b)
+{
+	if(a.args.size() != b.args.size())
+		return false;
+
+	for(size_t i = 0; i < a.args.size(); ++i)
+	{
+		if(not equiv(a.args[i], b.args[i]))
+			return false;
+	}
+
+	return true;
+}
+
+namespace std
+{
+	template<>
+	struct hash<::TypeArgList>
+	{
+		size_t operator () (::TypeArgList const &list) const
+		{
+			size_t h = 0;
+			for(::Type const &t: list.args)
+				::combine_hashes(h, ::compute_hash(t));
+
+			return h;
+		}
+	};
+}
+
+TypeArgList clone(TypeArgList const &list)
+{
+	TypeArgList result;
+	for(Type const &arg: list.args)
+		result.args.push_back(clone(arg));
+
+	return result;
+}
+
+
+size_t TypeArgList::size() const { return args.size(); }
+vector<Type>::iterator TypeArgList::begin() { return args.begin(); }
+vector<Type>::iterator TypeArgList::end() { return args.end(); }
+vector<Type>::const_iterator TypeArgList::begin() const { return args.begin(); }
+vector<Type>::const_iterator TypeArgList::end() const { return args.end(); }
 
 
 //--------------------------------------------------------------------
@@ -637,6 +711,12 @@ Type clone(Type const &type)
 class Scope;
 class Expr;
 
+
+struct UnresolvedExpr
+{
+	QName qname;
+	TypeArgList args;
+};
 
 struct IntLiteralExpr { XInt64 value; };
 
@@ -655,7 +735,13 @@ struct StringLiteralExpr
 
 
 struct VarExpr { VarDef *var; };
-struct StructExpr { StructDef *def; };
+
+
+struct TypeExpr
+{
+	Type type;
+};
+
 struct ProcExpr { ProcDef *def; };
 
 
@@ -755,50 +841,11 @@ struct AsExpr
 };
 
 
-using Callable = variant<ProcDef*, StructDef*, UnresolvedId>;
-
 struct Parameter
 {
 	string name;
 	Type type;
-	Expr *default_value;
-	// REVISIT: This is a bit hacky. I think it would be cleaner to use an arena allocator for
-	//          expressions so we don't need to care about lifetimes.
-	bool owned;
-
-	Parameter() :
-		default_value(nullptr),
-		owned(false) {}
-
-	Parameter(string const &name, Type &&type, NullableOwnPtr<Expr> default_value) :
-		name(name),
-		type(std::move(type)),
-		default_value(default_value.release()),
-		owned(true) {}
-
-	Parameter(string const &name, Type &&type, Expr *default_value) :
-		name(name),
-		type(std::move(type)),
-		default_value(default_value),
-		owned(false) {}
-
-	Parameter(Parameter &&rhs) :
-		name(std::move(rhs.name)),
-		type(std::move(rhs.type)),
-		default_value(rhs.default_value),
-		owned(rhs.owned)
-	{
-		rhs.default_value = nullptr;
-		rhs.owned = false;
-	}
-
-	Parameter(Parameter const &rhs) :
-		name(rhs.name),
-		type(clone(rhs.type)),
-		default_value(rhs.default_value),
-		owned(false) {}
-
-	~Parameter();
+	NullableOwnPtr<Expr> default_value;
 };
 
 struct Argument
@@ -839,9 +886,9 @@ class Expr : public variant
 	IntLiteralExpr,
 	BoolLiteralExpr,
 	StringLiteralExpr,
-	UnresolvedId,
+	UnresolvedExpr,
 	VarExpr,
-	StructExpr,
+	TypeExpr,
 	ProcExpr,
 	UnaryExpr,
 	BinaryExpr,
@@ -857,19 +904,131 @@ class Expr : public variant
 > {
 public:
 	template<typename T>
-	Expr(T &&t, SourceSpan span) :
+	Expr(T &&t, SourceSpan span, optional<Type> &&type = nullopt) :
 		variant(std::forward<T>(t)),
-		span(span) {}
+		span(span),
+		type(std::move(type)) {}
 
 	SourceSpan span;
 	optional<Type> type;
+
+	template<typename T>
+	Expr clone_as(T &&t) const
+	{
+		optional<Type> cloned_type;
+		if(type)
+			cloned_type = clone(*type);
+
+		return Expr(std::forward<T>(t), span, std::move(cloned_type));
+	}
 };
 
 
-Parameter::~Parameter()
+Expr clone(Expr const &expr);
+
+Parameter clone(Parameter const &p)
 {
-	if(owned)
-		delete default_value;
+	NullableOwnPtr<Expr> default_val;
+	if(p.default_value)
+		default_val = std::make_unique<Expr>(clone(*p.default_value));
+
+	return Parameter{
+		.name = p.name,
+		.type = clone(p.type),
+		.default_value = std::move(default_val),
+	};
+}
+
+
+Expr clone(Expr const &expr)
+{
+	return expr | match
+	{
+		[&](IntLiteralExpr const &e)
+		{
+			return expr.clone_as(e);
+		},
+		[&](BoolLiteralExpr const &e)
+		{
+			return expr.clone_as(e);
+		},
+		[&](StringLiteralExpr const &e)
+		{
+			return expr.clone_as(e);
+		},
+		[&](UnresolvedExpr const &e)
+		{
+			return expr.clone_as(UnresolvedExpr(e.qname, clone(e.args)));
+		},
+		[&](VarExpr const &e)
+		{
+			return expr.clone_as(e);
+		},
+		[&](TypeExpr const &e)
+		{
+			return expr.clone_as(TypeExpr(clone(e.type)));
+		},
+		[&](ProcExpr const &e)
+		{
+			return expr.clone_as(e);
+		},
+		[&](UnaryExpr const &e)
+		{
+			return expr.clone_as(UnaryExpr(clone(*e.sub), e.op));
+		},
+		[&](BinaryExpr const &e)
+		{
+			return expr.clone_as(BinaryExpr(clone(*e.left), clone(*e.right), e.op));
+		},
+		[&](AddressOfExpr const &e)
+		{
+			return expr.clone_as(AddressOfExpr(clone(*e.object_expr), e.mutability));
+		},
+		[&](DerefExpr const &e)
+		{
+			return expr.clone_as(DerefExpr(clone(*e.ptr_expr)));
+		},
+		[&](IndexExpr const &e)
+		{
+			return expr.clone_as(IndexExpr(clone(*e.ptr_expr), clone(*e.idx_expr)));
+		},
+		[&](MemberAccessExpr const &e)
+		{
+			return expr.clone_as(MemberAccessExpr(clone(*e.object), e.member));
+		},
+		[&](AssignmentExpr const &e)
+		{
+			return expr.clone_as(IndexExpr(clone(*e.lhs), clone(*e.rhs)));
+		},
+		[&](AsExpr const &e)
+		{
+			return expr.clone_as(AsExpr(clone(*e.src_expr), clone(e.target_type)));
+		},
+		[&](CallExpr const &e)
+		{
+			vector<Argument> args;
+			for(Argument const &a: e.args)
+			{
+				args.push_back(Argument{
+					.expr = std::make_unique<Expr>(clone(*a.expr)),
+					.name = a.name,
+					.param_idx = a.param_idx,
+				});
+			}
+
+			CallExpr cloned(clone(*e.callable), std::move(args));
+			cloned.callable_params = e.callable_params;
+			return expr.clone_as(std::move(cloned));
+		},
+		[&](SizeOfExpr const &e)
+		{
+			return expr.clone_as(SizeOfExpr(clone(e.type)));
+		},
+		[&](MakeExpr const &e)
+		{
+			return expr.clone_as(MakeExpr(std::make_unique<Expr>(clone(*e.init)), std::make_unique<Expr>(clone(*e.addr))));
+		},
+	};
 }
 
 
@@ -1040,8 +1199,12 @@ struct ProcTypeDef
 
 ProcTypeDef clone(ProcTypeDef const &proc)
 {
+	vector<Parameter> params;
+	for(Parameter const &p: proc.params)
+		params.push_back(clone(p));
+
 	return ProcTypeDef{
-		.params = proc.params,
+		.params = std::move(params),
 		.ret = clone(proc.ret),
 	};
 }
@@ -1069,7 +1232,6 @@ namespace std
 	};
 }
 
-bool equiv(Type const &a, Type const &b);
 
 struct ProcTypeEquiv
 {
@@ -1080,8 +1242,8 @@ struct ProcTypeEquiv
 
 		for(size_t i = 0; i < a.params.size(); ++i)
 		{
-			Parameter const pa = a.params[i];
-			Parameter const pb = b.params[i];
+			Parameter const &pa = a.params[i];
+			Parameter const &pb = b.params[i];
 
 			if(pa.name != pb.name)
 				return false;
@@ -1122,11 +1284,6 @@ public:
 	using variant::variant;
 };
 
-struct Constructor
-{
-	vector<Parameter> params;
-};
-
 struct MemoryLayout
 {
 	size_t size;
@@ -1164,14 +1321,41 @@ struct ExtensionOf { StructDef *struct_; };
 struct NoParent {};
 using ParentRelation = variant<NoParent, CaseMemberOf, ExtensionOf>;
 
+
+
+struct StructInstanceDef
+{
+	struct StructDef *def;
+	TypeArgList type_args;
+	unordered_map<TypeVarDef*, Type> type_env;
+	optional<vector<Parameter>> constructor_params;
+	vector<Member> members;
+	bool is_concrete;
+
+	bool sema_done = false;
+	// Available after semantic analysis (i.e., when `sema_done == true`)
+	optional<MemoryLayout> own_layout = nullopt; // does not include `parent`
+	optional<BuiltinType> discriminator_type = nullopt; // if `num_cases > 0`
+	optional<CasesLayout> cases_layout = nullopt; // if `num_cases > 0`
+
+	Range<Member const*> initial_var_members() const;
+	Range<Member const*> case_members() const;
+	Range<Member const*> trailing_var_members() const;
+};
+
+Type eval_type(Type &type, unordered_map<TypeVarDef*, Type> const &type_env, class Module &mod);
+bool is_concrete(Type &type, class Module &mod);
+
 struct StructDef
 {
 	string name;
-	vector<TypeVarDef*> type_params;
 	vector<Member> members;
-	Scope *scope;
+	vector<TypeVarDef*> type_params;
+	Scope *scope; // Contains the struct's type and member variables
+	optional<vector<Parameter>> constructor_params; // Available iff the struct does not contain any `case`s
 
-	ParentRelation parent = {};
+	ParentRelation parent{};
+	unordered_map<TypeArgList, StructInstanceDef> instances{};
 
 	size_t num_initial_var_members = 0;
 	size_t num_cases = 0;
@@ -1229,16 +1413,12 @@ struct StructDef
 		return qname + name;
 	}
 
-	// Available iff the struct does not contain any `case`s
-	optional<Constructor> constructor;
-
-	bool sema_done = false;
-	// Available after semantic analysis (i.e., when `sema_done == true`)
-	bool contains_never = false;
-	optional<MemoryLayout> own_layout = nullopt; // does not include `parent`
-	optional<BuiltinType> discriminator_type = nullopt; // if `num_cases > 0`
-	optional<CasesLayout> cases_layout = nullopt; // if `num_cases > 0`
+	StructInstanceDef* get_instance(TypeArgList const &type_args);
 };
+
+Range<Member const*> StructInstanceDef::initial_var_members() const { return {members.data(), members.data() + def->num_initial_var_members}; }
+Range<Member const*> StructInstanceDef::case_members() const { return {members.data() + def->num_initial_var_members, members.data() + def->num_initial_var_members + def->num_cases}; }
+Range<Member const*> StructInstanceDef::trailing_var_members() const { return {members.data() + def->num_initial_var_members + def->num_cases, members.data() + members.size()}; }
 
 
 struct AliasDef
@@ -1353,10 +1533,10 @@ public:
 
 		auto res = m_defs.insert({name, StructDef{
 			.name = name,
-			.type_params = {},
 			.members = {},
+			.type_params = {},
 			.scope = scope,
-			.constructor = {},
+			.constructor_params = nullopt,
 		}});
 
 		StructDef *struct_ = &std::get<StructDef>(res.first->second);
@@ -1409,7 +1589,7 @@ public:
 			{
 				return alias.type | match
 				{
-					[&](StructType t) { return t.def->scope->try_lookup_item(begin, end, false); },
+					[&](StructType const &t) { return t.def->scope->try_lookup_item(begin, end, false); },
 					[](auto const&) -> ItemDef* { return nullptr; },
 				};
 			},
@@ -1432,7 +1612,7 @@ public:
 				Type const *stripped_type = strip_alias(alias_type);
 				return *stripped_type | match
 				{
-					[&](StructType t) -> variant<NotFound, ProcDef*, StructDef*>{ return t.def; },
+					[&](StructType const &t) -> variant<NotFound, ProcDef*, StructDef*>{ return t.def; },
 					[](auto const&) -> variant<NotFound, ProcDef*, StructDef*> { return NotFound(); },
 				};
 			},
@@ -1555,6 +1735,88 @@ private:
 };
 
 
+
+unordered_map<TypeVarDef*, Type> create_type_env(StructDef *def, TypeArgList &&type_args)
+{
+	assert(type_args.size() == def->type_params.size());
+
+	unordered_map<TypeVarDef*, Type> type_env;
+	for(size_t i = 0; i < def->type_params.size(); ++i)
+	{
+		TypeVarDef *tparam = def->type_params[i];
+		type_env[tparam] = std::move(type_args.args[i]);
+	}
+
+	return type_env;
+}
+
+StructInstanceDef* StructDef::get_instance(TypeArgList const &type_args)
+{
+	assert(type_args.size() == type_params.size());
+
+	auto it = instances.find(type_args);
+	if(it != instances.end())
+		return &it->second;
+
+	StructInstanceDef instance;
+	instance.def = this;
+	instance.type_args = clone(type_args);
+	instance.is_concrete = true;
+
+	for(Type &type: instance.type_args)
+	{
+		if(not is_concrete(type, *scope->mod()))
+		{
+			instance.is_concrete = false;
+			break;
+		}
+	}
+
+	instance.type_env = create_type_env(this, clone(type_args));
+
+	if(constructor_params)
+	{
+		instance.constructor_params = vector<Parameter>();
+		for(Parameter &p: *constructor_params)
+		{
+			Parameter inst_param = clone(p);
+			inst_param.type = eval_type(p.type, instance.type_env, *scope->mod());
+			instance.constructor_params->push_back(std::move(inst_param));
+		}
+	}
+
+	for(Member &m: members)
+	{
+		m | match
+		{
+			[&](Parameter &p)
+			{
+				Parameter inst_param = clone(p);
+				inst_param.type = eval_type(p.type, instance.type_env, *scope->mod());
+				instance.members.push_back(std::move(inst_param));
+			},
+			[&](StructDef *case_member)
+			{
+				instance.members.push_back(case_member);
+			},
+		};
+	}
+
+	auto res = instances.emplace(clone(type_args), std::move(instance));
+	return &res.first->second;
+}
+
+
+vector<Parameter> clone(vector<Parameter> const &params)
+{
+	vector<Parameter> cloned;
+	for(Parameter const &p: params)
+		cloned.push_back(clone(p));
+
+	return cloned;
+}
+
+
 //==============================================================================
 // Printing
 //==============================================================================
@@ -1594,7 +1856,12 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 	{
 		[&](BuiltinType const &t) { os << str(t); },
 		[&](VarType const &t) { os << t.var->name; },
-		[&](UnresolvedId const &t) { os << RangeFmt(t.qname, "."); },
+		[&](UnresolvedType const &t)
+		{
+			os << RangeFmt(t.qname, ".");
+			if(t.args.args.size())
+				os << "'(" << RangeFmt(t.args.args, ", ") << ")";
+		},
 		[&](PointerType const &t)
 		{
 			os << "^";
@@ -1602,8 +1869,19 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 				os << "mut ";
 			os << *t.target_type;
 		},
-		[&](ManyPointerType const &t) { os << "[^]" << *t.element_type; },
-		[&](StructType const &t) { os << t.def->get_qname(); },
+		[&](ManyPointerType const &t)
+		{
+			os << "[^]";
+			if(t.is_mutable())
+				os << "mut ";
+			os << *t.element_type;
+		},
+		[&](StructType const &t)
+		{
+			os << t.def->get_qname();
+			if(t.type_args.args.size())
+				os << "'(" << RangeFmt(t.type_args.args, ", ") << ")";
+		},
 		[&](ProcType const &t)
 		{
 			os << "proc(" << RangeFmt(t.def->params, ", ", [&](Parameter const  &p)
@@ -1664,17 +1942,19 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 				case StringLiteralType::C: os << '"' << e.value << '"'; break;
 			}
 		},
-		[&](UnresolvedId const &e)
+		[&](UnresolvedExpr const &e)
 		{
 			os << RangeFmt(e.qname, ".");
+			if(e.args.args.size())
+				os << "'(" << RangeFmt(e.args.args, ", ") << ")";
 		},
 		[&](VarExpr const &e)
 		{
 			os << e.var->name;
 		},
-		[&](StructExpr const &e)
+		[&](TypeExpr const &e)
 		{
-			os << e.def->name;
+			os << e.type;
 		},
 		[&](ProcExpr const &e)
 		{
@@ -1966,7 +2246,7 @@ void print(TopLevelItem const &item, std::ostream &os, int indent, PrintListener
 		},
 		[&](AliasDef *def)
 		{
-			os << "typealias " << def->name << " " << def->type;
+			os << "typealias " << def->name << " = " << def->type << ";";
 		},
 	};
 }
@@ -2073,6 +2353,27 @@ inline optional<Token> try_consume(Parser &parser, Lexeme kind)
 //--------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------
+Type parse_type(Parser &parser, Module &mod);
+
+TypeArgList parse_type_arg_list(Parser &parser, Module &mod)
+{
+	TypeArgList arg_list;
+	if(try_consume(parser, Lexeme::LEFT_PAREN))
+	{
+		while(parser.peek() != Lexeme::RIGHT_PAREN)
+		{
+			arg_list.args.push_back(parse_type(parser, mod));
+			if(parser.peek() != Lexeme::RIGHT_PAREN)
+				consume(parser, Lexeme::COMMA);
+		}
+		consume(parser, Lexeme::RIGHT_PAREN);
+	}
+	else
+		arg_list.args.push_back(parse_type(parser, mod));
+
+	return arg_list;
+}
+
 Type parse_type(Parser &parser, Module &mod)
 {
 	require_not_done(parser, "type");
@@ -2110,13 +2411,11 @@ Type parse_type(Parser &parser, Module &mod)
 					return VarType(tvar);
 			}
 
-			if(StructDef *def = mod.scope()->try_lookup_def<StructDef>(qname))
-				return StructType(def);
+			UnresolvedType type(qname, {}, mod.scope());
+			if(try_consume(parser, Lexeme::SINGLE_QUOTE))
+				type.args = parse_type_arg_list(parser, mod);
 
-			if(AliasDef *def = mod.scope()->try_lookup_def<AliasDef>(qname))
-				return AliasType(def);
-
-			return UnresolvedId(qname);
+			return type;
 		}
 
 		case Lexeme::CIRCUMFLEX:
@@ -2290,7 +2589,11 @@ Expr parse_prefix_expr(Parser &parser, Module &mod)
 				return expr;
 			}
 
-			return with_location(UnresolvedId(std::move(qname)));
+			UnresolvedExpr expr(std::move(qname), {});
+			if(try_consume(parser, Lexeme::SINGLE_QUOTE))
+				expr.args = parse_type_arg_list(parser, mod);
+
+			return with_location(std::move(expr));
 		}
 
 		case Lexeme::LEFT_PAREN:
@@ -2641,13 +2944,13 @@ void gather_initial_params(StructDef *struct_, vector<Parameter> &result)
 	};
 
 	for(Member const &m: struct_->initial_var_members())
-		result.push_back(std::get<Parameter>(m));
+		result.push_back(clone(std::get<Parameter>(m)));
 }
 
 void gather_trailing_params(StructDef *struct_, vector<Parameter> &result)
 {
 	for(Member const &m: struct_->trailing_var_members())
-		result.push_back(std::get<Parameter>(m));
+		result.push_back(clone(std::get<Parameter>(m)));
 
 	struct_->parent | match
 	{
@@ -2661,9 +2964,9 @@ void init_constructor_params(StructDef *struct_)
 {
 	if(struct_->num_cases == 0)
 	{
-		struct_->constructor = Constructor();
-		gather_initial_params(struct_, struct_->constructor->params);
-		gather_trailing_params(struct_, struct_->constructor->params);
+		struct_->constructor_params = vector<Parameter>();
+		gather_initial_params(struct_, *struct_->constructor_params);
+		gather_trailing_params(struct_, *struct_->constructor_params);
 	}
 	else
 	{
@@ -2911,6 +3214,15 @@ Type const* strip_alias(Type const &type)
 	return stripped;
 }
 
+Type* strip_alias(Type &type)
+{
+	Type *stripped = &type;
+	while(AliasType *alias = std::get_if<AliasType>(stripped))
+		stripped = &alias->def->type;
+
+	return stripped;
+}
+
 Type strip_alias_rec(Type const &type)
 {
 	return *strip_alias(type) | match
@@ -2928,7 +3240,7 @@ Type strip_alias_rec(Type const &type)
 		[&](StructType const&) { return clone(type); },
 		[&](ProcType const&) { return clone(type); },
 		[&](AliasType const&) -> Type { UNREACHABLE; },
-		[&](UnresolvedId const&) -> Type { assert(!"strip_alias_rec: UnresolvedId"); },
+		[&](UnresolvedType const&) -> Type { assert(!"strip_alias_rec: UnresolvedType"); },
 	};
 }
 
@@ -2967,7 +3279,12 @@ bool equiv(Type const &a, Type const &b)
 		[&](StructType const &ta)
 		{
 			if(StructType const *tb = std::get_if<StructType>(strip_alias(b)))
-				return ta.def == tb->def;
+			{
+				if(ta.def != tb->def)
+					return false;
+
+				return ta.type_args == tb->type_args;
+			}
 
 			return false;
 		},
@@ -2979,7 +3296,7 @@ bool equiv(Type const &a, Type const &b)
 			return false;
 		},
 		[&](AliasType const&) -> bool { UNREACHABLE; },
-		[&](UnresolvedId const&) -> bool { assert(!"equiv: UnresolvedId"); },
+		[&](UnresolvedType const&) -> bool { assert(!"equiv: UnresolvedType"); },
 	};
 }
 
@@ -3022,13 +3339,14 @@ namespace std
 				[&](::StructType const &t)
 				{
 					::combine_hashes(h, ::compute_hash(t.def));
+					::combine_hashes(h, ::compute_hash(t.type_args));
 				},
 				[&](::ProcType const &t)
 				{
 					::combine_hashes(h, ::compute_hash(*t.def));
 				},
 				[&](::AliasType const&) { UNREACHABLE; },
-				[&](::UnresolvedId const&) { assert(!"hash<Type>: UnresolvedId"); },
+				[&](::UnresolvedType const&) { assert(!"hash<Type>: UnresolvedType"); },
 			};
 
 			return h;
@@ -3036,17 +3354,41 @@ namespace std
 	};
 }
 
-bool is_struct_assignable(StructDef *dest, StructDef *src)
+bool equiv_type_env(
+	unordered_map<TypeVarDef*, Type> const &a,
+	unordered_map<TypeVarDef*, Type> const &b
+)
 {
-	if(src == dest)
+	if(a.size() != b.size())
+		return false;
+
+	for(auto &[var, type]: a)
+	{
+		auto it = b.find(var);
+		if(it == b.end() || not equiv(it->second, type))
+			return false;
+	}
+
+	return true;
+}
+
+bool is_struct_assignable(StructType const &dest, StructType const &src)
+{
+	if(not (dest.type_args == src.type_args))
+		return false;
+
+	StructDef *dest_def = dest.def;
+	StructDef *src_def = src.def;
+
+	if(src_def == dest_def)
 		return true;
 
-	while(src)
+	while(src_def)
 	{
-		if(src->is_case_member_of(dest))
+		if(src_def->is_case_member_of(dest_def))
 			return true;
 
-		src = src->try_get_parent();
+		src_def = src_def->try_get_parent();
 	}
 
 	return false;
@@ -3093,13 +3435,13 @@ bool is_type_assignable(Type const &dest, Type const &src)
 		[&](StructType const &src_t)
 		{
 			if(StructType const *dest_struct_type = std::get_if<StructType>(strip_alias(dest)))
-				return is_struct_assignable(dest_struct_type->def, src_t.def);
+				return is_struct_assignable(*dest_struct_type, src_t);
 
 			return false;
 		},
 		[&](ProcType const&) -> bool { assert(!"is_type_assignable: ProcType: TODO"); },
 		[&](AliasType const&) -> bool { UNREACHABLE; },
-		[&](UnresolvedId const&) -> bool { assert(!"is_type_assignable: UnresolvedId"); },
+		[&](UnresolvedType const&) -> bool { assert(!"is_type_assignable: UnresolvedType"); },
 	};
 }
 
@@ -3117,37 +3459,7 @@ bool is_expr_assignable(Type const &dest, Expr const &src)
 }
 
 
-bool is_instantiable(Type const &type)
-{
-	return *strip_alias(type) | match
-	{
-		[&](BuiltinType const &t)
-		{
-			return t != BuiltinType::NEVER;
-		},
-		[&](VarType const&)
-		{
-			return true;
-		},
-		[&](PointerType const&)
-		{
-			return true;
-		},
-		[&](ManyPointerType const&)
-		{
-			return true;
-		},
-		[&](StructType const &t)
-		{
-			return !t.def->contains_never;
-		},
-		[&](ProcType const&) { return false; },
-		[&](AliasType const&) -> bool { UNREACHABLE; },
-		[&](UnresolvedId const&) -> bool { assert(!"is_instantiable: UnresolvedId"); },
-	};
-}
-
-MemoryLayout compute_own_layout(StructDef *struct_, unordered_set<StructDef*> &seen);
+MemoryLayout compute_own_layout(StructInstanceDef *struct_, unordered_set<StructDef*> &seen);
 
 MemoryLayout compute_layout(Type const &type, unordered_set<StructDef*> &seen)
 {
@@ -3168,45 +3480,61 @@ MemoryLayout compute_layout(Type const &type, unordered_set<StructDef*> &seen)
 		},
 		[&](StructType const &t)
 		{
-			return t.def->parent | match
+			StructDef *def = t.def;
+			while(def)
 			{
-				[&](NoParent)            { return compute_own_layout(t.def, seen); },
-				[&](CaseMemberOf parent) { return compute_layout(StructType(parent.struct_), seen); },
+				bool done = def->parent | match
+				{
+					[&](NoParent) { return true; },
+					[&](CaseMemberOf parent)
+					{
+						def = parent.struct_;
+						return false;
+					},
 
-				[&](ExtensionOf) -> MemoryLayout { assert(!"TODO: compute_layout(StructType): ExtensionOf"); },
-			};
+					[&](ExtensionOf) -> bool { assert(!"compute_layout(StructType): ExtensionOf: TODO"); },
+				};
+
+				if(done)
+					break;
+			}
+
+			return compute_own_layout(def->get_instance(t.type_args), seen);
 		},
 		[&](ProcType const&) -> MemoryLayout { assert(!"compute_layout: ProcType"); },
 		[&](AliasType const&) -> MemoryLayout { UNREACHABLE; },
-		[&](UnresolvedId const&) -> MemoryLayout { assert(!"compute_layout: UnresolvedId"); },
+		[&](UnresolvedType const&) -> MemoryLayout { assert(!"compute_layout: UnresolvedType"); },
 	};
 }
 
-MemoryLayout compute_own_layout(StructDef *struct_, unordered_set<StructDef*> &seen)
+MemoryLayout compute_own_layout(StructInstanceDef *struct_, unordered_set<StructDef*> &seen)
 {
 	if(struct_->sema_done)
 		return *struct_->own_layout;
 
-	if(!seen.insert(struct_).second)
+	// We do cycle detection on StructDefs and not on StructInstanceDefs. Not sure if this is
+	// necessary
+	if(!seen.insert(struct_->def).second)
 		throw ParseError("Cyclic type definition");
 
 	struct_->own_layout = MemoryLayout{};
 
 	// Reserve space for the discriminator
-	if(struct_->num_cases > 0)
+	if(struct_->def->num_cases > 0)
 	{
-		struct_->discriminator_type = smallest_int_type_for(XInt64(struct_->num_cases));
+		struct_->discriminator_type = smallest_int_type_for(XInt64(struct_->def->num_cases));
 		struct_->own_layout->extend(get_layout(*struct_->discriminator_type));
 	}
 
 	// Reserve space for initial variable members
 	size_t member_idx = 0;
-	for(;member_idx < struct_->members.size(); ++member_idx)
+	for(;member_idx < struct_->def->members.size(); ++member_idx)
 	{
-		Member &member = struct_->members[member_idx];
-		if(Parameter const *var_member = std::get_if<Parameter>(&member))
+		Member &member = struct_->def->members[member_idx];
+		if(Parameter *var_member = std::get_if<Parameter>(&member))
 		{
-			MemoryLayout var_layout = compute_layout(var_member->type, seen);
+			Type member_type = eval_type(var_member->type, struct_->type_env, *struct_->def->scope->mod());
+			MemoryLayout var_layout = compute_layout(member_type, seen);
 			struct_->own_layout->extend(var_layout);
 		}
 		else
@@ -3214,17 +3542,19 @@ MemoryLayout compute_own_layout(StructDef *struct_, unordered_set<StructDef*> &s
 	}
 
 	// Reserve space for case members
-	if(struct_->num_cases > 0)
+	if(struct_->def->num_cases > 0)
 	{
 		struct_->cases_layout = CasesLayout{};
 		struct_->cases_layout->start = struct_->own_layout->size;
 		MemoryLayout case_members_layout{};
-		for(;member_idx < struct_->members.size(); ++member_idx)
+		for(;member_idx < struct_->def->members.size(); ++member_idx)
 		{
-			Member &member = struct_->members[member_idx];
+			Member &member = struct_->def->members[member_idx];
 			if(StructDef **case_member = std::get_if<StructDef*>(&member))
 			{
-				MemoryLayout case_layout = compute_own_layout(*case_member, seen);
+				StructInstanceDef *case_instance = (*case_member)->get_instance(struct_->type_args);
+				MemoryLayout case_layout = compute_own_layout(case_instance, seen);
+
 				case_members_layout.size = std::max(case_members_layout.size, case_layout.size);
 				case_members_layout.alignment = std::max(case_members_layout.alignment, case_layout.alignment);
 			}
@@ -3237,12 +3567,13 @@ MemoryLayout compute_own_layout(StructDef *struct_, unordered_set<StructDef*> &s
 	}
 
 	// Reserve space for trailing variable members (same as for initial variable members above)
-	for(;member_idx < struct_->members.size(); ++member_idx)
+	for(;member_idx < struct_->def->members.size(); ++member_idx)
 	{
-		Member &member = struct_->members[member_idx];
-		if(Parameter const *var_member = std::get_if<Parameter>(&member))
+		Member &member = struct_->def->members[member_idx];
+		if(Parameter *var_member = std::get_if<Parameter>(&member))
 		{
-			MemoryLayout var_layout = compute_layout(var_member->type, seen);
+			Type member_type = eval_type(var_member->type, struct_->type_env, *struct_->def->scope->mod());
+			MemoryLayout var_layout = compute_layout(member_type, seen);
 			struct_->own_layout->extend(var_layout);
 		}
 		else {
@@ -3255,7 +3586,7 @@ MemoryLayout compute_own_layout(StructDef *struct_, unordered_set<StructDef*> &s
 }
 
 
-MemoryLayout compute_layout(Type const &type)
+MemoryLayout compute_layout(Type &type)
 {
 	unordered_set<StructDef*> seen;
 	return compute_layout(type, seen);
@@ -3267,8 +3598,14 @@ void compute_type_layouts(Scope *scope)
 	{
 		if(StructDef *struct_ = std::get_if<StructDef>(&item))
 		{
-			unordered_set<StructDef*> seen;
-			compute_own_layout(struct_, seen);
+			for(auto &[_, instance]: struct_->instances)
+			{
+				if(not instance.is_concrete)
+					continue;
+
+				unordered_set<StructDef*> seen;
+				compute_own_layout(&instance, seen);
+			}
 		}
 	}
 }
@@ -3281,7 +3618,52 @@ void compute_type_layouts(Module &mod)
 //--------------------------------------------------------------------
 // Resolve identifiers
 //--------------------------------------------------------------------
-void resolve_identifiers(Type &type, Scope *scope)
+void resolve_types(Type &type, Module &mod);
+
+bool is_concrete(Type &type, Module &mod)
+{
+	return type | match
+	{
+		[&](BuiltinType const&) { return true; },
+		[&](VarType const&) { return false; },
+		[&](UnresolvedType const&)
+		{
+			resolve_types(type, mod);
+			return is_concrete(type, mod);
+		},
+		[&](PointerType const &t)
+		{
+			return is_concrete(*t.target_type, mod);
+		},
+		[&](ManyPointerType const &t)
+		{
+			return is_concrete(*t.element_type, mod);
+		},
+		[&](StructType &t)
+		{
+			for(Type &arg: t.type_args)
+			{
+				if(not is_concrete(arg, mod))
+					return false;
+			}
+
+			return true;
+		},
+		[&](ProcType &t)
+		{
+			for(Parameter &p: t.def->params)
+			{
+				if(not is_concrete(p.type, mod))
+					return false;
+			}
+
+			return is_concrete(t.def->ret, mod);
+		},
+		[&](AliasType const &t) { return is_concrete(t.def->type, mod); },
+	};
+}
+
+void resolve_types(Type &type, Module &mod)
 {
 	type | match
 	{
@@ -3289,30 +3671,48 @@ void resolve_identifiers(Type &type, Scope *scope)
 		[&](VarType&) {},
 		[&](PointerType &t)
 		{
-			resolve_identifiers(*t.target_type, scope);
+			resolve_types(*t.target_type, mod);
 		},
 		[&](ManyPointerType &t)
 		{
-			resolve_identifiers(*t.element_type, scope);
+			resolve_types(*t.element_type, mod);
 		},
 		[&](StructType&) {},
 		[&](ProcType &t)
 		{
-			resolve_identifiers(t.def->ret, scope);
+			resolve_types(t.def->ret, mod);
 			for(Parameter &p: t.def->params)
-				resolve_identifiers(p.type, scope);
+				resolve_types(p.type, mod);
 
-			t.canonical_def = scope->mod()->canonicalize(clone(*t.def));
+			t.canonical_def = mod.canonicalize(clone(*t.def));
 		},
 		[&](AliasType&) {},
-		[&](UnresolvedId &t)
+		[&](UnresolvedType &t)
 		{
-			if(StructDef *def = scope->try_lookup_def<StructDef>(t.qname))
-				type = StructType(def);
-			else if(AliasDef *def = scope->try_lookup_def<AliasDef>(t.qname))
-				type = AliasType(def);
-			else
+			ItemDef *item = t.scope->try_lookup_item(t.qname);
+			if(!item)
 				throw ParseError("Undeclared type: "s + str(RangeFmt(t.qname, ".")));
+
+			*item | match
+			{
+				[&](StructDef &def)
+				{
+					if(t.args.args.size() != def.type_params.size())
+						throw ParseError("Invalid number of type parameters for struct type");
+
+					type = StructType(&def, clone(t.args));
+				},
+				[&](AliasDef &def)
+				{
+					if(t.args.args.size())
+						throw ParseError("Type aliases cannot take type arguments");
+
+					type = AliasType(&def);
+				},
+				[&](ProcDef&) {
+					throw ParseError("Undeclared type: "s + str(RangeFmt(t.qname, ".")));
+				}
+			};
 		},
 	};
 }
@@ -3324,17 +3724,51 @@ void resolve_identifiers(Expr &expr, Scope *scope)
 		[&](IntLiteralExpr&) {},
 		[&](BoolLiteralExpr&) {},
 		[&](StringLiteralExpr&) {},
-		[&](UnresolvedId &e)
+		[&](UnresolvedExpr &e)
 		{
-			if(StructDef *def = scope->try_lookup_def<StructDef>(e.qname))
-				expr = Expr(StructExpr(def), expr.span);
-			else if(ProcDef *def = scope->try_lookup_def<ProcDef>(e.qname))
-				expr = Expr(ProcExpr(def), expr.span);
-			else
+			ItemDef *item = scope->try_lookup_item(e.qname);
+			if(!item)
 				throw ParseError("Undeclared identifier: "s + str(RangeFmt(e.qname, ".")));
+
+			*item | match
+			{
+				// CLEANUP: This is mostly duplicated from resolve_identifiers(Type const &type, ...)
+
+				[&](StructDef &def) {
+					if(e.args.args.size() != def.type_params.size())
+						throw ParseError("Invalid number of type params for struct constructor");
+
+					expr = Expr(TypeExpr(StructType(&def, clone(e.args))), expr.span);
+				},
+				[&](ProcDef &def) {
+					if(e.args.args.size())
+						throw ParseError("Invalid number of type params for procedure");
+
+					expr = Expr(ProcExpr(&def), expr.span);
+				},
+				[&](AliasDef &def)
+				{
+					if(e.args.args.size())
+						throw ParseError("Aliases cannot have type parameters");
+
+					resolve_types(def.type, *scope->mod());
+					*strip_alias(def.type) | match
+					{
+						[&](StructType &struct_type) {
+							expr = Expr(TypeExpr(StructType(struct_type.def, clone(struct_type.type_args))), expr.span);
+						},
+						[&](auto const &) {
+							throw ParseError("Identifier "s + str(RangeFmt(e.qname, ".")) + " does not denote a struct or procedure");
+						},
+					};
+				},
+			};
 		},
 		[&](VarExpr&) {},
-		[&](StructExpr&) {},
+		[&](TypeExpr &e)
+		{
+			resolve_types(e.type, *scope->mod());
+		},
 		[&](ProcExpr&) {},
 		[&](UnaryExpr &e)
 		{
@@ -3370,7 +3804,7 @@ void resolve_identifiers(Expr &expr, Scope *scope)
 		[&](AsExpr &e)
 		{
 			resolve_identifiers(*e.src_expr, scope);
-			resolve_identifiers(e.target_type, scope);
+			resolve_types(e.target_type, *scope->mod());
 		},
 		[&](CallExpr &e)
 		{
@@ -3380,7 +3814,7 @@ void resolve_identifiers(Expr &expr, Scope *scope)
 		},
 		[&](SizeOfExpr &e)
 		{
-			resolve_identifiers(e.type, scope);
+			resolve_types(e.type, *scope->mod());
 		},
 		[&](MakeExpr &e)
 		{
@@ -3429,7 +3863,7 @@ void resolve_identifiers(Stmt &stmt, Scope *scope)
 			resolve_identifiers(s.expr, scope);
 			for(MatchArm &arm: s.arms)
 			{
-				resolve_identifiers(arm.type, scope);
+				resolve_types(arm.type, *scope->mod());
 				resolve_identifiers(*arm.stmt, scope);
 			}
 		},
@@ -3440,7 +3874,7 @@ void resolve_identifiers(vector<Parameter> &params, Scope *scope)
 {
 	for(Parameter &param: params)
 	{
-		resolve_identifiers(param.type, scope);
+		resolve_types(param.type, *scope->mod());
 		if(param.default_value)
 			resolve_identifiers(*param.default_value, scope);
 	}
@@ -3456,7 +3890,7 @@ void resolve_identifiers(TopLevelItem item, Module &mod)
 			if(def->body)
 				resolve_identifiers(*def->body, def->scope);
 
-			resolve_identifiers(def->type.ret, def->scope->parent());
+			resolve_types(def->type.ret, mod);
 		},
 		[&](StructDef *def)
 		{
@@ -3466,7 +3900,7 @@ void resolve_identifiers(TopLevelItem item, Module &mod)
 				{
 					[&](Parameter &var_member)
 					{
-						resolve_identifiers(var_member.type, def->scope);
+						resolve_types(var_member.type, mod);
 						if(var_member.default_value)
 							resolve_identifiers(*var_member.default_value, def->scope);
 					},
@@ -3477,12 +3911,12 @@ void resolve_identifiers(TopLevelItem item, Module &mod)
 				};
 			}
 
-			if(def->constructor)
-				resolve_identifiers(def->constructor->params, def->scope);
+			if(def->constructor_params)
+				resolve_identifiers(*def->constructor_params, def->scope);
 		},
 		[&](AliasDef *def)
 		{
-			resolve_identifiers(def->type, mod.global());
+			resolve_types(def->type, mod);
 		},
 	};
 }
@@ -3492,7 +3926,7 @@ void resolve_identifiers(Scope *scope)
 	for(VarDef &var: scope->var_defs())
 	{
 		if(var.type)
-			resolve_identifiers(*var.type, scope);
+			resolve_types(*var.type, *scope->mod());
 	}
 
 	for(OwnPtr<Scope> &child: scope->children())
@@ -3588,13 +4022,13 @@ bool is_cast_ok(Type const &dest_type, Type const &src_type)
 		[&](StructType const &src_t)
 		{
 			if(StructType const *dest_t = std::get_if<StructType>(strip_alias(dest_type)))
-				return src_t.def->is_case_member_of(dest_t->def);
+				return is_struct_assignable(*dest_t, src_t);
 
 			return false;
 		},
 		[&](ProcType const&) -> bool { assert(!"is_cast_ok: ProcType: TODO"); },
 		[&](AliasType const&) -> bool { UNREACHABLE; },
-		[&](UnresolvedId const&) -> bool { assert(!"is_cast_ok: UnresolvedId"); },
+		[&](UnresolvedType const&) -> bool { assert(!"is_cast_ok: UnresolvedType"); }
 	};
 }
 
@@ -3607,20 +4041,61 @@ bool is_integral_type(Type const &type)
 	};
 }
 
-Parameter* find_var_member(StructDef *struct_, string const &field)
+Parameter* find_var_member(StructInstanceDef *struct_inst, string const &field)
 {
-	for(Member &m: struct_->members)
+	for(Member &m: struct_inst->members)
 	{
 		Parameter *param = std::get_if<Parameter>(&m);
 		if(param && param->name == field)
 			return param;
 	}
 
-	return struct_->parent | match
+	return struct_inst->def->parent | match
 	{
-		[&](CaseMemberOf parent) { return find_var_member(parent.struct_, field); },
-		[&](ExtensionOf parent) { return find_var_member(parent.struct_, field); },
+		[&](CaseMemberOf parent) { return find_var_member(parent.struct_->get_instance(struct_inst->type_args), field); },
+		[&](ExtensionOf parent) { return find_var_member(parent.struct_->get_instance(struct_inst->type_args), field); },
 		[&](NoParent) -> Parameter* { return nullptr; },
+	};
+}
+
+Type eval_type(Type &type, unordered_map<TypeVarDef*, Type> const &type_env, Module &mod)
+{
+	return type | match
+	{
+		[&](BuiltinType const&) { return clone(type); },
+		[&](VarType const &t)
+		{
+			return clone(type_env.at(t.var));
+		},
+		[&](PointerType const &t)
+		{
+			return Type(PointerType(eval_type(*t.target_type, type_env, mod), t.mutability));
+		},
+		[&](ManyPointerType const &t)
+		{
+			return Type(ManyPointerType(eval_type(*t.element_type, type_env, mod), t.mutability));
+		},
+		[&](StructType const &t)
+		{
+			TypeArgList args = clone(t.type_args);
+			for(Type &arg: args)
+				arg = eval_type(arg, type_env, mod);
+
+			return Type(StructType(t.def, std::move(args)));
+		},
+		[&](ProcType const&) -> Type
+		{
+			assert(!"eval_type: ProcType: TODO");
+		},
+		[&](AliasType const &t) -> Type
+		{
+			return eval_type(t.def->type, type_env, mod);
+		},
+		[&](UnresolvedType const&)
+		{
+			resolve_types(type, mod);
+			return eval_type(type, type_env, mod);
+		},
 	};
 }
 
@@ -3647,15 +4122,15 @@ void typecheck(Expr &expr, Module &mod)
 					break;
 			}
 		},
-		[&](UnresolvedId&) { assert(!"typecheck: UnresolvedId"); },
+		[&](UnresolvedExpr&) { assert(!"typecheck: UnresolvedExpr"); },
 		[&](VarExpr &e)
 		{
 			assert(e.var->type && "typecheck(VarExpr): VarDef::type is null");
 			expr.type = clone(*e.var->type);
 		},
-		[&](StructExpr &e)
+		[&](TypeExpr &e)
 		{
-			expr.type = StructType(e.def);
+			expr.type = clone(e.type);
 		},
 		[&](ProcExpr &e)
 		{
@@ -3714,9 +4189,6 @@ void typecheck(Expr &expr, Module &mod)
 			typecheck(*e.ptr_expr, mod);
 			if(PointerType const *ptr_type = std::get_if<PointerType>(strip_alias(*e.ptr_expr->type)))
 			{
-				if(!is_instantiable(*ptr_type->target_type))
-					throw ParseError("Cannot deref pointer to a type that contains Never");
-
 				expr.type = clone(*ptr_type->target_type);
 				return;
 			}
@@ -3731,9 +4203,6 @@ void typecheck(Expr &expr, Module &mod)
 			{
 				if(is_integral_type(*e.idx_expr->type))
 				{
-					if(!is_instantiable(*ptr_type->element_type))
-						throw ParseError("Cannot index pointer with an element type that contains Never");
-
 					expr.type = clone(*ptr_type->element_type);
 					return;
 				}
@@ -3748,7 +4217,9 @@ void typecheck(Expr &expr, Module &mod)
 			typecheck(*e.object, mod);
 			if(StructType const *struct_type = std::get_if<StructType>(strip_alias(*e.object->type)))
 			{
-				if(Parameter *param = find_var_member(struct_type->def, e.member))
+				StructInstanceDef *inst = struct_type->def->get_instance(struct_type->type_args);
+
+				if(Parameter *param = find_var_member(inst, e.member))
 				{
 					expr.type = clone(param->type);
 					return;
@@ -3794,13 +4265,18 @@ void typecheck(Expr &expr, Module &mod)
 				{
 					*e.callable | match
 					{
-						[&](StructExpr &struct_expr)
+						[&](TypeExpr &type_expr)
 						{
-							if(!struct_expr.def->constructor)
-								throw ParseError("Struct does not provide a constructor: " + struct_expr.def->name);
+							StructType *struct_type = std::get_if<StructType>(&type_expr.type);
+							if(not struct_type)
+								throw ParseError("Type does not provide a constructor: " + str(type_expr.type));
 
-							e.callable_params = &struct_expr.def->constructor->params;
-							expr.type = StructType(struct_expr.def);
+							if(not struct_type->def->constructor_params)
+								throw ParseError("Struct does not provide a constructor: " + struct_type->def->name);
+
+							StructInstanceDef *instance = struct_type->def->get_instance(struct_type->type_args);
+							e.callable_params = &instance->constructor_params.value();
+							expr.type = clone(*e.callable->type);
 						},
 						[&](auto&)
 						{
@@ -3996,7 +4472,7 @@ void typecheck(Stmt &stmt, ProcDef const *proc, Module &mod)
 			typecheck(s.expr, mod);
 			s.subject = *strip_alias(*s.expr.type) | match
 			{
-				[&](StructType t) { return t.def; },
+				[&](StructType const &t) { return t.def; },
 				[&](auto const &) -> StructDef* { throw ParseError("Match statements only work on structs"); },
 			};
 
@@ -4005,7 +4481,7 @@ void typecheck(Stmt &stmt, ProcDef const *proc, Module &mod)
 			{
 				*strip_alias(arm.type) | match
 				{
-					[&](StructType t)
+					[&](StructType const &t)
 					{
 						t.def->parent | match
 						{
@@ -4084,9 +4560,6 @@ void typecheck(TopLevelItem item, Module &mod)
 							if(!is_expr_assignable(var_member.type, *var_member.default_value))
 								throw ParseError("Member default value has incorrect type");
 						}
-
-						if(!is_instantiable(var_member.type))
-							def->contains_never = true;
 					},
 					[&](StructDef *case_member)
 					{
@@ -4096,8 +4569,6 @@ void typecheck(TopLevelItem item, Module &mod)
 							throw ParseError("Variable members must come before or after all case members");
 
 						typecheck(case_member, mod);
-						if(case_member->contains_never)
-							def->contains_never = true;
 					},
 				};
 			}
@@ -4225,6 +4696,104 @@ private:
 
 
 //--------------------------------------------------------------------
+// Name mangling
+//--------------------------------------------------------------------
+
+// All mangled Myca symbols start with '_Y'.
+//
+// <symbol> ::= '_Y' <kind> <path-segment>+
+//
+// <kind> ::= 'T'  // type
+//          | 'F'  // function
+//          | 'C'  // constructor
+//
+// <path-segment> ::= <id-segment> | <type-segment>
+//
+// <id-segment> ::= <num>                   // length of the following identifier
+//                  <identifier>
+//                  ('G' <path-segment>+)*  // Generic type arguments start with 'G'
+//
+// <type-segment> ::= 'P' 'm'? <path-segment>  // Pointer
+//                  | 'M' 'm'? <path-segment>  // Many pointer
+
+string mangle_type_segment(Type const &type)
+{
+	return type | match
+	{
+		[&](BuiltinType const &t) -> string
+		{
+			switch(t)
+			{
+				case BuiltinType::NEVER: return "5Never";
+				case BuiltinType::UNIT: return "4Unit";
+				case BuiltinType::BOOL: return "4bool";
+				case BuiltinType::I8: return "2i8";
+				case BuiltinType::U8: return "2u8";
+				case BuiltinType::I32: return "3i32";
+				case BuiltinType::U32: return "3u32";
+				case BuiltinType::ISIZE: return "5isize";
+				case BuiltinType::USIZE: return "5usize";
+			}
+
+			UNREACHABLE;
+		},
+		[&](VarType const&) -> string { assert(!"mangle_type_segment: VarType"); },
+		[&](PointerType const &t)
+		{
+			string mangled = "P";
+			if(t.is_mutable())
+				mangled += "m";
+
+			return mangled + mangle_type_segment(*t.target_type);
+		},
+		[&](ManyPointerType const &t)
+		{
+			string mangled = "M";
+			if(t.is_mutable())
+				mangled += "m";
+
+			return mangled + mangle_type_segment(*t.element_type);
+		},
+		[&](StructType const &struct_)
+		{
+			StructInstanceDef const *inst = struct_.def->get_instance(struct_.type_args);
+
+			string segment = std::to_string(inst->def->name.length()) + inst->def->name;
+			for(Type const &arg: struct_.type_args)
+				segment += 'G' + mangle_type_segment(arg);
+
+			return struct_.def->parent | match
+			{
+				[&](NoParent)            { return segment; },
+				[&](CaseMemberOf parent)
+				{
+					return mangle_type_segment(StructType(parent.struct_, clone(struct_.type_args))) + segment;
+				},
+				[&](ExtensionOf)         { return segment; },
+			};
+		},
+		[&](ProcType const&) -> string { assert(!"mangle_type_segment: ProcType: TODO"); },
+		[&](AliasType const &t)
+		{
+			return t.def->name;
+		},
+		[&](UnresolvedType const&) -> string { assert(!"mangle_type_segment: UnresolvedType"); },
+	};
+}
+
+
+string mangle_type(Type const &type)
+{
+	return "_YT" + mangle_type_segment(type);
+}
+
+string mangle_constructor(Type const &type)
+{
+	return "_YC" + mangle_type_segment(type);
+}
+
+
+//--------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------
 string get_fq_name(StructDef const *struct_)
@@ -4282,14 +4851,14 @@ string generate_c_to_str(Type const &type)
 			if(t.def->name == "c_void")
 				return "void"s;
 
-			return "struct " + get_fq_name(t.def);
+			return "struct " + mangle_type(type);
 		},
 		[&](ProcType const&) -> string { assert(!"generate_c_to_str: ProcType: TODO"); },
 		[&](AliasType const &t)
 		{
 			return t.def->name;
 		},
-		[&](UnresolvedId const&) -> string { assert(!"generate_c_to_str: UnresolvedId"); },
+		[&](UnresolvedType const&) -> string { assert(!"generate_c_to_str: UnresolvedType"); },
 	};
 }
 
@@ -4302,16 +4871,6 @@ void generate_c(Type const &type, CBackend &backend)
 //--------------------------------------------------------------------
 // Expressions
 //--------------------------------------------------------------------
-string callee_name(Callable const &callable)
-{
-	return callable | match
-	{
-		[&](ProcDef *def) { return def->name; },
-		[&](StructDef *struct_) { return "__myca__" + get_fq_name(struct_) + "_create"; },
-		[](UnresolvedId) -> string { assert(!"callee_name: UnresolvedId"); },
-	};
-}
-
 string generate_c(Expr const &expr, CBackend &backend, bool need_result = true);
 
 string generate_c_cast(Type const &target_type, string const &expr, Type const &expr_type)
@@ -4322,7 +4881,7 @@ string generate_c_cast(Type const &target_type, string const &expr, Type const &
 	string type_val = generate_c_to_str(target_type);
 	return *strip_alias(target_type) | match
 	{
-		[&](StructType)
+		[&](StructType const&)
 		{
 			return "*(" + type_val + "*)&(" + expr + ")";
 		},
@@ -4364,14 +4923,17 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 
 			UNREACHABLE;
 		},
-		[&](UnresolvedId const&) -> string { assert(!"generate_c: UnresolvedId"); },
+		[&](UnresolvedExpr const&) -> string { assert(!"generate_c: UnresolvedExpr"); },
 		[&](VarExpr const &e)
 		{
 			return e.var->name;
 		},
-		[&](StructExpr const &e)
+		[&](TypeExpr const &e)
 		{
-			return "__myca__" + get_fq_name(e.def) + "_create";
+			StructType const *struct_type = std::get_if<StructType>(&e.type);
+			assert(struct_type);
+
+			return mangle_constructor(e.type);
 		},
 		[&](ProcExpr const &e)
 		{
@@ -4639,12 +5201,12 @@ struct CMember
 
 struct CStruct
 {
-	string name;
+	Type type;
 	MemoryLayout layout{};
 	vector<CMember> members;
 
-	explicit CStruct(string const &name) :
-		name(name) {}
+	explicit CStruct(Type &&struct_type) :
+		type(std::move(struct_type)) {}
 
 	size_t add(CMember &&m)
 	{
@@ -4657,21 +5219,21 @@ struct CStruct
 
 // Generate C struct fields for all the variable members of `struct_` that come before the first
 // case member
-void create_c_struct_initial_vars(StructDef const *struct_, optional<size_t> child_case_idx, CStruct *result)
+void create_c_struct_initial_vars(StructInstanceDef const *struct_inst, optional<size_t> child_case_idx, CStruct *result)
 {
-	struct_->parent | match
+	struct_inst->def->parent | match
 	{
 		[&](NoParent) {},
-		[&](CaseMemberOf parent) { create_c_struct_initial_vars(parent.struct_, parent.case_idx, result); },
-		[&](ExtensionOf parent)  { create_c_struct_initial_vars(parent.struct_, nullopt, result); },
+		[&](CaseMemberOf parent) { create_c_struct_initial_vars(parent.struct_->get_instance(struct_inst->type_args), parent.case_idx, result); },
+		[&](ExtensionOf parent)  { create_c_struct_initial_vars(parent.struct_->get_instance(struct_inst->type_args), nullopt, result); },
 	};
 
-	if(struct_->discriminator_type)
+	if(struct_inst->discriminator_type)
 		// REVISIT: When the struct contains multiple nested case members then the name is not
 		// unique anymore
-		result->add(CMember("__myca__discr", child_case_idx, Type(*struct_->discriminator_type)));
+		result->add(CMember("__myca__discr", child_case_idx, Type(*struct_inst->discriminator_type)));
 
-	for(Member const &member: struct_->initial_var_members())
+	for(Member const &member: struct_inst->initial_var_members())
 	{
 		Parameter const &param = std::get<Parameter>(member);
 		result->add(CMember(param.name, clone(param.type)));
@@ -4679,45 +5241,46 @@ void create_c_struct_initial_vars(StructDef const *struct_, optional<size_t> chi
 }
 
 // Generate C struct fields for all the variable members of `struct_` that come after its case members
-void create_c_struct_trailing_vars(StructDef const *struct_, CStruct *result)
+void create_c_struct_trailing_vars(StructInstanceDef const *struct_inst, CStruct *result)
 {
-	for(Member const &member: struct_->trailing_var_members())
+	for(Member const &member: struct_inst->trailing_var_members())
 	{
 		Parameter const &param = std::get<Parameter>(member);
 		result->add(CMember(param.name, clone(param.type)));
 	}
 
-	struct_->parent | match
+	struct_inst->def->parent | match
 	{
 		[&](NoParent) {},
 		[&](CaseMemberOf parent)
 		{
-			size_t additional_padding = parent.struct_->cases_layout->end() - result->layout.size;
+			StructInstanceDef *parent_inst = parent.struct_->get_instance(struct_inst->type_args);
+			size_t additional_padding = parent_inst->cases_layout->end() - result->layout.size;
 			if(additional_padding)
 			{
 				for(size_t i = 0; i < additional_padding; ++i)
 					result->add(CMember(BuiltinType::U8));
 			}
 
-			create_c_struct_trailing_vars(parent.struct_, result);
+			create_c_struct_trailing_vars(parent_inst, result);
 		},
 		[&](ExtensionOf) {},
 	};
 }
 
-CStruct create_c_struct(StructDef const *struct_)
+CStruct create_c_struct(StructInstanceDef const *struct_inst)
 {
-	CStruct result(get_fq_name(struct_));
+	CStruct result(StructType(struct_inst->def, clone(struct_inst->type_args)));
 
-	create_c_struct_initial_vars(struct_, nullopt, &result);
+	create_c_struct_initial_vars(struct_inst, nullopt, &result);
 
-	if(struct_->cases_layout)
+	if(struct_inst->cases_layout)
 	{
-		for(size_t i = 0; i < struct_->cases_layout->size; ++i)
+		for(size_t i = 0; i < struct_inst->cases_layout->size; ++i)
 			result.add(CMember(BuiltinType::U8));
 	}
 
-	create_c_struct_trailing_vars(struct_, &result);
+	create_c_struct_trailing_vars(struct_inst, &result);
 
 	return result;
 }
@@ -4728,7 +5291,7 @@ void generate_c_struct_def(CStruct const &cstruct, CBackend &backend)
 {
 	// In Myca, types can have zero alignment (e.g., Never), but this is not allowed in C.
 	size_t alignment = std::max(cstruct.layout.alignment, size_t(1));
-	backend << "struct " << "__attribute__((aligned(" << alignment << "))) " << cstruct.name << LineEnd << "{" << LineEnd;
+	backend << "struct " << "__attribute__((aligned(" << alignment << "))) " << mangle_type(cstruct.type) << LineEnd << "{" << LineEnd;
 	backend.increase_indent();
 
 	for(CMember const &member: cstruct.members)
@@ -4752,7 +5315,7 @@ void generate_c_struct_methods(CStruct const &cstruct, CBackend &backend)
 	// Generate constructor
 	{
 		// Function header
-		backend << "struct " << cstruct.name << " " << "__myca__" << cstruct.name << "_create(";
+		backend << "struct " << mangle_type(cstruct.type) << " " << mangle_constructor(cstruct.type) << "(";
 		bool first = true;
 		for(CMember const &member: cstruct.members)
 		{
@@ -4774,7 +5337,7 @@ void generate_c_struct_methods(CStruct const &cstruct, CBackend &backend)
 		// Function body
 		backend << "{" << LineEnd;
 		backend.increase_indent();
-			backend << "struct " << cstruct.name << " __myca__object = {";
+			backend << "struct " << mangle_type(cstruct.type) << " __myca__object = {";
 			backend.increase_indent();
 				backend << RangeFmt(cstruct.members, ", ", [&](CMember const &member)
 				{
@@ -4816,7 +5379,7 @@ void generate_c_proc_sig(ProcDef const *proc, CBackend &backend)
 
 // Dependency computation for structs
 //------------------------------------------------
-void compute_struct_deps(Type const &type, unordered_set<StructDef*> &deps)
+void compute_struct_deps(Type const &type, unordered_set<StructInstanceDef*> &deps)
 {
 	type | match
 	{
@@ -4826,7 +5389,8 @@ void compute_struct_deps(Type const &type, unordered_set<StructDef*> &deps)
 		[&](ManyPointerType const&) {},
 		[&](StructType const &t)
 		{
-			for(Member const &member: t.def->members)
+			StructInstanceDef *inst = t.def->get_instance(t.type_args);
+			for(Member const &member: inst->members)
 			{
 				member | match
 				{
@@ -4836,12 +5400,12 @@ void compute_struct_deps(Type const &type, unordered_set<StructDef*> &deps)
 					},
 					[&](StructDef *case_member)
 					{
-						compute_struct_deps(StructType(case_member), deps);
+						compute_struct_deps(StructType(case_member, clone(t.type_args)), deps);
 					},
 				};
 			}
 
-			deps.insert(t.def);
+			deps.insert(inst);
 		},
 		[&](ProcType const &t)
 		{
@@ -4854,19 +5418,19 @@ void compute_struct_deps(Type const &type, unordered_set<StructDef*> &deps)
 		{
 			compute_struct_deps(t.def->type, deps);
 		},
-		[&](UnresolvedId const&) { assert(!"compute_struct_deps: UnresolvedId"); },
+		[&](UnresolvedType const&) { assert(!"compute_struct_deps: UnresolvedType"); },
 	};
 }
 
-using StructDepMap = unordered_map<StructDef*, unordered_set<StructDef*>>;
+using StructDepMap = unordered_map<StructInstanceDef*, unordered_set<StructInstanceDef*>>;
 
-StructDepMap compute_struct_deps_mapping(vector<StructDef*> const &structs)
+StructDepMap compute_struct_deps_mapping(vector<StructInstanceDef*> const &structs)
 {
 	StructDepMap deps_by_struct;
-	for(StructDef *struct_: structs)
+	for(StructInstanceDef *struct_: structs)
 	{
-		unordered_set<StructDef*> deps;
-		compute_struct_deps(StructType(struct_), deps);
+		unordered_set<StructInstanceDef*> deps;
+		compute_struct_deps(StructType(struct_->def, clone(struct_->type_args)), deps);
 		deps.erase(struct_);
 
 		deps_by_struct.emplace(struct_, std::move(deps));
@@ -4876,10 +5440,10 @@ StructDepMap compute_struct_deps_mapping(vector<StructDef*> const &structs)
 }
 
 void _sort_structs_by_deps(
-	StructDef *struct_,
+	StructInstanceDef *struct_,
 	StructDepMap const &deps_by_struct,
-	vector<StructDef*> &result,
-	unordered_set<StructDef*> &visited
+	vector<StructInstanceDef*> &result,
+	unordered_set<StructInstanceDef*> &visited
 )
 {
 	// We assume the semantic analysis would already have detected any dependency cycles
@@ -4890,19 +5454,19 @@ void _sort_structs_by_deps(
 	auto deps = deps_by_struct.find(struct_);
 	if(deps != deps_by_struct.end())
 	{
-		for(StructDef *dep: deps->second)
+		for(StructInstanceDef *dep: deps->second)
 			_sort_structs_by_deps(dep, deps_by_struct, result, visited);
 	}
 
 	result.push_back(struct_);
 }
 
-vector<StructDef*> sort_structs_by_deps(vector<StructDef*> const &structs)
+vector<StructInstanceDef*> sort_structs_by_deps(vector<StructInstanceDef*> const &structs)
 {
 	StructDepMap deps_by_struct = compute_struct_deps_mapping(structs);
-	vector<StructDef*> result;
-	unordered_set<StructDef*> visited;
-	for(StructDef *struct_: structs)
+	vector<StructInstanceDef*> result;
+	unordered_set<StructInstanceDef*> visited;
+	for(StructInstanceDef *struct_: structs)
 		_sort_structs_by_deps(struct_, deps_by_struct, result, visited);
 
 	return result;
@@ -4928,7 +5492,8 @@ void compute_alias_deps(Type const &type, unordered_set<AliasDef*> &deps)
 		},
 		[&](StructType const &t)
 		{
-			for(Member const &member: t.def->members)
+			StructInstanceDef *inst = t.def->get_instance(t.type_args);
+			for(Member const &member: inst->members)
 			{
 				member | match
 				{
@@ -4938,7 +5503,7 @@ void compute_alias_deps(Type const &type, unordered_set<AliasDef*> &deps)
 					},
 					[&](StructDef *case_member)
 					{
-						compute_alias_deps(StructType(case_member), deps);
+						compute_alias_deps(StructType(case_member, clone(t.type_args)), deps);
 					},
 				};
 			}
@@ -4955,7 +5520,7 @@ void compute_alias_deps(Type const &type, unordered_set<AliasDef*> &deps)
 			compute_alias_deps(t.def->type, deps);
 			deps.insert(t.def);
 		},
-		[&](UnresolvedId const&) { assert(!"compute_alias_deps: UnresolvedId"); },
+		[&](UnresolvedType const&) { assert(!"compute_alias_deps: UnresolvedType"); },
 	};
 }
 
@@ -5014,7 +5579,7 @@ vector<AliasDef*> sort_alias_by_deps(vector<AliasDef*> const &aliases)
 //------------------------------------------------
 void generate_c(Module const &mod, CBackend &backend)
 {
-	vector<StructDef*> structs;
+	vector<StructInstanceDef*> structs;
 	vector<ProcDef*> procs;
 	vector<AliasDef*> aliases;
 	for(TopLevelItem item: mod.items())
@@ -5022,7 +5587,14 @@ void generate_c(Module const &mod, CBackend &backend)
 		item | match
 		{
 			[&](ProcDef *def) { procs.push_back(def); },
-			[&](StructDef *def) { structs.push_back(def); },
+			[&](StructDef *def)
+			{
+				for(auto &[_, inst]: def->instances)
+				{
+					if(inst.is_concrete)
+						structs.push_back(&inst);
+				}
+			},
 			[&](AliasDef *def) { aliases.push_back(def); },
 		};
 	}
@@ -5034,26 +5606,20 @@ void generate_c(Module const &mod, CBackend &backend)
 		backend << "typedef " << alias->type << " " << alias->name << ";" << LineEnd;
 
 	// Structures
-	vector<StructDef*> sorted_structs = sort_structs_by_deps(structs);
-	unordered_map<StructDef*, CStruct> cstructs;
-	for(StructDef *struct_: sorted_structs)
+	vector<StructInstanceDef*> sorted_structs = sort_structs_by_deps(structs);
+	unordered_map<StructInstanceDef*, CStruct> cstructs;
+	for(StructInstanceDef *inst: sorted_structs)
 	{
-		if(struct_->type_params.size())
-			continue;
-
-		CStruct cstruct = create_c_struct(struct_);
+		CStruct cstruct = create_c_struct(inst);
 		generate_c_struct_def(cstruct, backend);
 		backend << LineEnd;
 
-		cstructs.emplace(struct_, std::move(cstruct));
+		cstructs.emplace(inst, std::move(cstruct));
 	}
 
-	for(StructDef *struct_: sorted_structs)
+	for(StructInstanceDef *inst: sorted_structs)
 	{
-		if(struct_->type_params.size())
-			continue;
-
-		generate_c_struct_methods(cstructs.at(struct_), backend);
+		generate_c_struct_methods(cstructs.at(inst), backend);
 		backend << LineEnd;
 	}
 
@@ -5080,21 +5646,7 @@ void generate_c(Module const &mod, CBackend &backend)
 //==============================================================================
 // Main
 //==============================================================================
-#define NEXT_ARG() (*++argv)
-
-
-struct JSON_Int
-{
-	uint8_t discrimitator;
-	uint64_t value;
-};
-
-struct JSON_Null
-{
-	uint8_t discrimitator;
-	uint8_t padding[8];
-};
-
+#define NEXT(args) (*++args)
 
 int main(int argc, char *argv[])
 {
@@ -5102,10 +5654,10 @@ int main(int argc, char *argv[])
 
 	optional<string> arg_input_filename;
 	optional<string> arg_output_filename;
-	while(NEXT_ARG())
+	while(NEXT(argv))
 	{
 		if(*argv == "-o"sv) {
-			if(!NEXT_ARG()) {
+			if(!NEXT(argv)) {
 				std::cerr << "Error: no output file provided" << std::endl;
 				return 1;
 			}
