@@ -30,6 +30,8 @@ proc main() -> i32
 	//let a: []mut i32;
 	//let b: []i32 = a;
 
+	Array'bool(null, 0, 0);
+
 	return foo();
 }
 
@@ -41,7 +43,6 @@ struct Array'T
 	length: usize,
 	capacity: usize,
 }
-
 
 
 

@@ -249,6 +249,7 @@ enum class Lexeme
 	IDENTIFIER,
 	INT_LITERAL,
 	C_STRING_LITERAL,
+	NULL_LITERAL,
 	TRUE,
 	FALSE,
 
@@ -306,6 +307,7 @@ string_view str(Lexeme tok)
 		case Lexeme::IDENTIFIER: return "IDENTIFIER";
 		case Lexeme::INT_LITERAL: return "INT_LITERAL";
 		case Lexeme::C_STRING_LITERAL: return "C_STRING_LITERAL";
+		case Lexeme::NULL_LITERAL: return "NULL_LITERAL";
 		case Lexeme::TRUE: return "TRUE";
 		case Lexeme::FALSE: return "FALSE";
 
@@ -412,6 +414,7 @@ optional<Lexeme> try_read_punctuation(Lexer &lex)
 unordered_map<string_view, Lexeme> const KEYWORDS = {
 	{"true", Lexeme::TRUE},
 	{"false", Lexeme::FALSE},
+	{"null", Lexeme::NULL_LITERAL},
 	{"let", Lexeme::LET},
 	{"proc", Lexeme::PROC},
 	{"struct", Lexeme::STRUCT},
@@ -533,6 +536,7 @@ class Scope;
 enum BuiltinType
 {
 	NEVER,
+	NULL_,
 	UNIT,
 	BOOL,
 	I8,
@@ -749,6 +753,8 @@ struct IntLiteralExpr { XInt64 value; };
 
 struct BoolLiteralExpr { bool value; };
 
+struct NullLiteralExpr {};
+
 enum class StringLiteralType
 {
 	C
@@ -912,6 +918,7 @@ class Expr : public variant
 <
 	IntLiteralExpr,
 	BoolLiteralExpr,
+	NullLiteralExpr,
 	StringLiteralExpr,
 	UnresolvedExpr,
 	VarExpr,
@@ -976,6 +983,10 @@ Expr clone(Expr const &expr)
 			return expr.clone_as(e);
 		},
 		[&](BoolLiteralExpr const &e)
+		{
+			return expr.clone_as(e);
+		},
+		[&](NullLiteralExpr const &e)
 		{
 			return expr.clone_as(e);
 		},
@@ -1759,6 +1770,7 @@ std::ostream& operator << (std::ostream &os, SourceLocation loc)
 }
 
 constexpr string_view TYPE_NEVER_NAME = "Never";
+constexpr string_view TYPE_NULL_NAME = "Null";
 constexpr string_view TYPE_UNIT_NAME = "Unit";
 constexpr string_view TYPE_ISIZE_NAME = "isize";
 constexpr string_view TYPE_USIZE_NAME = "usize";
@@ -1768,6 +1780,7 @@ string_view str(BuiltinType t)
 	switch(t)
 	{
 		case BuiltinType::NEVER: return TYPE_NEVER_NAME;
+		case BuiltinType::NULL_: return TYPE_NULL_NAME;
 		case BuiltinType::UNIT: return TYPE_UNIT_NAME;
 		case BuiltinType::BOOL: return "bool";
 		case BuiltinType::I8: return "i8";
@@ -1871,6 +1884,10 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 		[&](BoolLiteralExpr const &e)
 		{
 			os << (e.value ? "true" : "false");
+		},
+		[&](NullLiteralExpr const&)
+		{
+			os << "null";
 		},
 		[&](StringLiteralExpr const &e)
 		{
@@ -2348,6 +2365,8 @@ Type parse_type(Parser &parser, Module &mod)
 		{
 			if(tok.text == TYPE_NEVER_NAME)
 				return BuiltinType::NEVER;
+			else if(tok.text == TYPE_NULL_NAME)
+				return BuiltinType::NULL_;
 			else if(tok.text == TYPE_UNIT_NAME)
 				return BuiltinType::UNIT;
 			else if(tok.text == "bool")
@@ -2551,6 +2570,9 @@ Expr parse_prefix_expr(Parser &parser, Module &mod)
 
 		case Lexeme::FALSE:
 			return with_location(BoolLiteralExpr(false));
+
+		case Lexeme::NULL_LITERAL:
+			return with_location(NullLiteralExpr());
 
 		case Lexeme::C_STRING_LITERAL:
 			return with_location(StringLiteralExpr(StringLiteralType::C, tok.text));
@@ -3070,6 +3092,7 @@ bool is_integral_type(BuiltinType type)
 	switch(type)
 	{
 		case BuiltinType::NEVER: return false;
+		case BuiltinType::NULL_: return false;
 		case BuiltinType::UNIT:  return false;
 		case BuiltinType::BOOL:  return false;
 		case BuiltinType::I8:   return true;
@@ -3090,6 +3113,7 @@ bool is_signed(BuiltinType type)
 	switch(type)
 	{
 		case BuiltinType::NEVER: assert(!"is_signed: NEVER");
+		case BuiltinType::NULL_: assert(!"is_signed: NULL");
 		case BuiltinType::UNIT:  assert(!"is_signed: UNIT");
 		case BuiltinType::BOOL:  assert(!"is_signed: BOOL");
 		case BuiltinType::I8:  return false;
@@ -3116,6 +3140,7 @@ MemoryLayout get_layout(BuiltinType type)
 		case BuiltinType::U32:   return {.size = 4, .alignment = 4};
 		case BuiltinType::ISIZE: return {.size = 8, .alignment = 8};
 		case BuiltinType::USIZE: return {.size = 8, .alignment = 8};
+		case BuiltinType::NULL_: return {.size = 8, .alignment = 8};
 	}
 
 	UNREACHABLE;
@@ -3342,6 +3367,9 @@ bool is_type_assignable(Type const &dest, Type const &src)
 		{
 			if(BuiltinType const *dest_int_type = std::get_if<BuiltinType>(strip_alias(dest)))
 				return builtin_losslessly_convertible(*dest_int_type, src_t);
+
+			if(is<PointerType>(*strip_alias(dest)) || is<ManyPointerType>(*strip_alias(dest)))
+				return src_t == BuiltinType::NULL_;
 
 			return false;
 		},
@@ -3802,6 +3830,7 @@ void resolve_identifiers(Expr &expr, TypeEnv const &type_env, Scope *scope)
 	{
 		[&](IntLiteralExpr&) {},
 		[&](BoolLiteralExpr&) {},
+		[&](NullLiteralExpr&) {},
 		[&](StringLiteralExpr&) {},
 		[&](UnresolvedExpr &e)
 		{
@@ -4168,6 +4197,10 @@ void typecheck(Expr &expr, Module &mod)
 		[&](BoolLiteralExpr&)
 		{
 			expr.type = BuiltinType::BOOL;
+		},
+		[&](NullLiteralExpr&)
+		{
+			expr.type = BuiltinType::NULL_;
 		},
 		[&](StringLiteralExpr &e)
 		{
@@ -4771,6 +4804,7 @@ string mangle_type_segment(Type const &type)
 			switch(t)
 			{
 				case BuiltinType::NEVER: return "5Never";
+				case BuiltinType::NULL_: return "4Null";
 				case BuiltinType::UNIT: return "4Unit";
 				case BuiltinType::BOOL: return "4bool";
 				case BuiltinType::I8: return "2i8";
@@ -4850,6 +4884,7 @@ string generate_c_to_str(BuiltinType const &type)
 	switch(type)
 	{
 		case BuiltinType::NEVER: return "Never";
+		case BuiltinType::NULL_: return "void*";
 		case BuiltinType::UNIT: TODO("generate_c(Type): UNIT");
 		case BuiltinType::BOOL: return "bool";
 		case BuiltinType::I8: return "int8_t";
@@ -4947,6 +4982,10 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		[&](BoolLiteralExpr const &e)
 		{
 			return string(e.value ? "true" : "false");
+		},
+		[&](NullLiteralExpr const&)
+		{
+			return string("NULL");
 		},
 		[&](StringLiteralExpr const &e)
 		{
