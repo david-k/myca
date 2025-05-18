@@ -161,5 +161,5 @@ proc main() -> i32
 	json = n;
 
 	increase_jint(&mut jint as ^mut Json);
-	return json.id + get_prime_factor_2(jint);
+	return json.id + get_prime_factor_2(jint); // 149
 }

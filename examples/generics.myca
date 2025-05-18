@@ -5,13 +5,6 @@
 }*/
 
 
-struct Array'T
-{
-	ptr: [^]mut T,
-	length: usize,
-	capacity: usize,
-}
-
 // &own is essentially equivalent to an r-value reference in C++
 /*proc Array.add(self &mut, val: &own T)
 {
@@ -20,20 +13,17 @@ struct Array'T
 }*/
 
 
-typealias Arr = Array'(i32);
-
 proc main() -> i32
 {
 	let mut val = 3;
-	let arr = Arr(
+	let arr = Array'i32(
 		.ptr = &mut val as [^]mut i32,
 		.length = 1,
 		.capacity = 1,
 	);
 
-	let arrb: Array'(i32) = arr;
-
-	let p = arrb.ptr;
+	let arrb: Arr = arr;
+	let p: [^]i32 = arrb.ptr;
 
 	// []&mut T == ?mut Slice'T
 
@@ -43,21 +33,54 @@ proc main() -> i32
 	return foo();
 }
 
+typealias Arr = Array'(i32);
 
+struct Array'T
+{
+	ptr: [^]mut T,
+	length: usize,
+	capacity: usize,
+}
+
+
+
+
+
+
+struct Option'T
+{
+	case Some{value: T},
+	case None{},
+}
+
+
+proc bar()
+{
+	let opt = IntOpt.Some(3);
+}
+typealias IntOpt = Option'i32;
 
 
 proc foo() -> i32
 {
-	let bv = Vec2'bool(true, false);
+	let opt = Option'(Vec2'i32).Some(Vec2'i32(8, 9));
 
-	let vec = Vec2i(1, 2);
+	let bv = Vec2'bool(true, false);
+	let b: bool = bv.y;
+
+	let vec: Vec2i = opt.value;
 
 	let player = Player'i32(
 		.pos = vec
 	);
 
 	let v = player.pos;
-	return v.y;
+
+	if b {
+		return v.y + player.health;
+	} else {
+		return v.x + player.health;
+	}
 }
 
 struct Vec2'S

@@ -46,16 +46,16 @@ proc main() -> i32
 	// `make` works for structs with custom constructors:
 	//p_bar: ^mut Bar = make Bar.new(42) @ malloc();
 
-	free(p);
-	free(q);
-	free(p_foo);
-	//free(p_bar);
+	//free(p as ^mut c_void);
+	//free(q as ^mut c_void);
+	//free(p_foo as ^mut c_void);
+	//free(p_bar as c_void);
 
 
 	// When creating a dynamic array using `make`, only the left-most array size can be dynamic
-	let n = 10;
+	/*let n = 10;
 	let arr2: []i32 = make[n] 42 @ malloc();
-	//let arr2: [][2]i32 = make[n] {1,2}::[2]i32 @ malloc();
+	let arr2: [][2]i32 = make[n] {1,2}::[2]i32 @ malloc();*/
 
 	return p_foo^.i;
 }
