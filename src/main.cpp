@@ -523,6 +523,7 @@ class CBackend;
 struct TypeVarDef;
 struct VarDef;
 struct ProcDef;
+struct ProcDefInstance;
 struct ProcTypeDef;
 struct StructDef;
 struct StructDefInstance;
@@ -581,36 +582,36 @@ struct VarType
 	TypeVarDef *var;
 };
 
-enum class Mutability
+enum class IsMutable
 {
-	MUTABLE,
-	CONST,
+	YES,
+	NO,
 };
 
 struct PointerType
 {
-	explicit PointerType(Type &&target_type, Mutability mutability) :
+	explicit PointerType(Type &&target_type, IsMutable mutability) :
 		target_type(std::make_unique<Type>(std::move(target_type))),
 		mutability(mutability) {}
 
-	bool is_mutable() const { return mutability == Mutability::MUTABLE; }
-	bool is_const() const { return mutability == Mutability::CONST; }
+	bool is_mutable() const { return mutability == IsMutable::YES; }
+	bool is_const() const { return mutability == IsMutable::NO; }
 
 	OwnPtr<Type> target_type;
-	Mutability mutability;
+	IsMutable mutability;
 };
 
 struct ManyPointerType
 {
-	explicit ManyPointerType(Type &&element_type, Mutability mutability) :
+	explicit ManyPointerType(Type &&element_type, IsMutable mutability) :
 		element_type(std::make_unique<Type>(std::move(element_type))),
 		mutability(mutability) {}
 
-	bool is_mutable() const { return mutability == Mutability::MUTABLE; }
-	bool is_const() const { return mutability == Mutability::CONST; }
+	bool is_mutable() const { return mutability == IsMutable::YES; }
+	bool is_const() const { return mutability == IsMutable::NO; }
 
 	OwnPtr<Type> element_type;
-	Mutability mutability;
+	IsMutable mutability;
 };
 
 struct StructType
@@ -775,7 +776,10 @@ struct TypeExpr
 	Type type;
 };
 
-struct ProcExpr { ProcDef *def; };
+struct ProcExpr
+{
+	ProcDefInstance *inst;
+};
 
 
 enum class UnaryOp
@@ -818,9 +822,9 @@ struct BinaryExpr
 struct AddressOfExpr
 {
 	OwnPtr<Expr> object_expr;
-	Mutability mutability;
+	IsMutable mutability;
 
-	AddressOfExpr(Expr &&object_expr, Mutability mutability) :
+	AddressOfExpr(Expr &&object_expr, IsMutable mutability) :
 		object_expr(std::make_unique<Expr>(std::move(object_expr))),
 		mutability(mutability) {}
 };
@@ -898,8 +902,6 @@ struct CallExpr
 	CallExpr(Expr &&callable, vector<Argument> args) :
 		callable(std::make_unique<Expr>(std::move(callable))),
 		args(std::move(args)) {}
-
-	vector<Parameter> *callable_params = nullptr;
 };
 
 struct SizeOfExpr
@@ -996,12 +998,7 @@ Expr clone(Expr const &expr)
 		},
 		[&](UnresolvedExpr const &e)
 		{
-			//return expr.clone_as(UnresolvedExpr(clone(e.path), e.scope));
-
-			UnresolvedExpr ee;
-			ee.scope = e.scope;
-			ee.path = clone(e.path);
-			return expr.clone_as(std::move(ee));
+			return expr.clone_as(UnresolvedExpr(clone(e.path), e.scope));
 		},
 		[&](VarExpr const &e)
 		{
@@ -1041,7 +1038,7 @@ Expr clone(Expr const &expr)
 		},
 		[&](AssignmentExpr const &e)
 		{
-			return expr.clone_as(IndexExpr(clone(*e.lhs), clone(*e.rhs)));
+			return expr.clone_as(AssignmentExpr(clone(*e.lhs), clone(*e.rhs)));
 		},
 		[&](AsExpr const &e)
 		{
@@ -1060,7 +1057,6 @@ Expr clone(Expr const &expr)
 			}
 
 			CallExpr cloned(clone(*e.callable), std::move(args));
-			cloned.callable_params = e.callable_params;
 			return expr.clone_as(std::move(cloned));
 		},
 		[&](SizeOfExpr const &e)
@@ -1083,7 +1079,7 @@ struct DerefPatternOp {};
 
 struct AddressOfPatternOp
 {
-	Mutability mutability;
+	IsMutable mutability;
 };
 
 using PatternOp = variant<NoPatternOp, DerefPatternOp, AddressOfPatternOp>;
@@ -1167,10 +1163,11 @@ struct MatchArm
 	OwnPtr<Stmt> stmt;
 	optional<Pattern> capture;
 
-	MatchArm(Type &&type, Stmt &&stmt, optional<Pattern> &&capture) :
+	MatchArm(Type &&type, Stmt &&stmt, optional<Pattern> &&capture, StructDefInstance *struct_ = nullptr) :
 		type(std::move(type)),
 		stmt(std::make_unique<Stmt>(std::move(stmt))),
-		capture(std::move(capture)) {}
+		capture(std::move(capture)),
+		struct_(struct_) {}
 
 	// Available after semantic analysis
 	StructDefInstance *struct_ = nullptr;
@@ -1192,6 +1189,68 @@ IfStmt::IfStmt(Expr &&cond, Stmt &&then, optional<Stmt> &&else_) :
 	else_(else_ ? std::make_unique<Stmt>(std::move(*else_)) : nullptr) {}
 
 
+Stmt clone(Stmt const &stmt)
+{
+	return stmt | match
+	{
+		[&](LetStmt const &s)
+		{
+			return Stmt(LetStmt(s.lhs, clone(s.init_expr)));
+		},
+		[&](ExprStmt const &s)
+		{
+			return Stmt(ExprStmt(clone(s.expr)));
+		},
+		[&](BlockStmt const &s)
+		{
+			vector<OwnPtr<Stmt>> stmts;
+			for(OwnPtr<Stmt> const &stmt: s.stmts)
+				stmts.push_back(std::make_unique<Stmt>(clone(*stmt)));
+
+			return Stmt(BlockStmt(s.scope, std::move(stmts)));
+		},
+		[&](ReturnStmt const &s)
+		{
+			optional<Expr> ret_expr;
+			if(s.ret_expr)
+				ret_expr = clone(*s.ret_expr);
+
+			return Stmt(ReturnStmt(std::move(ret_expr)));
+		},
+		[&](IfStmt const &s)
+		{
+			Expr cond = clone(s.condition);
+			Stmt then = clone(*s.then);
+			optional<Stmt> else_;
+			if(s.else_)
+				else_ = clone(*s.else_);
+
+			return Stmt(IfStmt(std::move(cond), std::move(then), std::move(else_)));
+		},
+		[&](WhileStmt const &s)
+		{
+			return Stmt(WhileStmt(clone(s.condition), clone(*s.body)));
+		},
+		[&](MatchStmt const &s)
+		{
+			Expr expr = clone(s.expr);
+			vector<MatchArm> arms;
+			for(MatchArm const &arm: s.arms)
+			{
+				arms.push_back(MatchArm(
+					clone(arm.type),
+					clone(*arm.stmt),
+					optional<Pattern>(arm.capture),
+					arm.struct_
+				));
+			}
+
+			return Stmt(MatchStmt(std::move(expr), std::move(arms), s.subject));
+		},
+	};
+}
+
+
 //--------------------------------------------------------------------
 // Top-level items
 //--------------------------------------------------------------------
@@ -1211,6 +1270,32 @@ public:
 };
 
 
+// A StructDefInstance is uniquely identified by
+// - the list of type arguments that are used to instantiate the struct instance, and
+// - a reference to the containing struct instance (if it exists)
+struct DefInstanceKey
+{
+	TypeArgList type_args;
+	StructDefInstance *outer_struct; // may be null
+
+	friend bool operator == (DefInstanceKey const &a, DefInstanceKey const &b) = default;
+};
+
+namespace std
+{
+	template<>
+	struct hash<::DefInstanceKey>
+	{
+		size_t operator () (::DefInstanceKey const &key) const
+		{
+			size_t h = ::compute_hash(key.type_args);
+			::combine_hashes(h, ::compute_hash(key.outer_struct));
+
+			return h;
+		}
+	};
+}
+
 //--------------------------------------------------------------------
 // (Type) Variables
 //--------------------------------------------------------------------
@@ -1229,17 +1314,20 @@ enum class VarKind
 struct VarDef
 {
 	string name;
-	Mutability mutability;
+	IsMutable mutability;
 	VarKind kind;
 	optional<Type> type;
 
-	bool is_mutable() const { return mutability == Mutability::MUTABLE; }
+	bool is_mutable() const { return mutability == IsMutable::YES; }
 };
 
 
 //--------------------------------------------------------------------
 // Procedures
 //--------------------------------------------------------------------
+using TypeEnv = unordered_map<TypeVarDef*, Type>;
+
+
 struct ProcTypeDef
 {
 	vector<Parameter> params;
@@ -1311,20 +1399,37 @@ struct ProcTypeEquiv
 };
 
 
+struct ProcDef;
+
+struct ProcDefInstance
+{
+	ProcDef *def;
+
+	TypeArgList type_args;
+	TypeEnv type_env;
+	ProcTypeDef type;
+	bool is_concrete;
+};
+
 struct ProcDef
 {
+	ProcDef(string const &name, Scope *scope) :
+		name(name), scope(scope) {}
+
 	string name;
 	ProcTypeDef type;
+	vector<TypeVarDef*> type_params;
 	Scope *scope;
 	vector<VarDef*> param_vars;
 	optional<Stmt> body;
+
+	unordered_map<TypeArgList, ProcDefInstance> instances;
 };
 
 
 //--------------------------------------------------------------------
 // Structs
 //--------------------------------------------------------------------
-using TypeEnv = unordered_map<TypeVarDef*, Type>;
 struct StructDef;
 
 struct MemoryLayout
@@ -1402,33 +1507,20 @@ struct StructDefInstance
 
 		return *own_layout;
 	}
-};
 
-// A StructDefInstance is uniquely identified by
-// - the list of type arguments that are used to instantiate the struct instance, and
-// - a reference to the containing struct instance (if it exists)
-struct StructDefInstanceKey
-{
-	TypeArgList type_args;
-	StructDefInstance *outer_struct; // may be null
-
-	friend bool operator == (StructDefInstanceKey const &a, StructDefInstanceKey const &b) = default;
-};
-
-namespace std
-{
-	template<>
-	struct hash<::StructDefInstanceKey>
+	bool is_case_member_of(StructDefInstance const *other) const
 	{
-		size_t operator () (::StructDefInstanceKey const &key) const
+		if(outer_struct)
 		{
-			size_t h = ::compute_hash(key.type_args);
-			::combine_hashes(h, ::compute_hash(key.outer_struct));
+			if(outer_struct == other)
+				return true;
 
-			return h;
+			return outer_struct->is_case_member_of(other);
 		}
-	};
-}
+
+		return false;
+	}
+};
 
 
 struct CaseMemberOf { StructDef *struct_; size_t case_idx; };
@@ -1445,7 +1537,7 @@ struct StructDef
 	optional<vector<Parameter>> constructor_params; // Available iff the struct does not contain any `case`s
 
 	ParentRelation parent{};
-	unordered_map<StructDefInstanceKey, StructDefInstance> instances{};
+	unordered_map<DefInstanceKey, StructDefInstance> instances{};
 
 	size_t num_initial_var_members = 0;
 	size_t num_cases = 0;
@@ -1461,22 +1553,6 @@ struct StructDef
 			[](CaseMemberOf parent) { return parent.case_idx; },
 			[](ExtensionOf) -> size_t { assert(!"get_case_idx: ExtensionOf"); },
 			[](NoParent) -> size_t { assert(!"get_case_idx: NoParent"); },
-		};
-	}
-
-	bool is_case_member_of(StructDef const *other) const
-	{
-		return parent | match
-		{
-			[&](CaseMemberOf parent)
-			{
-				if(other == parent.struct_)
-					return true;
-
-				return parent.struct_->is_case_member_of(other);
-			},
-			[](ExtensionOf) { return false; },
-			[](NoParent) { return false; },
 		};
 	}
 
@@ -1510,7 +1586,7 @@ struct AliasDef
 class Module;
 
 Type strip_alias_rec(Type const &type);
-void resolve_types(Type &type, TypeEnv const &type_env, Module &mod);
+void resolve_types(Type &type, Module &mod);
 
 using ItemDef = variant<ProcDef, StructDef, AliasDef>;
 
@@ -1553,7 +1629,7 @@ public:
 		return nullptr;
 	}
 
-	VarDef* declare_var(string name, Mutability mutability, VarKind kind)
+	VarDef* declare_var(string name, IsMutable mutability, VarKind kind)
 	{
 		if(m_vars.contains(name))
 			throw ParseError("Variable already declared: " + name);
@@ -1588,25 +1664,12 @@ public:
 		throw ParseError("Variable has not been declared: " + name);
 	}
 
-	ProcDef* add_proc(
-		string const &name,
-		vector<Parameter> &&params,
-		vector<VarDef*> &&param_vars,
-		Type &&ret_type,
-		Scope *scope,
-		optional<Stmt> &&body
-	)
+	ProcDef* add_proc(string const &name, Scope *scope)
 	{
 		if(m_defs.contains(name))
 			throw ParseError("There already exists a definition with this name: " + name);
 
-		auto res = m_defs.insert({name, ProcDef{
-			.name = name,
-			.type = ProcTypeDef(std::move(params), std::move(ret_type)),
-			.scope = scope,
-			.param_vars = std::move(param_vars),
-			.body = std::move(body),
-		}});
+		auto res = m_defs.insert({name, ProcDef(name, scope)});
 
 		ProcDef *proc = &std::get<ProcDef>(res.first->second);
 
@@ -1915,7 +1978,7 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 		},
 		[&](ProcExpr const &e)
 		{
-			os << e.def->name;
+			os << e.inst->def->name;
 		},
 		[&](UnaryExpr const &e)
 		{
@@ -1942,7 +2005,7 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 		[&](AddressOfExpr const &e)
 		{
 			os << "&";
-			if(e.mutability == Mutability::MUTABLE)
+			if(e.mutability == IsMutable::YES)
 				os << "mut ";
 
 			os << "(";
@@ -2024,7 +2087,7 @@ std::ostream& print(std::ostream &os, PatternOp const &op)
 		[&](AddressOfPatternOp const &o)
 		{
 			os << " &";
-			if(o.mutability == Mutability::MUTABLE)
+			if(o.mutability == IsMutable::YES)
 				os << "mut";
 		},
 	};
@@ -2142,7 +2205,16 @@ void print(TopLevelItem const &item, std::ostream &os, int indent, PrintListener
 		{
 			if(listener) listener->before_proc(os, def);
 
-			os << "proc " << def->name << "(";
+			os << "proc " << def->name;
+			if(def->type_params.size())
+			{
+				os << "'(" << RangeFmt(def->type_params, ", ", [&](TypeVarDef const *tvar)
+				{
+					os << tvar->name;
+				});
+				os << ")";
+			}
+			os << "(";
 			os << RangeFmt(def->type.params, ", ", [&](Parameter const &p)
 			{
 				os << p.name << ": " << p.type;
@@ -2174,6 +2246,14 @@ void print(TopLevelItem const &item, std::ostream &os, int indent, PrintListener
 				[&](NoParent)
 				{
 					os << string(indent*INDENT_WIDTH, ' ') << "struct " << def->name;
+					if(def->type_params.size())
+					{
+						os << "'(" << RangeFmt(def->type_params, ", ", [&](TypeVarDef const *tvar)
+						{
+							os << tvar->name;
+						});
+						os << ")";
+					}
 				},
 			};
 
@@ -2214,7 +2294,7 @@ std::ostream& print(std::ostream &os, Module const &mod, PrintListener *listener
 	for(TopLevelItem item: mod.items())
 	{
 		print(item, os, 0, listener);
-		os << "\n";
+		os << "\n\n";
 	}
 
 	return os;
@@ -2393,7 +2473,7 @@ Type parse_type(Parser &parser, Module &mod)
 
 		case Lexeme::CIRCUMFLEX:
 		{
-			Mutability mutability = try_consume(parser, Lexeme::MUT) ? Mutability::MUTABLE : Mutability::CONST;
+			IsMutable mutability = try_consume(parser, Lexeme::MUT) ? IsMutable::YES : IsMutable::NO;
 			Type target_type = parse_type(parser, mod);
 			return PointerType(std::move(target_type), mutability);
 		}
@@ -2402,7 +2482,7 @@ Type parse_type(Parser &parser, Module &mod)
 		{
 			consume(parser, Lexeme::CIRCUMFLEX);
 			consume(parser, Lexeme::RIGHT_BRACKET);
-			Mutability mutability = try_consume(parser, Lexeme::MUT) ? Mutability::MUTABLE : Mutability::CONST;
+			IsMutable mutability = try_consume(parser, Lexeme::MUT) ? IsMutable::YES : IsMutable::NO;
 			Type element_type = parse_type(parser, mod);
 			return ManyPointerType(std::move(element_type), mutability);
 		}
@@ -2585,7 +2665,7 @@ Expr parse_prefix_expr(Parser &parser, Module &mod)
 
 		case Lexeme::AMPERSAND:
 		{
-			Mutability mutability = try_consume(parser, Lexeme::MUT) ? Mutability::MUTABLE : Mutability::CONST;
+			IsMutable mutability = try_consume(parser, Lexeme::MUT) ? IsMutable::YES : IsMutable::NO;
 			Expr sub_expr = parse_expr(parser, mod, *get_operator_info(tok.kind));
 			return with_location(AddressOfExpr(std::move(sub_expr), mutability));
 		}
@@ -2698,9 +2778,9 @@ PatternOp parse_pattern_op(Parser &parser)
 
 	if(try_consume(parser, Lexeme::AMPERSAND))
 	{
-		Mutability mutability = Mutability::CONST;
+		IsMutable mutability = IsMutable::NO;
 		if(try_consume(parser, Lexeme::MUT))
-			mutability = Mutability::MUTABLE;
+			mutability = IsMutable::YES;
 
 		return AddressOfPatternOp(mutability);
 	}
@@ -2716,9 +2796,9 @@ Pattern parse_pattern(Parser &parser, Module &mod)
 		case Lexeme::MUT:
 		case Lexeme::IDENTIFIER:
 		{
-			Mutability mutability = Mutability::CONST;
+			IsMutable mutability = IsMutable::NO;
 			if(try_consume(parser, Lexeme::MUT))
-				mutability = Mutability::MUTABLE;
+				mutability = IsMutable::YES;
 
 			string_view ident = consume(parser, Lexeme::IDENTIFIER).text;
 			VarDef *var = mod.scope()->declare_var(string(ident), mutability, VarKind::LOCAL);
@@ -2858,26 +2938,32 @@ BlockStmt parse_block_stmt(Parser &parser, Module &mod, ScopePolicy policy)
 ProcDef* parse_proc(Parser &parser, Module &mod)
 {
 	string_view name = consume(parser, Lexeme::IDENTIFIER).text;
-	Scope *proc_scope = mod.open_scope();
+	ProcDef *proc = mod.scope()->add_proc(string(name), mod.open_scope());
+
+	// Parse type parameters
+	if(try_consume(parser, Lexeme::SINGLE_QUOTE))
+	{
+		string_view type_var_name = consume(parser, Lexeme::IDENTIFIER).text;
+		TypeVarDef *type_var = proc->scope->declare_type_var(string(type_var_name));
+		proc->type_params.push_back(type_var);
+	}
 
 	// Parse parameters
 	consume(parser, Lexeme::LEFT_PAREN);
-	vector<Parameter> params;
-	vector<VarDef*> param_vars;
 	while(parser.peek() != Lexeme::RIGHT_PAREN)
 	{
 		string_view param_name = consume(parser, Lexeme::IDENTIFIER).text;
 		consume(parser, Lexeme::COLON);
 		Type param_type = parse_type(parser, mod);
-		VarDef *param = mod.scope()->declare_var(string(param_name), Mutability::CONST, VarKind::PARAM);
+		VarDef *param = mod.scope()->declare_var(string(param_name), IsMutable::NO, VarKind::PARAM);
 		param->type = clone(param_type);
-		param_vars.push_back(param);
+		proc->param_vars.push_back(param);
 
 		NullableOwnPtr<Expr> default_value;
 		if(try_consume(parser, Lexeme::EQ))
 			default_value = std::make_unique<Expr>(parse_expr(parser, mod));
 
-		params.push_back(Parameter(string(param_name), std::move(param_type), std::move(default_value)));
+		proc->type.params.push_back(Parameter(string(param_name), std::move(param_type), std::move(default_value)));
 
 		if(parser.peek() != Lexeme::RIGHT_PAREN)
 			consume(parser, Lexeme::COMMA);
@@ -2885,24 +2971,16 @@ ProcDef* parse_proc(Parser &parser, Module &mod)
 	consume(parser, Lexeme::RIGHT_PAREN);
 
 	// Parse return type
-	Type ret_type = BuiltinType::UNIT;
+	proc->type.ret = BuiltinType::UNIT;
 	if(try_consume(parser, Lexeme::THIN_ARROW))
-		ret_type = parse_type(parser, mod);
+		proc->type.ret = parse_type(parser, mod);
 
 	// Parse body
-	optional<Stmt> body;
 	if(!try_consume(parser, Lexeme::SEMICOLON))
-		body = parse_block_stmt(parser, mod, ScopePolicy::REUSE_SCOPE);
+		proc->body = parse_block_stmt(parser, mod, ScopePolicy::REUSE_SCOPE);
 	mod.close_scope();
 
-	return mod.scope()->add_proc(
-		string(name),
-		std::move(params),
-		std::move(param_vars),
-		std::move(ret_type),
-		proc_scope,
-		std::move(body)
-	);
+	return proc;
 }
 
 void gather_initial_params(StructDef *struct_, vector<Parameter> &result)
@@ -2973,7 +3051,7 @@ StructDef* parse_struct(Parser &parser, Module &mod, ParentRelation parent = NoP
 		{
 			string_view member_name = consume(parser, Lexeme::IDENTIFIER).text;
 			consume(parser, Lexeme::COLON);
-			VarDef *member_var = mod.scope()->declare_var(string(member_name), Mutability::MUTABLE, VarKind::FIELD);
+			VarDef *member_var = mod.scope()->declare_var(string(member_name), IsMutable::YES, VarKind::FIELD);
 			member_var->type = parse_type(parser, mod);
 
 			NullableOwnPtr<Expr> init_expr;
@@ -3342,18 +3420,18 @@ bool equiv_type_env(
 
 bool is_struct_assignable(StructType const &dest, StructType const &src)
 {
-	StructDef *dest_def = dest.inst->def;
-	StructDef *src_def = src.inst->def;
+	StructDefInstance *dest_inst = dest.inst;
+	StructDefInstance *src_inst = src.inst;
 
-	if(src_def == dest_def)
+	if(src_inst == dest_inst)
 		return true;
 
-	while(src_def)
+	while(src_inst)
 	{
-		if(src_def->is_case_member_of(dest_def))
+		if(src_inst->is_case_member_of(dest_inst))
 			return true;
 
-		src_def = src_def->try_get_parent();
+		src_inst = src_inst->outer_struct;
 	}
 
 	return false;
@@ -3568,12 +3646,12 @@ void compute_type_layouts(Module &mod)
 //--------------------------------------------------------------------
 // Resolve identifiers
 //--------------------------------------------------------------------
-Type eval_type(Type &type, TypeEnv const &type_env, class Module &mod);
+Type eval_types(Type &type, TypeEnv const &type_env, class Module &mod);
 
 struct NotFound {};
 using ResolveNameResult = variant<NotFound, ProcDef*, StructDef*, Type>;
 
-ResolveNameResult resolve_name(string const &name, TypeEnv const &type_env, Scope *scope, bool traverse_upwards = true)
+ResolveNameResult resolve_name(string const &name, Scope *scope, bool traverse_upwards = true)
 {
 	ItemDef *item = scope->try_lookup_item(name, traverse_upwards);
 	if(!item)
@@ -3585,7 +3663,7 @@ ResolveNameResult resolve_name(string const &name, TypeEnv const &type_env, Scop
 		[&](StructDef &def) -> ResolveNameResult { return &def; },
 		[&](AliasDef &alias) -> ResolveNameResult
 		{
-			resolve_types(alias.type, type_env, *scope->mod());
+			resolve_types(alias.type, *scope->mod());
 			return clone(*strip_alias(alias.type));
 		},
 	};
@@ -3599,7 +3677,7 @@ bool is_concrete(Type &type, TypeEnv const &type_env, Module &mod)
 		[&](VarType const&) { return false; },
 		[&](UnresolvedType const&)
 		{
-			resolve_types(type, type_env, mod);
+			resolve_types(type, mod);
 			return is_concrete(type, type_env, mod);
 		},
 		[&](PointerType const &t)
@@ -3635,14 +3713,14 @@ bool is_concrete(Type &type, TypeEnv const &type_env, Module &mod)
 }
 
 
-TypeEnv create_type_env(StructDef *def, TypeArgList &&type_args)
+TypeEnv create_type_env(vector<TypeVarDef*> const &type_params, TypeArgList &&type_args)
 {
-	assert(type_args.size() == def->type_params.size());
+	assert(type_args.size() == type_params.size());
 
 	TypeEnv type_env;
-	for(size_t i = 0; i < def->type_params.size(); ++i)
+	for(size_t i = 0; i < type_params.size(); ++i)
 	{
-		TypeVarDef *tparam = def->type_params[i];
+		TypeVarDef *tparam = type_params[i];
 		type_env[tparam] = std::move(type_args.args[i]);
 	}
 
@@ -3665,7 +3743,7 @@ StructDefInstance* instantiate_struct(
 			args_concrete = false;
 	}
 
-	StructDefInstanceKey inst_key{clone(type_args), outer_struct};
+	DefInstanceKey inst_key{clone(type_args), outer_struct};
 	auto it = struct_->instances.find(inst_key);
 	if(it != struct_->instances.end())
 		return &it->second;
@@ -3676,7 +3754,7 @@ StructDefInstance* instantiate_struct(
 	instance->type_args = clone(type_args);
 	instance->is_concrete = args_concrete;
 
-	instance->type_env = create_type_env(struct_, clone(type_args));
+	instance->type_env = create_type_env(struct_->type_params, clone(type_args));
 	if(outer_struct)
 	{
 		for(auto &[tvar, type]: outer_struct->type_env)
@@ -3689,7 +3767,7 @@ StructDefInstance* instantiate_struct(
 		for(Parameter &p: *struct_->constructor_params)
 		{
 			Parameter inst_param = clone(p);
-			inst_param.type = eval_type(p.type, instance->type_env, *struct_->scope->mod());
+			inst_param.type = eval_types(p.type, instance->type_env, *struct_->scope->mod());
 			instance->constructor_params->push_back(std::move(inst_param));
 		}
 	}
@@ -3701,7 +3779,7 @@ StructDefInstance* instantiate_struct(
 			[&](Parameter &p)
 			{
 				Parameter inst_param = clone(p);
-				inst_param.type = eval_type(p.type, instance->type_env, *struct_->scope->mod());
+				inst_param.type = eval_types(p.type, instance->type_env, *struct_->scope->mod());
 				instance->members.push_back(std::move(inst_param));
 			},
 			[&](StructDef *case_member)
@@ -3715,13 +3793,47 @@ StructDefInstance* instantiate_struct(
 	return instance;
 }
 
-void resolve_type_args(TypeArgList &type_args, TypeEnv const &type_env, Module &mod)
+ProcDefInstance* instantiate_proc(ProcDef *proc, TypeArgList &&type_args)
 {
-	for(Type &arg: type_args)
-		resolve_types(arg, type_env, mod);
+	if(type_args.size() != proc->type_params.size())
+		throw ParseError("Invalid number of type arguments for " + proc->name);
+
+	bool args_concrete = true;
+	for(Type &type: type_args)
+	{
+		if(not is_concrete(type, {}, *proc->scope->mod()))
+			args_concrete = false;
+	}
+
+	auto it = proc->instances.find(clone(type_args));
+	if(it != proc->instances.end())
+		return &it->second;
+
+	ProcDefInstance *instance = &proc->instances.emplace(std::pair{clone(type_args), ProcDefInstance()}).first->second;
+	instance->def = proc;
+	instance->type_args = clone(type_args);
+	instance->is_concrete = args_concrete;
+
+	instance->type_env = create_type_env(proc->type_params, clone(type_args));
+
+	for(Parameter &p: proc->type.params)
+	{
+		Parameter inst_param = clone(p);
+		inst_param.type = eval_types(p.type, instance->type_env, *proc->scope->mod());
+		instance->type.params.push_back(std::move(inst_param));
+	}
+	instance->type.ret = eval_types(proc->type.ret, instance->type_env, *proc->scope->mod());
+
+	return instance;
 }
 
-variant<ProcDef*, Type> instantiate_item(vector<PathSegment> &&path, TypeEnv const &type_env, Scope *scope)
+void resolve_type_args(TypeArgList &type_args, Module &mod)
+{
+	for(Type &arg: type_args)
+		resolve_types(arg, mod);
+}
+
+variant<ProcDefInstance*, Type> instantiate_item(vector<PathSegment> &&path, TypeEnv const &type_env, Scope *scope)
 {
 	StructDefInstance *outer_struct = nullptr;
 	bool first_iteration = true;
@@ -3730,8 +3842,8 @@ variant<ProcDef*, Type> instantiate_item(vector<PathSegment> &&path, TypeEnv con
 	{
 		last_iteration = &segment == &path.back();
 
-		resolve_type_args(segment.type_args, type_env, *scope->mod());
-		ResolveNameResult item = resolve_name(segment.name, type_env, scope, first_iteration);
+		resolve_type_args(segment.type_args, *scope->mod());
+		ResolveNameResult item = resolve_name(segment.name, scope, first_iteration);
 
 		if(Type *resolved_type = std::get_if<Type>(&item))
 		{
@@ -3753,7 +3865,7 @@ variant<ProcDef*, Type> instantiate_item(vector<PathSegment> &&path, TypeEnv con
 		{
 			TypeArgList type_args;
 			for(Type &arg: segment.type_args)
-				type_args.args.push_back(eval_type(arg, type_env, *scope->mod()));
+				type_args.args.push_back(eval_types(arg, type_env, *scope->mod()));
 			
 			StructDefInstance *inst = instantiate_struct(*struct_, std::move(type_args), outer_struct);
 			if(last_iteration)
@@ -3764,13 +3876,16 @@ variant<ProcDef*, Type> instantiate_item(vector<PathSegment> &&path, TypeEnv con
 		}
 		else if(ProcDef **proc = std::get_if<ProcDef*>(&item))
 		{
-			if(segment.type_args.size())
-				throw ParseError("Procedures cannot have type arguments");
+			TypeArgList type_args;
+			for(Type &arg: segment.type_args)
+				type_args.args.push_back(eval_types(arg, type_env, *scope->mod()));
+
+			ProcDefInstance *inst = instantiate_proc(*proc, std::move(type_args));
 
 			if(not last_iteration)
 				throw ParseError("Procedures cannot have child elements");
 
-			return *proc;
+			return inst;
 		}
 		else
 			throw ParseError("Undeclared identifier: "s + segment.name);
@@ -3781,7 +3896,7 @@ variant<ProcDef*, Type> instantiate_item(vector<PathSegment> &&path, TypeEnv con
 	UNREACHABLE;
 }
 
-void resolve_types(Type &type, TypeEnv const &type_env, Module &mod)
+void resolve_types(Type &type, Module &mod)
 {
 	type | match
 	{
@@ -3789,34 +3904,34 @@ void resolve_types(Type &type, TypeEnv const &type_env, Module &mod)
 		[&](VarType&) {},
 		[&](PointerType &t)
 		{
-			resolve_types(*t.target_type, type_env, mod);
+			resolve_types(*t.target_type, mod);
 		},
 		[&](ManyPointerType &t)
 		{
-			resolve_types(*t.element_type, type_env, mod);
+			resolve_types(*t.element_type, mod);
 		},
 		[&](StructType&) {},
 		[&](ProcType &t)
 		{
-			resolve_types(t.def->ret, type_env, mod);
+			resolve_types(t.def->ret, mod);
 			for(Parameter &p: t.def->params)
-				resolve_types(p.type, type_env, mod);
+				resolve_types(p.type, mod);
 
 			t.canonical_def = mod.canonicalize(clone(*t.def));
 		},
 		[&](AliasType&) {},
 		[&](UnresolvedType &t)
 		{
-			variant<ProcDef*, Type> item_inst = instantiate_item(std::move(t.path), type_env, t.scope);
+			variant<ProcDefInstance*, Type> item_inst = instantiate_item(std::move(t.path), {}, t.scope);
 			item_inst | match
 			{
 				[&](Type &type_inst)
 				{
 					type = std::move(type_inst);
 				},
-				[&](ProcDef *proc)
+				[&](ProcDefInstance *proc)
 				{
-					throw ParseError("Undeclared type: "s + proc->name);
+					throw ParseError("Undeclared type: "s + proc->def->name);
 				}
 			};
 		},
@@ -3824,7 +3939,7 @@ void resolve_types(Type &type, TypeEnv const &type_env, Module &mod)
 }
 
 
-void resolve_identifiers(Expr &expr, TypeEnv const &type_env, Scope *scope)
+void resolve_identifiers(Expr &expr, Scope *scope)
 {
 	expr | match
 	{
@@ -3834,14 +3949,14 @@ void resolve_identifiers(Expr &expr, TypeEnv const &type_env, Scope *scope)
 		[&](StringLiteralExpr&) {},
 		[&](UnresolvedExpr &e)
 		{
-			variant<ProcDef*, Type> item_inst = instantiate_item(std::move(e.path), type_env, e.scope);
+			variant<ProcDefInstance*, Type> item_inst = instantiate_item(std::move(e.path), {}, e.scope);
 			item_inst | match
 			{
 				[&](Type &type_inst)
 				{
 					expr = Expr(TypeExpr(std::move(type_inst)), expr.span);
 				},
-				[&](ProcDef *proc)
+				[&](ProcDefInstance *proc)
 				{
 					expr = Expr(ProcExpr(proc), expr.span);
 				}
@@ -3850,129 +3965,129 @@ void resolve_identifiers(Expr &expr, TypeEnv const &type_env, Scope *scope)
 		[&](VarExpr&) {},
 		[&](TypeExpr &e)
 		{
-			resolve_types(e.type, type_env, *scope->mod());
+			resolve_types(e.type, *scope->mod());
 		},
 		[&](ProcExpr&) {},
 		[&](UnaryExpr &e)
 		{
-			resolve_identifiers(*e.sub, type_env, scope);
+			resolve_identifiers(*e.sub, scope);
 		},
 		[&](BinaryExpr &e)
 		{
-			resolve_identifiers(*e.left, type_env, scope);
-			resolve_identifiers(*e.right, type_env, scope);
+			resolve_identifiers(*e.left, scope);
+			resolve_identifiers(*e.right, scope);
 		},
 		[&](AddressOfExpr &e)
 		{
-			resolve_identifiers(*e.object_expr, type_env, scope);
+			resolve_identifiers(*e.object_expr, scope);
 		},
 		[&](DerefExpr &e)
 		{
-			resolve_identifiers(*e.ptr_expr, type_env, scope);
+			resolve_identifiers(*e.ptr_expr, scope);
 		},
 		[&](IndexExpr &e)
 		{
-			resolve_identifiers(*e.ptr_expr, type_env, scope);
-			resolve_identifiers(*e.idx_expr, type_env, scope);
+			resolve_identifiers(*e.ptr_expr, scope);
+			resolve_identifiers(*e.idx_expr, scope);
 		},
 		[&](MemberAccessExpr &e)
 		{
-			resolve_identifiers(*e.object, type_env, scope);
+			resolve_identifiers(*e.object, scope);
 		},
 		[&](AssignmentExpr &e)
 		{
-			resolve_identifiers(*e.lhs, type_env, scope);
-			resolve_identifiers(*e.rhs, type_env, scope);
+			resolve_identifiers(*e.lhs, scope);
+			resolve_identifiers(*e.rhs, scope);
 		},
 		[&](AsExpr &e)
 		{
-			resolve_identifiers(*e.src_expr, type_env, scope);
-			resolve_types(e.target_type, type_env, *scope->mod());
+			resolve_identifiers(*e.src_expr, scope);
+			resolve_types(e.target_type, *scope->mod());
 		},
 		[&](CallExpr &e)
 		{
-			resolve_identifiers(*e.callable, type_env, scope);
+			resolve_identifiers(*e.callable, scope);
 			for(Argument &arg: e.args)
-				resolve_identifiers(*arg.expr, type_env, scope);
+				resolve_identifiers(*arg.expr, scope);
 		},
 		[&](SizeOfExpr &e)
 		{
-			resolve_types(e.type, type_env, *scope->mod());
+			resolve_types(e.type, *scope->mod());
 		},
 		[&](MakeExpr &e)
 		{
-			resolve_identifiers(*e.init, type_env, scope);
-			resolve_identifiers(*e.addr, type_env, scope);
+			resolve_identifiers(*e.init, scope);
+			resolve_identifiers(*e.addr, scope);
 		},
 	};
 }
 
-void resolve_identifiers(Pattern &pattern, TypeEnv const &type_env, Scope *scope)
+void resolve_identifiers(Pattern &pattern, Scope *scope)
 {
 	pattern | match
 	{
 		[&](VarPattern const &p)
 		{
 			if(p.var->type)
-				resolve_types(*p.var->type, type_env, *scope->mod());
+				resolve_types(*p.var->type, *scope->mod());
 		}
 	};
 }
 
-void resolve_identifiers(Stmt &stmt, TypeEnv const &type_env, Scope *scope)
+void resolve_identifiers(Stmt &stmt, Scope *scope)
 {
 	stmt | match
 	{
 		[&](LetStmt &s)
 		{
-			resolve_identifiers(s.lhs, type_env, scope);
-			resolve_identifiers(s.init_expr, type_env, scope);
+			resolve_identifiers(s.lhs, scope);
+			resolve_identifiers(s.init_expr, scope);
 		},
 		[&](ExprStmt &s)
 		{
-			resolve_identifiers(s.expr, type_env, scope);
+			resolve_identifiers(s.expr, scope);
 		},
 		[&](BlockStmt &s)
 		{
 			for(OwnPtr<Stmt> &stmt: s.stmts)
-				resolve_identifiers(*stmt, type_env, s.scope);
+				resolve_identifiers(*stmt, s.scope);
 		},
 		[&](ReturnStmt &s)
 		{
 			if(s.ret_expr)
-				resolve_identifiers(*s.ret_expr, type_env, scope);
+				resolve_identifiers(*s.ret_expr, scope);
 		},
 		[&](IfStmt &s)
 		{
-			resolve_identifiers(s.condition, type_env, scope);
-			resolve_identifiers(*s.then, type_env, scope);
+			resolve_identifiers(s.condition, scope);
+			resolve_identifiers(*s.then, scope);
 			if(s.else_)
-				resolve_identifiers(*s.else_, type_env, scope);
+				resolve_identifiers(*s.else_, scope);
 		},
 		[&](WhileStmt &s)
 		{
-			resolve_identifiers(s.condition, type_env, scope);
-			resolve_identifiers(*s.body, type_env, scope);
+			resolve_identifiers(s.condition, scope);
+			resolve_identifiers(*s.body, scope);
 		},
 		[&](MatchStmt &s)
 		{
-			resolve_identifiers(s.expr, type_env, scope);
+			resolve_identifiers(s.expr, scope);
 			for(MatchArm &arm: s.arms)
 			{
-				resolve_types(arm.type, type_env, *scope->mod());
-				resolve_identifiers(*arm.stmt, type_env, scope);
+				resolve_types(arm.type, *scope->mod());
+				resolve_identifiers(*arm.stmt, scope);
 			}
 		},
 	};
 }
 
-void resolve_identifiers(vector<Parameter> &params, TypeEnv const &type_env, Scope *scope)
+void resolve_identifiers(vector<Parameter> &params, Scope *scope)
 {
 	for(Parameter &param: params)
 	{
-		resolve_types(param.type, type_env, *scope->mod());
+		resolve_types(param.type, *scope->mod());
 		if(param.default_value)
-			resolve_identifiers(*param.default_value, type_env, scope);
+			resolve_identifiers(*param.default_value, scope);
 	}
 }
 
@@ -3982,15 +4097,15 @@ void resolve_identifiers(TopLevelItem item, Module &mod)
 	{
 		[&](ProcDef *def)
 		{
-			resolve_identifiers(def->type.params, {}, def->scope->parent());
+			resolve_identifiers(def->type.params, def->scope->parent());
 
 			for(VarDef *param: def->param_vars)
-				resolve_types(param->type.value(), {}, mod);
+				resolve_types(param->type.value(), mod);
 
 			if(def->body)
-				resolve_identifiers(*def->body, {}, def->scope);
+				resolve_identifiers(*def->body, def->scope);
 
-			resolve_types(def->type.ret, {}, mod);
+			resolve_types(def->type.ret, mod);
 		},
 		[&](StructDef *def)
 		{
@@ -4000,9 +4115,9 @@ void resolve_identifiers(TopLevelItem item, Module &mod)
 				{
 					[&](Parameter &var_member)
 					{
-						resolve_types(var_member.type, {}, mod);
+						resolve_types(var_member.type, mod);
 						if(var_member.default_value)
-							resolve_identifiers(*var_member.default_value, {}, def->scope);
+							resolve_identifiers(*var_member.default_value, def->scope);
 					},
 					[&](StructDef *case_member)
 					{
@@ -4012,11 +4127,11 @@ void resolve_identifiers(TopLevelItem item, Module &mod)
 			}
 
 			if(def->constructor_params)
-				resolve_identifiers(*def->constructor_params, {}, def->scope);
+				resolve_identifiers(*def->constructor_params, def->scope);
 		},
 		[&](AliasDef *def)
 		{
-			resolve_types(def->type, {}, mod);
+			resolve_types(def->type, mod);
 		},
 	};
 }
@@ -4026,6 +4141,200 @@ void resolve_identifiers(Module &mod)
 {
 	for(TopLevelItem item: mod.items())
 		resolve_identifiers(item, mod);
+}
+
+
+//--------------------------------------------------------------------
+// Type evaluation
+//--------------------------------------------------------------------
+StructDefInstance* eval_types(StructDefInstance *inst, TypeEnv const &type_env, Module &mod)
+{
+	// Evaluate types of outer struct instance, if it exists
+	StructDefInstance *new_outer_struct = nullptr;
+	if(inst->outer_struct)
+		new_outer_struct = eval_types(inst->outer_struct, type_env, mod);
+
+	// Evaluate the type args of `inst` under `type_env`
+	TypeArgList new_type_args;
+	for(Type &arg: inst->type_args)
+		new_type_args.args.push_back(eval_types(arg, type_env, mod));
+
+	return instantiate_struct(inst->def, std::move(new_type_args), new_outer_struct);
+}
+
+Type eval_types(Type &type, TypeEnv const &type_env, Module &mod)
+{
+	return type | match
+	{
+		[&](BuiltinType const&) { return clone(type); },
+		[&](VarType const &t)
+		{
+			auto it = type_env.find(t.var);
+			if(it != type_env.end())
+				return clone(it->second);
+
+			return Type(t);
+		},
+		[&](PointerType const &t)
+		{
+			return Type(PointerType(eval_types(*t.target_type, type_env, mod), t.mutability));
+		},
+		[&](ManyPointerType const &t)
+		{
+			return Type(ManyPointerType(eval_types(*t.element_type, type_env, mod), t.mutability));
+		},
+		[&](StructType const &t)
+		{
+			return Type(StructType(eval_types(t.inst, type_env, mod)));
+		},
+		[&](ProcType const &t) -> Type
+		{
+			ProcTypeDef new_type;
+			for(Parameter const &p: t.def->params)
+			{
+				Parameter new_param = clone(p);
+				new_param.type = eval_types(new_param.type, type_env, mod);
+				new_type.params.push_back(std::move(new_param));
+			}
+
+			new_type.ret = eval_types(t.def->ret, type_env, mod);
+			ProcTypeDef *def = mod.add_proc_type(std::move(new_type));
+
+			return Type(ProcType(def, mod.canonicalize(clone(*def))));
+		},
+		[&](AliasType const &t) -> Type
+		{
+			return eval_types(t.def->type, type_env, mod);
+		},
+		[&](UnresolvedType const&)
+		{
+			resolve_types(type, mod);
+			return eval_types(type, type_env, mod);
+		},
+	};
+}
+
+
+void eval_types(Expr &expr, TypeEnv const &type_env, Module &mod)
+{
+	expr.type = eval_types(*expr.type, type_env, mod);
+	expr | match
+	{
+		[&](IntLiteralExpr&) {},
+		[&](BoolLiteralExpr&) {},
+		[&](NullLiteralExpr&) {},
+		[&](StringLiteralExpr&) {},
+		[&](UnresolvedExpr&) { assert(!"eval_types: UnresolvedExpr"); },
+		[&](VarExpr&) {},
+		[&](TypeExpr &e)
+		{
+			e.type = eval_types(e.type, type_env, mod);
+		},
+		[&](ProcExpr &e)
+		{
+			TypeArgList new_type_args;
+			for(Type &arg: e.inst->type_args)
+				new_type_args.args.push_back(eval_types(arg, type_env, mod));
+
+			e.inst = instantiate_proc(e.inst->def, std::move(new_type_args));
+			expr.type = ProcType(&e.inst->type, mod.canonicalize(clone(e.inst->type)));
+		},
+		[&](UnaryExpr &e)
+		{
+			eval_types(*e.sub, type_env, mod);
+		},
+		[&](BinaryExpr &e)
+		{
+			eval_types(*e.left, type_env, mod);
+			eval_types(*e.right, type_env, mod);
+		},
+		[&](AddressOfExpr &e)
+		{
+			eval_types(*e.object_expr, type_env, mod);
+		},
+		[&](DerefExpr &e)
+		{
+			eval_types(*e.ptr_expr, type_env, mod);
+		},
+		[&](IndexExpr &e)
+		{
+			eval_types(*e.ptr_expr, type_env, mod);
+			eval_types(*e.idx_expr, type_env, mod);
+		},
+		[&](MemberAccessExpr &e)
+		{
+			eval_types(*e.object, type_env, mod);
+		},
+		[&](AssignmentExpr &e)
+		{
+			eval_types(*e.lhs, type_env, mod);
+			eval_types(*e.rhs, type_env, mod);
+		},
+		[&](AsExpr &e)
+		{
+			eval_types(*e.src_expr, type_env, mod);
+		},
+		[&](CallExpr &e)
+		{
+			eval_types(*e.callable, type_env, mod);
+
+			for(Argument &arg: e.args)
+				eval_types(*arg.expr, type_env, mod);
+		},
+		[&](SizeOfExpr&) {},
+		[&](MakeExpr &e)
+		{
+			eval_types(*e.init, type_env, mod);
+			eval_types(*e.addr, type_env, mod);
+		},
+	};
+}
+
+void eval_types(Stmt &stmt, TypeEnv const &type_env, Module &mod)
+{
+	stmt | match
+	{
+		[&](LetStmt &s)
+		{
+			eval_types(s.init_expr, type_env, mod);
+		},
+		[&](ExprStmt &s)
+		{
+			eval_types(s.expr, type_env, mod);
+		},
+		[&](BlockStmt &s)
+		{
+			for(OwnPtr<Stmt> &stmt: s.stmts)
+				eval_types(*stmt, type_env, mod);
+		},
+		[&](ReturnStmt &s)
+		{
+			if(s.ret_expr)
+				eval_types(*s.ret_expr, type_env, mod);
+		},
+		[&](IfStmt &s)
+		{
+			eval_types(s.condition, type_env, mod);
+			eval_types(*s.then, type_env, mod);
+
+			if(s.else_)
+				eval_types(*s.else_, type_env, mod);
+		},
+		[&](WhileStmt &s)
+		{
+			eval_types(s.condition, type_env, mod);
+			eval_types(*s.body, type_env, mod);
+		},
+		[&](MatchStmt &s)
+		{
+			eval_types(s.expr, type_env, mod);
+			for(MatchArm &arm: s.arms)
+			{
+				arm.type = eval_types(arm.type, type_env, mod);
+				eval_types(*arm.stmt, type_env, mod);
+			}
+		},
+	};
 }
 
 
@@ -4043,28 +4352,28 @@ optional<size_t> find_by_name(vector<Parameter> &params, string const &name)
 	return nullopt;
 }
 
-optional<Mutability> is_lvalue_expr(Expr const &expr)
+optional<IsMutable> is_lvalue_expr(Expr const &expr)
 {
 	return expr | match
 	{
-		[](VarExpr const &e) -> optional<Mutability>
+		[](VarExpr const &e) -> optional<IsMutable>
 		{
 			return e.var->mutability;
 		},
-		[](DerefExpr const &e) -> optional<Mutability>
+		[](DerefExpr const &e) -> optional<IsMutable>
 		{
 			return std::get<PointerType>(*e.ptr_expr->type).mutability;
 		},
-		[](IndexExpr const &e) -> optional<Mutability>
+		[](IndexExpr const &e) -> optional<IsMutable>
 		{
 			return std::get<ManyPointerType>(*e.ptr_expr->type).mutability;
 		},
-		[](MemberAccessExpr const &e) -> optional<Mutability>
+		[](MemberAccessExpr const &e) -> optional<IsMutable>
 		{
 			return is_lvalue_expr(*e.object);
 		},
 
-		[](auto const&) -> optional<Mutability> { return nullopt; },
+		[](auto const&) -> optional<IsMutable> { return nullopt; },
 	};
 }
 
@@ -4143,48 +4452,34 @@ Parameter* find_var_member(StructDefInstance *struct_inst, string const &field)
 	return nullptr;
 }
 
-Type eval_type(Type &type, TypeEnv const &type_env, Module &mod)
-{
-	return type | match
-	{
-		[&](BuiltinType const&) { return clone(type); },
-		[&](VarType const &t)
-		{
-			auto it = type_env.find(t.var);
-			if(it != type_env.end())
-				return clone(it->second);
+void add_size_to_alloc_call(Expr &addr, Expr &&size_expr);
 
-			return Type(t);
-		},
-		[&](PointerType const &t)
+
+vector<Parameter>& get_callee_params(CallExpr const &e)
+{
+	return *e.callable->type | match
+	{
+		[&](ProcType &t) -> vector<Parameter>&
 		{
-			return Type(PointerType(eval_type(*t.target_type, type_env, mod), t.mutability));
+			return t.def->params;
 		},
-		[&](ManyPointerType const &t)
+		[&](auto&) -> vector<Parameter>&
 		{
-			return Type(ManyPointerType(eval_type(*t.element_type, type_env, mod), t.mutability));
-		},
-		[&](StructType const &t)
-		{
-			return Type(t);
-		},
-		[&](ProcType const&) -> Type
-		{
-			assert(!"eval_type: ProcType: TODO");
-		},
-		[&](AliasType const &t) -> Type
-		{
-			return eval_type(t.def->type, type_env, mod);
-		},
-		[&](UnresolvedType const&)
-		{
-			resolve_types(type, type_env, mod);
-			return eval_type(type, type_env, mod);
+			return *e.callable | match
+			{
+				[&](TypeExpr &type_expr) -> vector<Parameter>&
+				{
+					StructType *struct_type = std::get_if<StructType>(&type_expr.type);
+					return struct_type->inst->constructor_params.value();
+				},
+				[&](auto&) -> vector<Parameter>&
+				{
+					UNREACHABLE;
+				},
+			};
 		},
 	};
 }
-
-void add_size_to_alloc_call(Expr &addr, Expr &&size_expr);
 
 void typecheck(Expr &expr, Module &mod)
 {
@@ -4210,7 +4505,7 @@ void typecheck(Expr &expr, Module &mod)
 				{
 					ItemDef *c_char_item = mod.global()->lookup_item("c_char");
 					AliasDef &c_char = std::get<AliasDef>(*c_char_item);
-					expr.type = ManyPointerType(AliasType(&c_char), Mutability::CONST);
+					expr.type = ManyPointerType(AliasType(&c_char), IsMutable::NO);
 				} break;
 			}
 		},
@@ -4226,7 +4521,7 @@ void typecheck(Expr &expr, Module &mod)
 		},
 		[&](ProcExpr &e)
 		{
-			expr.type = ProcType(&e.def->type, mod.canonicalize(clone(e.def->type)));
+			expr.type = ProcType(&e.inst->type, mod.canonicalize(clone(e.inst->type)));
 		},
 		[&](UnaryExpr &e)
 		{
@@ -4263,9 +4558,9 @@ void typecheck(Expr &expr, Module &mod)
 		[&](AddressOfExpr &e)
 		{
 			typecheck(*e.object_expr, mod);
-			if(optional<Mutability> mutability = is_lvalue_expr(*e.object_expr))
+			if(optional<IsMutable> mutability = is_lvalue_expr(*e.object_expr))
 			{
-				if(*mutability == Mutability::MUTABLE || e.mutability == Mutability::CONST)
+				if(*mutability == IsMutable::YES || e.mutability == IsMutable::NO)
 				{
 					expr.type = PointerType(clone(*e.object_expr->type), e.mutability);
 					return;
@@ -4327,7 +4622,7 @@ void typecheck(Expr &expr, Module &mod)
 			if(!is_expr_assignable(*e.lhs->type, *e.rhs))
 				throw ParseError("LHS and RHS have incompatible types in assignment");
 
-			if(is_lvalue_expr(*e.lhs) == Mutability::MUTABLE)
+			if(is_lvalue_expr(*e.lhs) == IsMutable::YES)
 				expr.type = clone(*e.lhs->type);
 			else
 				throw ParseError("LHS does not denote a mutable lvalue in assignment");
@@ -4348,7 +4643,6 @@ void typecheck(Expr &expr, Module &mod)
 			{
 				[&](ProcType &t)
 				{
-					e.callable_params = &t.def->params;
 					expr.type = clone(t.def->ret);
 				},
 				[&](auto&)
@@ -4364,7 +4658,6 @@ void typecheck(Expr &expr, Module &mod)
 							if(not struct_type->inst->constructor_params)
 								throw ParseError("Struct does not provide a constructor: " + struct_type->inst->def->name);
 
-							e.callable_params = &struct_type->inst->constructor_params.value();
 							expr.type = clone(*e.callable->type);
 						},
 						[&](auto&)
@@ -4375,7 +4668,8 @@ void typecheck(Expr &expr, Module &mod)
 				},
 			};
 
-			if(e.args.size() > e.callable_params->size())
+			vector<Parameter> &callee_params = get_callee_params(e);
+			if(e.args.size() > callee_params.size())
 				throw ParseError("Too many arguments");
 
 			unordered_set<size_t> assigned_params;
@@ -4388,7 +4682,7 @@ void typecheck(Expr &expr, Module &mod)
 				// Find the corresponding parameter depending on whether the argument is named or not
 				if(arg.name)
 				{
-					if(optional<size_t> param_idx_opt = find_by_name(*e.callable_params, *arg.name))
+					if(optional<size_t> param_idx_opt = find_by_name(callee_params, *arg.name))
 					{
 						arg.param_idx = *param_idx_opt;
 						if(*param_idx_opt != i)
@@ -4409,16 +4703,16 @@ void typecheck(Expr &expr, Module &mod)
 				if(!res.second)
 					throw ParseError("Multiple arguments for same parameter");
 
-				Parameter &param = e.callable_params->at(*arg.param_idx);
+				Parameter &param = callee_params.at(*arg.param_idx);
 				if(!is_expr_assignable(param.type, *arg.expr))
 					throw ParseError("Procedure/struct argument has invalid type");
 			}
 
-			for(size_t param_idx = 0; param_idx < e.callable_params->size(); ++param_idx)
+			for(size_t param_idx = 0; param_idx < callee_params.size(); ++param_idx)
 			{
 				if(!assigned_params.contains(param_idx))
 				{
-					if(!e.callable_params->at(param_idx).default_value)
+					if(!callee_params.at(param_idx).default_value)
 						throw ParseError("Missing value for procedure/struct argument in call");
 				}
 			}
@@ -4434,7 +4728,7 @@ void typecheck(Expr &expr, Module &mod)
 			add_size_to_alloc_call(*e.addr, Expr(SizeOfExpr(clone(*e.init->type)), {}));
 			typecheck(*e.addr, mod);
 
-			expr.type = PointerType(clone(*e.init->type), Mutability::MUTABLE);
+			expr.type = PointerType(clone(*e.init->type), IsMutable::YES);
 		},
 	};
 }
@@ -4445,7 +4739,7 @@ void add_size_to_alloc_call(Expr &addr, Expr &&size_expr)
 	{
 		if(ProcExpr *proc_expr = std::get_if<ProcExpr>(addr_call->callable.get()))
 		{
-			vector<Parameter> const &params = proc_expr->def->type.params;
+			vector<Parameter> const &params = proc_expr->inst->type.params;
 			if(
 				addr_call->args.size() == 0 &&
 				params.size() == 1 &&
@@ -4476,9 +4770,9 @@ Type apply_pattern_op(PatternOp const &op, Expr const &expr, Type const &expr_ty
 		},
 		[&](AddressOfPatternOp const &o)
 		{
-			if(optional<Mutability> mutability = is_lvalue_expr(expr))
+			if(optional<IsMutable> mutability = is_lvalue_expr(expr))
 			{
-				if(*mutability == Mutability::MUTABLE || o.mutability == Mutability::CONST)
+				if(*mutability == IsMutable::YES || o.mutability == IsMutable::NO)
 					return Type(PointerType(clone(expr_type), o.mutability));
 
 				throw ParseError("Cannot make mutable reference to const object");
@@ -4783,17 +5077,28 @@ private:
 // <symbol> ::= '_Y' <kind> <path-segment>+
 //
 // <kind> ::= 'T'  // type
-//          | 'F'  // function
+//          | 'F'  // Procedure
 //          | 'C'  // constructor
 //
 // <path-segment> ::= <id-segment> | <type-segment>
 //
 // <id-segment> ::= <num>                   // length of the following identifier
 //                  <identifier>
-//                  ('G' <path-segment>+)*  // Generic type arguments start with 'G'
+//                  ('G' <path-segment>+ 'E')*  // Generic type arguments start with 'G' and ends with 'E'
 //
 // <type-segment> ::= 'P' 'm'? <path-segment>  // Pointer
 //                  | 'M' 'm'? <path-segment>  // Many pointer
+
+string mangle_type_segment(Type const &type);
+
+string mangle_type_args(TypeArgList const &types)
+{
+	string mangled;
+	for(Type const &arg: types)
+		mangled += 'G' + mangle_type_segment(arg) + 'E';
+
+	return mangled;
+}
 
 string mangle_type_segment(Type const &type)
 {
@@ -4837,8 +5142,7 @@ string mangle_type_segment(Type const &type)
 		[&](StructType const &struct_)
 		{
 			string segment = std::to_string(struct_.inst->def->name.length()) + struct_.inst->def->name;
-			for(Type const &arg: struct_.inst->type_args)
-				segment += 'G' + mangle_type_segment(arg);
+			segment += mangle_type_args(struct_.inst->type_args);
 
 			if(struct_.inst->outer_struct)
 				return mangle_type_segment(StructType(struct_.inst->outer_struct)) + segment;
@@ -4865,20 +5169,21 @@ string mangle_constructor(Type const &type)
 	return "_YC" + mangle_type_segment(type);
 }
 
+string mangle_procedure(ProcDefInstance const *proc)
+{
+	if(proc->def->name == "main" || not proc->def->body)
+		return proc->def->name;
+
+	string mangled = std::to_string(proc->def->name.length()) + proc->def->name;
+	mangled += mangle_type_args(proc->type_args);
+
+	return "_YF" + mangled;
+}
+
 
 //--------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------
-string get_fq_name(StructDef const *struct_)
-{
-	return struct_->parent | match
-	{
-		[&](NoParent)            { return struct_->name; },
-		[&](CaseMemberOf parent) { return get_fq_name(parent.struct_) + "__" + struct_->name; },
-		[&](ExtensionOf)         { return struct_->name; },
-	};
-}
-
 string generate_c_to_str(BuiltinType const &type)
 {
 	switch(type)
@@ -5015,7 +5320,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](ProcExpr const &e)
 		{
-			return e.def->name;
+			return mangle_procedure(e.inst);
 		},
 		[&](UnaryExpr const &e)
 		{
@@ -5074,7 +5379,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](CallExpr const &e)
 		{
-			vector<Parameter> const &params = *e.callable_params;
+			vector<Parameter> const &params = get_callee_params(e);
 
 			// Evaluate arguments in the order they were provided
 			vector<string> arg_vals(params.size());
@@ -5157,7 +5462,7 @@ void generate_c(Pattern const &lhs_pattern, string const &rhs_expr, Type const &
 	};
 }
 
-void generate_c(Stmt const &stmt, ProcDef const *proc, CBackend &backend)
+void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend)
 {
 	stmt | match
 	{
@@ -5429,14 +5734,14 @@ void generate_c_struct_methods(CStruct const &cstruct, CBackend &backend)
 }
 
 
-void generate_c_proc_sig(ProcDef const *proc, CBackend &backend)
+void generate_c_proc_sig(ProcDefInstance const *proc, CBackend &backend)
 {
 	if(equiv(proc->type.ret, BuiltinType::UNIT))
 		backend << "void";
 	else
 		backend << proc->type.ret;
 
-	backend << " " << proc->name << "(";
+	backend << " " << mangle_procedure(proc) << "(";
 	backend << RangeFmt(proc->type.params, ", ", [&](Parameter const &p)
 	{
 		backend << p.type << " " << p.name;
@@ -5669,16 +5974,27 @@ void gather_concrete_instances(StructDef *struct_, vector<StructDefInstance*> &r
 	}
 }
 
-void generate_c(Module const &mod, CBackend &backend)
+void generate_c(Module &mod, CBackend &backend)
 {
 	vector<StructDefInstance*> structs;
-	vector<ProcDef*> procs;
+	vector<ProcDefInstance*> procs;
 	vector<AliasDef*> aliases;
 	for(TopLevelItem item: mod.items())
 	{
 		item | match
 		{
-			[&](ProcDef *def) { procs.push_back(def); },
+			[&](ProcDef *def)
+			{
+				// Make sure we have at least one instance
+				if(def->type_params.empty())
+					instantiate_proc(def, {});
+
+				for(auto &[_, inst]: def->instances)
+				{
+					if(inst.is_concrete)
+						procs.push_back(&inst);
+				}
+			},
 			[&](StructDef *def) { gather_concrete_instances(def, structs); },
 			[&](AliasDef *def) { aliases.push_back(def); },
 		};
@@ -5708,19 +6024,22 @@ void generate_c(Module const &mod, CBackend &backend)
 	}
 
 	// Procedures
-	for(ProcDef *proc: procs)
+	for(ProcDefInstance *proc: procs)
 	{
 		generate_c_proc_sig(proc, backend);
 		backend << ";" << LineEnd;
 	}
 
-	for(ProcDef *proc: procs)
+	for(ProcDefInstance *proc: procs)
 	{
-		if(proc->body)
+		if(proc->def->body)
 		{
+			Stmt inst_body = clone(*proc->def->body);
+			eval_types(inst_body, proc->type_env, mod);
+
 			generate_c_proc_sig(proc, backend);
 			backend << LineEnd;
-			generate_c(*proc->body, proc, backend);
+			generate_c(inst_body, proc, backend);
 			backend << LineEnd;
 		}
 	}

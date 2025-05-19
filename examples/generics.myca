@@ -8,7 +8,7 @@
 // &own is essentially equivalent to an r-value reference in C++
 /*proc Array.add(self &mut, val: &own T)
 {
-	self.ptr[self.length] = val;
+	self.buf[self.length] = val;
 	self.length += 1;
 }*/
 
@@ -17,20 +17,20 @@ proc main() -> i32
 {
 	let mut val = 3;
 	let arr = Array'i32(
-		.ptr = &mut val as [^]mut i32,
+		.buf = &mut val as [^]mut i32,
 		.length = 1,
 		.capacity = 1,
 	);
 
 	let arrb: Arr = arr;
-	let p: [^]i32 = arrb.ptr;
+	let p: [^]i32 = arrb.buf;
 
 	// []&mut T == ?mut Slice'T
 
 	//let a: []mut i32;
 	//let b: []i32 = a;
 
-	Array'bool(null, 0, 0);
+	let brr: Array'isize = mk_array'isize();
 
 	return foo();
 }
@@ -39,10 +39,53 @@ typealias Arr = Array'(i32);
 
 struct Array'T
 {
-	ptr: [^]mut T,
+	buf: [^]mut T,
 	length: usize,
 	capacity: usize,
 }
+
+
+proc mk_array'T() -> Array'T
+{
+	return Array'T(null, 0, 0);
+}
+
+/*proc max(a: usize, b: usize) -> usize
+{
+	if a < b {
+		return b;
+	}
+
+	return a;
+}
+
+proc push'T (arr: ^mut Array'T, val: T)
+{
+	if arr^.size + 1 > arr^.capacity {
+		let new_cap = max(arr^.capacity * 2, 1);
+		grow_capacity'T(arr, new_cap);
+	}
+
+	arr^.buf[arr^.size] = val;
+	arr^.size = arr^.size + 1;
+}
+
+proc grow_capacity'T (arr: ^mut Array'T, target_cap: usize)
+{
+	// assert(arr^.size <= target_cap);
+
+	let new_buf = malloc(target_cap * size_of(T)) as [^]mut T;
+	let i: usize = 0;
+	while i < arr^.size {
+		new_buf[i] = arr^.buf[i];
+		i = i + 1;
+	}
+
+	arr^.buf = new_buf;
+	arr^.capacity = target_cap;
+}*/
+
+
 
 
 

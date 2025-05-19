@@ -39,7 +39,7 @@ proc main() -> i32
 	let q: ^mut i32 = make 5 @ malloc(); // Automatically passes size_of(i32) to malloc()
 
 	// `make` works for structs:
-	let p_foo: ^mut Foo = make Foo(23, false) @ malloc();
+	let p_foo: ^mut Foo = make Foo(.i=23, .b=false) @ malloc();
 	
 	// TODO
 	//
@@ -57,5 +57,5 @@ proc main() -> i32
 	let arr2: []i32 = make[n] 42 @ malloc();
 	let arr2: [][2]i32 = make[n] {1,2}::[2]i32 @ malloc();*/
 
-	return p_foo^.i;
+	return p_foo^.i; // 23
 }
