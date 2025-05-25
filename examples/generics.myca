@@ -1,8 +1,77 @@
-/*struct M:?mut Slice'T
+// Lib C
+//==============================================================================
+struct c_void { _: Never }
+typealias c_char = i8;
+
+extern proc malloc(size: usize) -> ^mut c_void;
+extern proc free(ptr: ^mut c_void);
+extern proc puts(str: [^]c_char) -> i32;
+
+
+// Main
+//==============================================================================
+proc main() -> i32
 {
-	ptr: [^]M T,
-	length: usize,
-}*/
+	let mut arr = Array'i32();
+	add(&mut arr, 3);
+	add(&mut arr, 99);
+
+	puts(c"Hello?");
+
+	return id(foo());
+}
+
+
+// Array
+//==============================================================================
+struct Array'T
+{
+	buf: [^]mut T = null,
+	length: usize = 0,
+	capacity: usize = 0,
+}
+
+
+proc length'T (arr: ^Array'T) -> usize
+{
+	return arr^.length;
+}
+
+proc add'T (arr: ^mut Array'T, val: T)
+{
+	if arr^.length + (1 as usize) > arr^.capacity {
+		let new_cap = max(arr^.capacity * (2 as usize), 1);
+		grow_capacity(arr, new_cap);
+	}
+
+	arr^.buf[arr^.length] := val;
+	arr^.length := arr^.length + (1 as usize);
+}
+
+proc grow_capacity'T (arr: ^mut Array'T, target_cap: usize)
+{
+	// assert(arr^.length <= target_cap);
+
+	let new_buf = malloc(target_cap * size_of(T)) as [^]mut T;
+	let mut i: usize = 0 as usize;
+	while i < arr^.length {
+		new_buf[i] := arr^.buf[i];
+		i := i + (1 as usize);
+	}
+
+	arr^.buf := new_buf;
+	arr^.capacity := target_cap;
+}
+
+
+proc max(a: usize, b: usize) -> usize
+{
+	if a < b {
+		return b;
+	}
+
+	return a;
+}
 
 
 // &own is essentially equivalent to an r-value reference in C++
@@ -13,82 +82,21 @@
 }*/
 
 
-proc main() -> i32
+// Slice
+//==============================================================================
+/*struct M:?mut Slice'T
 {
-	let mut val = 3;
-	let arr = Array'i32(
-		.buf = &mut val as [^]mut i32,
-		.length = 1,
-		.capacity = 1,
-	);
-
-	let arrb: Arr = arr;
-	let p: [^]i32 = arrb.buf;
-
-	// []&mut T == ?mut Slice'T
-
-	//let a: []mut i32;
-	//let b: []i32 = a;
-
-	let brr: Array'isize = mk_array'isize();
-
-	return foo();
-}
-
-typealias Arr = Array'(i32);
-
-struct Array'T
-{
-	buf: [^]mut T,
+	ptr: [^]M T,
 	length: usize,
-	capacity: usize,
-}
-
-
-proc mk_array'T() -> Array'T
-{
-	return Array'T(null, 0, 0);
-}
-
-/*proc max(a: usize, b: usize) -> usize
-{
-	if a < b {
-		return b;
-	}
-
-	return a;
-}
-
-proc push'T (arr: ^mut Array'T, val: T)
-{
-	if arr^.size + 1 > arr^.capacity {
-		let new_cap = max(arr^.capacity * 2, 1);
-		grow_capacity'T(arr, new_cap);
-	}
-
-	arr^.buf[arr^.size] = val;
-	arr^.size = arr^.size + 1;
-}
-
-proc grow_capacity'T (arr: ^mut Array'T, target_cap: usize)
-{
-	// assert(arr^.size <= target_cap);
-
-	let new_buf = malloc(target_cap * size_of(T)) as [^]mut T;
-	let i: usize = 0;
-	while i < arr^.size {
-		new_buf[i] = arr^.buf[i];
-		i = i + 1;
-	}
-
-	arr^.buf = new_buf;
-	arr^.capacity = target_cap;
 }*/
 
 
-
-
-
+// Misc
+//==============================================================================
+proc id'T (v: T) -> T
+{
+	return v;
+}
 
 
 struct Option'T
@@ -98,18 +106,23 @@ struct Option'T
 }
 
 
-proc bar()
+proc bar() -> i32
 {
 	let opt = IntOpt.Some(3);
+	let opt2: Option'(Int).Some = opt;
+	return opt2.value;
 }
+
 typealias IntOpt = Option'i32;
+typealias Int = i32;
 
 
 proc foo() -> i32
 {
 	let opt = Option'(Vec2'i32).Some(Vec2'i32(8, 9));
+	let _ = Option.Some(Vec2(8, 9));
 
-	let bv = Vec2'bool(true, false);
+	let bv = Vec2(true, false);
 	let b: bool = bv.y;
 
 	let vec: Vec2i = opt.value;

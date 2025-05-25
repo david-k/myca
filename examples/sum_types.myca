@@ -64,7 +64,7 @@ proc increase_jint(json: ^mut Json)
 		case Json.Null {}
 		case Json.Bool {}
 		case Json.Int -> v &mut {
-			v^.value = v^.value + 1;
+			v^.value := v^.value + 1;
 		}
 		case Json.Array {}
 	}
@@ -158,7 +158,7 @@ proc main() -> i32
 	let mut json = jint as Json;
 
 	let n = Json.Null(99, c"Hi");
-	json = n;
+	json := n;
 
 	increase_jint(&mut jint as ^mut Json);
 	return json.id + get_prime_factor_2(jint); // 149

@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cassert>
+#include <stdexcept>
 #include <utility>
 #include <iostream>
 #include <fstream>
@@ -15,6 +16,7 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <algorithm>
 
 #include "utils.hpp"
 
@@ -25,6 +27,7 @@ using std::string_view;
 using std::optional;
 using std::nullopt;
 using std::variant;
+using std::pair;
 using std::unordered_map;
 using std::unordered_set;
 using namespace std::string_literals;
@@ -276,6 +279,12 @@ enum class Lexeme
 	SLASH,
 	STAR,
 	EQ,
+	COLON_EQ,
+	DOUBLE_EQ,
+	LT,
+	LE,
+	GT,
+	GE,
 
 	NOT,
 
@@ -334,6 +343,12 @@ string_view str(Lexeme tok)
 		case Lexeme::SLASH: return "SLASH";
 		case Lexeme::STAR: return "STAR";
 		case Lexeme::EQ: return "EQ";
+		case Lexeme::COLON_EQ: return "COLON_EQ";
+		case Lexeme::DOUBLE_EQ: return "DOUBLE_EQ";
+		case Lexeme::LT: return "LT";
+		case Lexeme::LE: return "LE";
+		case Lexeme::GT: return "GT";
+		case Lexeme::GE: return "GE";
 
 		case Lexeme::NOT: return "NOT";
 
@@ -378,7 +393,14 @@ optional<Lexeme> try_read_punctuation(Lexer &lex)
 	{
 		case '.': lex.advance(); return Lexeme::DOT;
 		case ',': lex.advance(); return Lexeme::COMMA;
-		case ':': lex.advance(); return Lexeme::COLON;
+		case ':':
+		{
+			lex.advance(); 
+			if(try_consume(lex, "="))
+				return Lexeme::COLON_EQ;
+
+			return Lexeme::COLON;
+		}
 		case ';': lex.advance(); return Lexeme::SEMICOLON;
 		case '^': lex.advance(); return Lexeme::CIRCUMFLEX;
 		case '&': lex.advance(); return Lexeme::AMPERSAND;
@@ -405,7 +427,30 @@ optional<Lexeme> try_read_punctuation(Lexer &lex)
 		}
 		case '*': lex.advance(); return Lexeme::STAR;
 		case '/': lex.advance(); return Lexeme::SLASH;
-		case '=': lex.advance(); return Lexeme::EQ;
+		case '=':
+		{
+			lex.advance();
+			if(try_consume(lex, "="))
+				return Lexeme::DOUBLE_EQ;
+				
+			return Lexeme::EQ;
+		}
+		case '<':
+		{
+			lex.advance();
+			if(try_consume(lex, "="))
+				return Lexeme::LE;
+				
+			return Lexeme::LT;
+		}
+		case '>':
+		{
+			lex.advance();
+			if(try_consume(lex, "="))
+				return Lexeme::GE;
+				
+			return Lexeme::GT;
+		}
 
 		default: return nullopt;
 	}
@@ -549,6 +594,7 @@ enum BuiltinType
 };
 
 class Type;
+using TypeEnv = unordered_map<TypeVarDef*, Type>;
 
 struct TypeArgList
 {
@@ -560,6 +606,8 @@ struct TypeArgList
 
 	vector<Type>::const_iterator begin() const;
 	vector<Type>::const_iterator end() const;
+
+	void append(TypeArgList const &other);
 };
 
 
@@ -619,6 +667,14 @@ struct StructType
 	StructDefInstance *inst;
 };
 
+struct PartialStructType
+{
+	StructDef *struct_;
+	// Stores (a subset of) the types arguments for `struct_` and the parents of `struct_`, if it
+	// has any
+	TypeEnv subst;
+};
+
 struct ProcType
 {
 	ProcTypeDef *def;
@@ -641,6 +697,7 @@ class Type : public variant
 	struct PointerType,
 	struct ManyPointerType,
 	struct StructType,
+	struct PartialStructType,
 	struct ProcType,
 	struct AliasType
 >
@@ -656,7 +713,18 @@ public:
 		variant(std::forward<T>(t)) {}
 };
 
+
+template<typename T>
+optional<T> clone(optional<T> const &opt)
+{
+	if(!opt)
+		return nullopt;
+
+	return clone(*opt);
+}
+
 TypeArgList clone(TypeArgList const &list);
+TypeEnv clone(TypeEnv const &type_env);
 vector<PathSegment> clone(vector<PathSegment> const &list);
 bool equiv(Type const &a, Type const &b);
 
@@ -670,6 +738,7 @@ Type clone(Type const &type)
 		[&](PointerType const &t) -> Type { return PointerType(clone(*t.target_type), t.mutability); },
 		[&](ManyPointerType const &t) -> Type { return ManyPointerType(clone(*t.element_type), t.mutability); },
 		[&](StructType const &t) -> Type { return StructType(t.inst); },
+		[&](PartialStructType const &t) -> Type { return PartialStructType(t.struct_, clone(t.subst)); },
 		[&](ProcType const &t) -> Type { return t; },
 		[&](AliasType const &t) -> Type { return AliasType(t.def); },
 	};
@@ -685,6 +754,15 @@ vector<PathSegment> clone(vector<PathSegment> const &list)
 	vector<PathSegment> result;
 	for(PathSegment const &seg: list)
 		result.push_back(clone(seg));
+
+	return result;
+}
+
+TypeEnv clone(TypeEnv const &env)
+{
+	TypeEnv result;
+	for(auto &[var, type]: env)
+		result.emplace(pair{var, clone(type)});
 
 	return result;
 }
@@ -735,6 +813,12 @@ vector<Type>::iterator TypeArgList::begin() { return args.begin(); }
 vector<Type>::iterator TypeArgList::end() { return args.end(); }
 vector<Type>::const_iterator TypeArgList::begin() const { return args.begin(); }
 vector<Type>::const_iterator TypeArgList::end() const { return args.end(); }
+
+void TypeArgList::append(TypeArgList const &other)
+{
+	for(Type const &t: other)
+		args.push_back(clone(t));
+}
 
 
 //--------------------------------------------------------------------
@@ -804,6 +888,12 @@ enum class BinaryOp
 	SUB = int(Lexeme::MINUS),
 	MUL = int(Lexeme::STAR),
 	DIV = int(Lexeme::SLASH),
+
+	EQ = int(Lexeme::DOUBLE_EQ),
+	LT = int(Lexeme::LT),
+	LE = int(Lexeme::LE),
+	GT = int(Lexeme::GT),
+	GE = int(Lexeme::GE),
 };
 
 struct BinaryExpr
@@ -1094,12 +1184,33 @@ struct VarPattern
 struct Pattern : variant<VarPattern>
 {
 	template<typename T>
-	Pattern(T &&t, PatternOp op) :
+	Pattern(T &&t, PatternOp op, optional<Type> &&type = nullopt) :
 		variant(std::forward<T>(t)),
-		op(op) {}
+		op(op),
+		type(std::move(type)) {}
 
 	PatternOp op;
+
+	// Available after semantic analysis
+	optional<Type> type;
 };
+
+Pattern clone(Pattern const &pattern)
+{
+	PatternOp op_cloned = pattern.op;
+	optional<Type> type_cloned;
+	if(pattern.type)
+		type_cloned = clone(*pattern.type);
+
+		
+	return pattern | match
+	{
+		[&](VarPattern const &p)
+		{
+			return Pattern(p, std::move(op_cloned), std::move(type_cloned));
+		}
+	};
+}
 
 
 //--------------------------------------------------------------------
@@ -1195,7 +1306,7 @@ Stmt clone(Stmt const &stmt)
 	{
 		[&](LetStmt const &s)
 		{
-			return Stmt(LetStmt(s.lhs, clone(s.init_expr)));
+			return Stmt(LetStmt(clone(s.lhs), clone(s.init_expr)));
 		},
 		[&](ExprStmt const &s)
 		{
@@ -1240,7 +1351,7 @@ Stmt clone(Stmt const &stmt)
 				arms.push_back(MatchArm(
 					clone(arm.type),
 					clone(*arm.stmt),
-					optional<Pattern>(arm.capture),
+					clone(arm.capture),
 					arm.struct_
 				));
 			}
@@ -1325,11 +1436,9 @@ struct VarDef
 //--------------------------------------------------------------------
 // Procedures
 //--------------------------------------------------------------------
-using TypeEnv = unordered_map<TypeVarDef*, Type>;
-
-
 struct ProcTypeDef
 {
+	vector<TypeVarDef*> type_params;
 	vector<Parameter> params;
 	Type ret;
 };
@@ -1341,11 +1450,15 @@ ProcTypeDef clone(ProcTypeDef const &proc)
 		params.push_back(clone(p));
 
 	return ProcTypeDef{
+		.type_params = proc.type_params,
 		.params = std::move(params),
 		.ret = clone(proc.ret),
 	};
 }
 
+
+// For simplicity, we do not consider α-equivlance. It's not necessary as generic procedures are not
+// first class and cannot be passed around.
 
 namespace std
 {
@@ -1355,6 +1468,9 @@ namespace std
 		size_t operator () (::ProcTypeDef const &proc) const
 		{
 			size_t h = 0;
+			for(::TypeVarDef const *tparam: proc.type_params)
+				::combine_hashes(h, ::compute_hash(tparam));
+
 			for(::Parameter const &param: proc.params)
 			{
 				::combine_hashes(h, ::compute_hash(param.type));
@@ -1373,8 +1489,17 @@ struct ProcTypeEquiv
 {
 	bool operator () (ProcTypeDef const &a, ProcTypeDef const &b) const
 	{
+		if(a.type_params.size() != b.type_params.size())
+			return false;
+
 		if(a.params.size() != b.params.size())
 			return false;
+
+		for(size_t i = 0; i < a.type_params.size(); ++i)
+		{
+			if(a.type_params[i] != b.type_params[i])
+				return false;
+		}
 
 		for(size_t i = 0; i < a.params.size(); ++i)
 		{
@@ -1409,6 +1534,8 @@ struct ProcDefInstance
 	TypeEnv type_env;
 	ProcTypeDef type;
 	bool is_concrete;
+
+	bool is_partial() const;
 };
 
 struct ProcDef
@@ -1418,13 +1545,19 @@ struct ProcDef
 
 	string name;
 	ProcTypeDef type;
-	vector<TypeVarDef*> type_params;
 	Scope *scope;
 	vector<VarDef*> param_vars;
 	optional<Stmt> body;
 
-	unordered_map<TypeArgList, ProcDefInstance> instances;
+	unordered_map<TypeArgList, ProcDefInstance*> instances;
+	vector<OwnPtr<ProcDefInstance>> instance_pool;
 };
+
+
+bool ProcDefInstance::is_partial() const
+{
+	return type_args.size() < def->type.type_params.size();
+}
 
 
 //--------------------------------------------------------------------
@@ -1488,7 +1621,7 @@ struct StructDefInstance
 	TypeEnv type_env;
 	optional<vector<Parameter>> constructor_params;
 	vector<InstanceMember> members;
-	bool is_concrete;
+	bool own_args_concrete;
 
 	bool sema_done = false;
 	// Available after semantic analysis (i.e., when `sema_done == true`)
@@ -1520,6 +1653,8 @@ struct StructDefInstance
 
 		return false;
 	}
+
+	bool is_concrete() const;
 };
 
 
@@ -1537,6 +1672,7 @@ struct StructDef
 	optional<vector<Parameter>> constructor_params; // Available iff the struct does not contain any `case`s
 
 	ParentRelation parent{};
+
 	unordered_map<DefInstanceKey, StructDefInstance> instances{};
 
 	size_t num_initial_var_members = 0;
@@ -1571,6 +1707,15 @@ struct StructDef
 Range<InstanceMember const*> StructDefInstance::initial_var_members() const { return {members.data(), members.data() + def->num_initial_var_members}; }
 Range<InstanceMember const*> StructDefInstance::case_members() const { return {members.data() + def->num_initial_var_members, members.data() + def->num_initial_var_members + def->num_cases}; }
 Range<InstanceMember const*> StructDefInstance::trailing_var_members() const { return {members.data() + def->num_initial_var_members + def->num_cases, members.data() + members.size()}; }
+
+
+bool StructDefInstance::is_concrete() const
+{
+	if(outer_struct)
+		return own_args_concrete && outer_struct->is_concrete();
+
+	return own_args_concrete;
+}
 
 
 struct AliasDef
@@ -1752,6 +1897,11 @@ private:
 	unordered_map<string, ItemDef> m_defs;
 };
 
+struct ModuleListener
+{
+	virtual void new_struct_inst(StructDefInstance*) {}
+	virtual void new_proc_inst(ProcDefInstance*) {}
+};
 
 class Module
 {
@@ -1802,6 +1952,30 @@ public:
 	using ProcTypeIterator = vector<OwnPtr<ProcTypeDef>>::iterator;
 	Range<ProcTypeIterator> proc_types() { return {m_proc_types.begin(), m_proc_types.end()}; }
 
+	void add_listener(ModuleListener *listener)
+	{
+		m_listeners.push_back(listener);
+	}
+
+	void remove_listener(ModuleListener *listener)
+	{
+		auto it = std::find(m_listeners.begin(), m_listeners.end(), listener);
+		if(it != m_listeners.end())
+			m_listeners.erase(it);
+	}
+
+	void notify_new_struct_inst(StructDefInstance *inst)
+	{
+		for(ModuleListener *l: m_listeners)
+			l->new_struct_inst(inst);
+	}
+
+	void notify_new_proc_inst(ProcDefInstance *inst)
+	{
+		for(ModuleListener *l: m_listeners)
+			l->new_proc_inst(inst);
+	}
+
 private:
 	OwnPtr<Scope> m_global_scope;
 	Scope *m_cur_scope;
@@ -1809,6 +1983,8 @@ private:
 
 	vector<OwnPtr<ProcTypeDef>> m_proc_types;
 	unordered_set<ProcTypeDef, std::hash<ProcTypeDef>, ProcTypeEquiv> m_canonical_proc_types;
+
+	vector<ModuleListener*> m_listeners;
 };
 
 
@@ -1895,6 +2071,10 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 			if(t.inst->type_args.size())
 				os << "'(" << RangeFmt(t.inst->type_args.args, ", ") << ")";
 		},
+		[&](PartialStructType const&)
+		{
+			assert(!"operator <<: PartialStructType: TODO");
+		},
 		[&](ProcType const &t)
 		{
 			os << "proc(" << RangeFmt(t.def->params, ", ", [&](Parameter const  &p)
@@ -1979,6 +2159,8 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 		[&](ProcExpr const &e)
 		{
 			os << e.inst->def->name;
+			if(e.inst->type_args.size())
+				os << "'(" << RangeFmt(e.inst->type_args.args, ", ") << ")";
 		},
 		[&](UnaryExpr const &e)
 		{
@@ -1999,6 +2181,12 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 				case BinaryOp::SUB: os << " - "; break;
 				case BinaryOp::MUL: os << " * "; break;
 				case BinaryOp::DIV: os << " / "; break;
+
+				case BinaryOp::EQ: os << " == "; break;
+				case BinaryOp::LT: os << " < "; break;
+				case BinaryOp::LE: os << " <= "; break;
+				case BinaryOp::GT: os << " > "; break;
+				case BinaryOp::GE: os << " >= "; break;
 			}
 			print(os, *e.right, listener) << ")";
 		},
@@ -2206,9 +2394,9 @@ void print(TopLevelItem const &item, std::ostream &os, int indent, PrintListener
 			if(listener) listener->before_proc(os, def);
 
 			os << "proc " << def->name;
-			if(def->type_params.size())
+			if(def->type.type_params.size())
 			{
-				os << "'(" << RangeFmt(def->type_params, ", ", [&](TypeVarDef const *tvar)
+				os << "'(" << RangeFmt(def->type.type_params, ", ", [&](TypeVarDef const *tvar)
 				{
 					os << tvar->name;
 				});
@@ -2517,14 +2705,7 @@ Expr parse_infix_expr(Parser &parser, Module &mod, Expr &&left);
 
 BinaryOp to_binary_op(Lexeme tok)
 {
-	switch(tok)
-	{
-		case Lexeme::PLUS: return BinaryOp::ADD;
-		case Lexeme::MINUS: return BinaryOp::SUB;
-		case Lexeme::STAR: return BinaryOp::MUL;
-		case Lexeme::SLASH: return BinaryOp::DIV;
-		default: UNREACHABLE;
-	}
+	return (BinaryOp)tok;
 }
 
 
@@ -2586,9 +2767,17 @@ optional<OperatorInfo> get_operator_info(Lexeme tok)
 		case Lexeme::AS:
 			return OperatorInfo{.precedence = 7, .assoc = Associativity::LEFT};
 
+		// Comparison
+		case Lexeme::DOUBLE_EQ:
+		case Lexeme::LT:
+		case Lexeme::LE:
+		case Lexeme::GT:
+		case Lexeme::GE:
+			return OperatorInfo{.precedence = 8, .assoc = Associativity::LEFT};
+
 		// Assignment
-		case Lexeme::EQ:
-			return OperatorInfo{.precedence = 8, .assoc = Associativity::RIGHT};
+		case Lexeme::COLON_EQ:
+			return OperatorInfo{.precedence = 9, .assoc = Associativity::RIGHT};
 
 		default:
 			return nullopt;
@@ -2711,6 +2900,11 @@ Expr parse_infix_expr(Parser &parser, Module &mod, Expr &&left)
 		case Lexeme::MINUS:
 		case Lexeme::STAR:
 		case Lexeme::SLASH:
+		case Lexeme::DOUBLE_EQ:
+		case Lexeme::LT:
+		case Lexeme::LE:
+		case Lexeme::GT:
+		case Lexeme::GE:
 		{
 			return with_location(BinaryExpr(
 				std::move(left),
@@ -2719,7 +2913,7 @@ Expr parse_infix_expr(Parser &parser, Module &mod, Expr &&left)
 			));
 		}
 
-		case Lexeme::EQ:
+		case Lexeme::COLON_EQ:
 		{
 			return with_location(AssignmentExpr(
 				std::move(left),
@@ -2945,7 +3139,7 @@ ProcDef* parse_proc(Parser &parser, Module &mod)
 	{
 		string_view type_var_name = consume(parser, Lexeme::IDENTIFIER).text;
 		TypeVarDef *type_var = proc->scope->declare_type_var(string(type_var_name));
-		proc->type_params.push_back(type_var);
+		proc->type.type_params.push_back(type_var);
 	}
 
 	// Parse parameters
@@ -3130,8 +3324,8 @@ void compute_type_layouts(Module &mod);
 void sema(Module &mod)
 {
 	resolve_identifiers(mod);
-	compute_type_layouts(mod);
 	typecheck(mod);
+	compute_type_layouts(mod);
 }
 
 
@@ -3290,6 +3484,7 @@ Type strip_alias_rec(Type const &type)
 			return ManyPointerType(strip_alias_rec(*t.element_type), t.mutability);
 		},
 		[&](StructType const&) { return clone(type); },
+		[&](PartialStructType const&) -> Type { assert(!"strip_alias_rec: PartialStructType"); },
 		[&](ProcType const&) { return clone(type); },
 		[&](AliasType const&) -> Type { UNREACHABLE; },
 		[&](UnresolvedType const&) -> Type { assert(!"strip_alias_rec: UnresolvedType"); },
@@ -3344,6 +3539,7 @@ bool equiv(Type const &a, Type const &b)
 		},
 		[&](AliasType const&) -> bool { UNREACHABLE; },
 		[&](UnresolvedType const&) -> bool { assert(!"equiv: UnresolvedType"); },
+		[&](PartialStructType const&) -> bool { assert(!"equiv: PartialStructType"); },
 	};
 }
 
@@ -3393,29 +3589,12 @@ namespace std
 				},
 				[&](::AliasType const&) { UNREACHABLE; },
 				[&](::UnresolvedType const&) { assert(!"hash<Type>: UnresolvedType"); },
+				[&](::PartialStructType const&) { assert(!"hash<Type>: PartialStructType"); },
 			};
 
 			return h;
 		}
 	};
-}
-
-bool equiv_type_env(
-	TypeEnv const &a,
-	TypeEnv const &b
-)
-{
-	if(a.size() != b.size())
-		return false;
-
-	for(auto &[var, type]: a)
-	{
-		auto it = b.find(var);
-		if(it == b.end() || not equiv(it->second, type))
-			return false;
-	}
-
-	return true;
 }
 
 bool is_struct_assignable(StructType const &dest, StructType const &src)
@@ -3439,6 +3618,8 @@ bool is_struct_assignable(StructType const &dest, StructType const &src)
 
 bool is_type_assignable(Type const &dest, Type const &src)
 {
+	// TODO Implement in terms of `unify()`
+
 	return *strip_alias(src) | match
 	{
 		[&](BuiltinType const &src_t)
@@ -3488,6 +3669,7 @@ bool is_type_assignable(Type const &dest, Type const &src)
 		[&](ProcType const&) -> bool { assert(!"is_type_assignable: ProcType: TODO"); },
 		[&](AliasType const&) -> bool { UNREACHABLE; },
 		[&](UnresolvedType const&) -> bool { assert(!"is_type_assignable: UnresolvedType"); },
+		[&](PartialStructType const&) -> bool { assert(!"is_type_assignable: PartialStructType"); },
 	};
 }
 
@@ -3535,6 +3717,7 @@ MemoryLayout compute_layout(Type const &type, unordered_set<StructDef*> &seen)
 		[&](ProcType const&) -> MemoryLayout { assert(!"compute_layout: ProcType"); },
 		[&](AliasType const&) -> MemoryLayout { UNREACHABLE; },
 		[&](UnresolvedType const&) -> MemoryLayout { assert(!"compute_layout: UnresolvedType"); },
+		[&](PartialStructType const&) -> MemoryLayout { assert(!"compute_layout: PartialStructType"); },
 	};
 }
 
@@ -3628,7 +3811,7 @@ void compute_type_layouts(Scope *scope)
 		{
 			for(auto &[_, instance]: struct_->instances)
 			{
-				if(not instance.is_concrete)
+				if(not instance.is_concrete())
 					continue;
 
 				unordered_set<StructDef*> seen;
@@ -3669,7 +3852,7 @@ ResolveNameResult resolve_name(string const &name, Scope *scope, bool traverse_u
 	};
 }
 
-bool is_concrete(Type &type, TypeEnv const &type_env, Module &mod)
+bool is_concrete(Type &type, Module &mod)
 {
 	return type | match
 	{
@@ -3678,100 +3861,109 @@ bool is_concrete(Type &type, TypeEnv const &type_env, Module &mod)
 		[&](UnresolvedType const&)
 		{
 			resolve_types(type, mod);
-			return is_concrete(type, type_env, mod);
+			return is_concrete(type, mod);
 		},
 		[&](PointerType const &t)
 		{
-			return is_concrete(*t.target_type, type_env, mod);
+			return is_concrete(*t.target_type, mod);
 		},
 		[&](ManyPointerType const &t)
 		{
-			return is_concrete(*t.element_type, type_env, mod);
+			return is_concrete(*t.element_type, mod);
 		},
 		[&](StructType &t)
 		{
 			for(Type &arg: t.inst->type_args)
 			{
-				if(not is_concrete(arg, type_env, mod))
+				if(not is_concrete(arg, mod))
 					return false;
 			}
 
 			return true;
 		},
+		[&](PartialStructType&) { return false; },
 		[&](ProcType &t)
 		{
 			for(Parameter &p: t.def->params)
 			{
-				if(not is_concrete(p.type, type_env, mod))
+				if(not is_concrete(p.type, mod))
 					return false;
 			}
 
-			return is_concrete(t.def->ret, type_env, mod);
+			return is_concrete(t.def->ret, mod);
 		},
-		[&](AliasType const &t) { return is_concrete(t.def->type, type_env, mod); },
+		[&](AliasType const &t) { return is_concrete(t.def->type, mod); },
 	};
 }
 
 
-TypeEnv create_type_env(vector<TypeVarDef*> const &type_params, TypeArgList &&type_args)
+void fill_type_env(TypeEnv &type_env, vector<TypeVarDef*> const &type_params, TypeArgList &&type_args)
 {
-	assert(type_args.size() == type_params.size());
-
-	TypeEnv type_env;
-	for(size_t i = 0; i < type_params.size(); ++i)
+	assert(type_args.size() <= type_params.size());
+	for(size_t i = 0; i < type_args.size(); ++i)
 	{
 		TypeVarDef *tparam = type_params[i];
 		type_env[tparam] = std::move(type_args.args[i]);
 	}
-
-	return type_env;
 }
 
-StructDefInstance* instantiate_struct(
-	StructDef *struct_,
-	TypeArgList &&type_args,
-	StructDefInstance *outer_struct = nullptr
-)
+optional<TypeArgList> extract_type_args_for(StructDef *struct_, TypeEnv const &subst)
 {
-	if(type_args.size() != struct_->type_params.size())
-		throw ParseError("Invalid number of type arguments for " + struct_->name);
-
-	bool args_concrete = true;
-	for(Type &type: type_args)
+	TypeArgList args;
+	for(TypeVarDef *arg: struct_->type_params)
 	{
-		if(not is_concrete(type, {}, *struct_->scope->mod()))
-			args_concrete = false;
+		auto it = subst.find(arg);
+		if(it == subst.end())
+			return nullopt;
+
+		args.args.push_back(clone(it->second));
 	}
 
-	DefInstanceKey inst_key{clone(type_args), outer_struct};
+	return args;
+}
+
+StructDefInstance* do_struct_instantiation(
+	StructDef *struct_,
+	TypeArgList &&type_args, // Must already be fully resolved
+	StructDefInstance *outer_inst
+)
+{
+	assert(type_args.size() == struct_->type_params.size());
+
+	// Check if we have already instantiated the struct
+	DefInstanceKey inst_key{clone(type_args), outer_inst};
 	auto it = struct_->instances.find(inst_key);
 	if(it != struct_->instances.end())
 		return &it->second;
 
-	StructDefInstance *instance = &struct_->instances.emplace(std::pair{std::move(inst_key), StructDefInstance()}).first->second;
-	instance->def = struct_;
-	instance->outer_struct = outer_struct;
-	instance->type_args = clone(type_args);
-	instance->is_concrete = args_concrete;
-
-	instance->type_env = create_type_env(struct_->type_params, clone(type_args));
-	if(outer_struct)
+	bool args_concrete = true;
+	for(Type &type: type_args)
 	{
-		for(auto &[tvar, type]: outer_struct->type_env)
-			instance->type_env.emplace(tvar, clone(type));
+		if(not is_concrete(type, *struct_->scope->mod()))
+			args_concrete = false;
 	}
+
+	StructDefInstance *inst = &struct_->instances.emplace(std::pair{std::move(inst_key), StructDefInstance()}).first->second;
+	inst->def = struct_;
+	inst->outer_struct = outer_inst;
+	inst->type_args = clone(type_args);
+	inst->own_args_concrete = args_concrete;
+
+	inst->type_env = outer_inst ? clone(outer_inst->type_env) : TypeEnv();
+	fill_type_env(inst->type_env, struct_->type_params, clone(type_args));
 
 	if(struct_->constructor_params)
 	{
-		instance->constructor_params = vector<Parameter>();
+		inst->constructor_params = vector<Parameter>();
 		for(Parameter &p: *struct_->constructor_params)
 		{
 			Parameter inst_param = clone(p);
-			inst_param.type = eval_types(p.type, instance->type_env, *struct_->scope->mod());
-			instance->constructor_params->push_back(std::move(inst_param));
+			inst_param.type = eval_types(p.type, inst->type_env, *struct_->scope->mod());
+			inst->constructor_params->push_back(std::move(inst_param));
 		}
 	}
 
+	inst->members.clear();
 	for(Member &m: struct_->members)
 	{
 		m | match
@@ -3779,53 +3971,120 @@ StructDefInstance* instantiate_struct(
 			[&](Parameter &p)
 			{
 				Parameter inst_param = clone(p);
-				inst_param.type = eval_types(p.type, instance->type_env, *struct_->scope->mod());
-				instance->members.push_back(std::move(inst_param));
+				inst_param.type = eval_types(p.type, inst->type_env, *struct_->scope->mod());
+				inst->members.push_back(std::move(inst_param));
 			},
 			[&](StructDef *case_member)
 			{
-				StructDefInstance *case_inst = instantiate_struct(case_member, {}, instance);
-				instance->members.push_back(case_inst);
+				StructDefInstance *case_inst = do_struct_instantiation(case_member, {}, inst);
+				inst->members.push_back(case_inst);
 			},
 		};
 	}
 
-	return instance;
+	struct_->scope->mod()->notify_new_struct_inst(inst);
+
+	return inst;
 }
+
+Type try_instantiate_struct(StructDef *struct_, TypeEnv const &param_subst /* Must be fully resolved */)
+{
+	bool is_outer_struct_partial = false;
+	StructDefInstance *outer_struct = nullptr;
+	struct_->parent | match
+	{
+		[&](ExtensionOf) { assert(!"instantiate_struct: ExtensionOf: TODO"); },
+		[&](CaseMemberOf parent)
+		{
+			try_instantiate_struct(parent.struct_, param_subst) | match
+			{
+				[&](StructType t) { outer_struct = t.inst; },
+				[&](auto const&) { is_outer_struct_partial = true; },
+			};
+		},
+		[&](NoParent) {},
+	};
+
+	if(is_outer_struct_partial)
+		return PartialStructType(struct_, clone(param_subst));
+
+	optional<TypeArgList> type_args = extract_type_args_for(struct_, param_subst);
+	if(not type_args)
+		return PartialStructType(struct_, clone(param_subst));
+
+	StructDefInstance *inst = do_struct_instantiation(struct_, std::move(*type_args), outer_struct);
+	return StructType(inst);
+}
+
+
+ProcDefInstance* continue_proc_instantiation(ProcDefInstance *inst, TypeArgList &&type_args);
 
 ProcDefInstance* instantiate_proc(ProcDef *proc, TypeArgList &&type_args)
 {
-	if(type_args.size() != proc->type_params.size())
-		throw ParseError("Invalid number of type arguments for " + proc->name);
+	for(Type &type: type_args)
+		resolve_types(type, *proc->scope->mod());
+
+	auto it = proc->instances.find(type_args);
+	if(it != proc->instances.end())
+		return it->second;
+
+	proc->instance_pool.emplace_back(std::make_unique<ProcDefInstance>());
+	ProcDefInstance *instance = proc->instance_pool.back().get();
+
+	instance->def = proc;
+	instance->is_concrete = true;
+
+	return continue_proc_instantiation(instance, std::move(type_args));
+}
+
+ProcDefInstance* continue_proc_instantiation(ProcDefInstance *inst, TypeArgList &&type_args)
+{
+	ProcDef *proc = inst->def;
+	if(inst->type_args.size() + type_args.size() > proc->type.type_params.size())
+		throw ParseError("Too many type arguments for " + proc->name);
+
+	bool is_partial = inst->type_args.size() + type_args.size() < proc->type.type_params.size();
 
 	bool args_concrete = true;
 	for(Type &type: type_args)
 	{
-		if(not is_concrete(type, {}, *proc->scope->mod()))
+		if(not is_concrete(type, *proc->scope->mod()))
 			args_concrete = false;
 	}
 
-	auto it = proc->instances.find(clone(type_args));
-	if(it != proc->instances.end())
-		return &it->second;
+	size_t old_type_arg_count = inst->type_args.size();
+	inst->type_args.append(clone(type_args));
+	inst->is_concrete = inst->is_concrete && args_concrete;
 
-	ProcDefInstance *instance = &proc->instances.emplace(std::pair{clone(type_args), ProcDefInstance()}).first->second;
-	instance->def = proc;
-	instance->type_args = clone(type_args);
-	instance->is_concrete = args_concrete;
+	fill_type_env(inst->type_env, proc->type.type_params, clone(type_args));
 
-	instance->type_env = create_type_env(proc->type_params, clone(type_args));
+	inst->type.type_params.assign(
+		proc->type.type_params.begin() + old_type_arg_count + type_args.size(),
+		proc->type.type_params.end()
+	);
 
+	inst->type.params.clear();
 	for(Parameter &p: proc->type.params)
 	{
 		Parameter inst_param = clone(p);
-		inst_param.type = eval_types(p.type, instance->type_env, *proc->scope->mod());
-		instance->type.params.push_back(std::move(inst_param));
+		inst_param.type = eval_types(p.type, inst->type_env, *proc->scope->mod());
+		inst->type.params.push_back(std::move(inst_param));
 	}
-	instance->type.ret = eval_types(proc->type.ret, instance->type_env, *proc->scope->mod());
+	inst->type.ret = eval_types(proc->type.ret, inst->type_env, *proc->scope->mod());
 
-	return instance;
+	if(not is_partial)
+	{
+		auto it = proc->instances.find(type_args);
+		if(it != proc->instances.end())
+			return it->second;
+
+		proc->instances.emplace(std::pair{clone(type_args), inst});
+		proc->scope->mod()->notify_new_proc_inst(inst);
+	}
+
+	return inst;
 }
+
 
 void resolve_type_args(TypeArgList &type_args, Module &mod)
 {
@@ -3833,56 +4092,52 @@ void resolve_type_args(TypeArgList &type_args, Module &mod)
 		resolve_types(arg, mod);
 }
 
-variant<ProcDefInstance*, Type> instantiate_item(vector<PathSegment> &&path, TypeEnv const &type_env, Scope *scope)
+variant<ProcDefInstance*, Type> instantiate_item(vector<PathSegment> &&path, Scope *scope)
 {
-	StructDefInstance *outer_struct = nullptr;
-	bool first_iteration = true;
-	bool last_iteration = false;
+	TypeEnv param_subst;
+
+	bool is_first_iteration = true;
+	bool is_last_iteration = false;
 	for(PathSegment &segment: path)
 	{
-		last_iteration = &segment == &path.back();
+		is_last_iteration = &segment == &path.back();
 
 		resolve_type_args(segment.type_args, *scope->mod());
-		ResolveNameResult item = resolve_name(segment.name, scope, first_iteration);
+		ResolveNameResult item = resolve_name(segment.name, scope, is_first_iteration);
 
 		if(Type *resolved_type = std::get_if<Type>(&item))
 		{
 			if(segment.type_args.size())
 				throw ParseError("Cannot apply type arguments to already instantiated type");
 
-			if(last_iteration)
+			if(is_last_iteration)
 				return std::move(*resolved_type);
 
 			if(StructType *struct_type = std::get_if<StructType>(resolved_type))
-			{
-				outer_struct = struct_type->inst;
 				scope = struct_type->inst->def->scope;
-			}
 			else
 				throw ParseError("Only structs can have child elements");
 		}
 		else if(StructDef **struct_ = std::get_if<StructDef*>(&item))
 		{
-			TypeArgList type_args;
-			for(Type &arg: segment.type_args)
-				type_args.args.push_back(eval_types(arg, type_env, *scope->mod()));
-			
-			StructDefInstance *inst = instantiate_struct(*struct_, std::move(type_args), outer_struct);
-			if(last_iteration)
-				return StructType(inst);
+			if(segment.type_args.size() > (*struct_)->type_params.size())
+				throw ParseError("Too many type arguments for struct");
 
-			outer_struct = inst;
+			fill_type_env(param_subst, (*struct_)->type_params, std::move(segment.type_args));
+			if(is_last_iteration)
+				return try_instantiate_struct(*struct_, std::move(param_subst));
+
 			scope = (*struct_)->scope;
 		}
 		else if(ProcDef **proc = std::get_if<ProcDef*>(&item))
 		{
 			TypeArgList type_args;
 			for(Type &arg: segment.type_args)
-				type_args.args.push_back(eval_types(arg, type_env, *scope->mod()));
+				type_args.args.push_back(std::move(arg));
 
 			ProcDefInstance *inst = instantiate_proc(*proc, std::move(type_args));
 
-			if(not last_iteration)
+			if(not is_last_iteration)
 				throw ParseError("Procedures cannot have child elements");
 
 			return inst;
@@ -3890,7 +4145,7 @@ variant<ProcDefInstance*, Type> instantiate_item(vector<PathSegment> &&path, Typ
 		else
 			throw ParseError("Undeclared identifier: "s + segment.name);
 
-		first_iteration = false;
+		is_first_iteration = false;
 	}
 
 	UNREACHABLE;
@@ -3911,6 +4166,11 @@ void resolve_types(Type &type, Module &mod)
 			resolve_types(*t.element_type, mod);
 		},
 		[&](StructType&) {},
+		[&](PartialStructType&)
+		{
+			// A PartialStructType is only generated from an UnresolvedType. Thus, all type
+			// arguments have already been resolved.
+		},
 		[&](ProcType &t)
 		{
 			resolve_types(t.def->ret, mod);
@@ -3922,7 +4182,7 @@ void resolve_types(Type &type, Module &mod)
 		[&](AliasType&) {},
 		[&](UnresolvedType &t)
 		{
-			variant<ProcDefInstance*, Type> item_inst = instantiate_item(std::move(t.path), {}, t.scope);
+			variant<ProcDefInstance*, Type> item_inst = instantiate_item(std::move(t.path), t.scope);
 			item_inst | match
 			{
 				[&](Type &type_inst)
@@ -3949,7 +4209,7 @@ void resolve_identifiers(Expr &expr, Scope *scope)
 		[&](StringLiteralExpr&) {},
 		[&](UnresolvedExpr &e)
 		{
-			variant<ProcDefInstance*, Type> item_inst = instantiate_item(std::move(e.path), {}, e.scope);
+			variant<ProcDefInstance*, Type> item_inst = instantiate_item(std::move(e.path), e.scope);
 			item_inst | match
 			{
 				[&](Type &type_inst)
@@ -4159,7 +4419,7 @@ StructDefInstance* eval_types(StructDefInstance *inst, TypeEnv const &type_env, 
 	for(Type &arg: inst->type_args)
 		new_type_args.args.push_back(eval_types(arg, type_env, mod));
 
-	return instantiate_struct(inst->def, std::move(new_type_args), new_outer_struct);
+	return do_struct_instantiation(inst->def, std::move(new_type_args), new_outer_struct);
 }
 
 Type eval_types(Type &type, TypeEnv const &type_env, Module &mod)
@@ -4190,6 +4450,12 @@ Type eval_types(Type &type, TypeEnv const &type_env, Module &mod)
 		[&](ProcType const &t) -> Type
 		{
 			ProcTypeDef new_type;
+			for(TypeVarDef *p: t.def->type_params)
+			{
+				if(not type_env.contains(p))
+					new_type.type_params.push_back(p);
+			}
+
 			for(Parameter const &p: t.def->params)
 			{
 				Parameter new_param = clone(p);
@@ -4211,6 +4477,7 @@ Type eval_types(Type &type, TypeEnv const &type_env, Module &mod)
 			resolve_types(type, mod);
 			return eval_types(type, type_env, mod);
 		},
+		[&](PartialStructType const&) -> Type { assert(!"eval_types: PartialStructType"); },
 	};
 }
 
@@ -4273,6 +4540,7 @@ void eval_types(Expr &expr, TypeEnv const &type_env, Module &mod)
 		[&](AsExpr &e)
 		{
 			eval_types(*e.src_expr, type_env, mod);
+			e.target_type = eval_types(e.target_type, type_env, mod);
 		},
 		[&](CallExpr &e)
 		{
@@ -4281,13 +4549,21 @@ void eval_types(Expr &expr, TypeEnv const &type_env, Module &mod)
 			for(Argument &arg: e.args)
 				eval_types(*arg.expr, type_env, mod);
 		},
-		[&](SizeOfExpr&) {},
+		[&](SizeOfExpr &e)
+		{
+			e.type = eval_types(e.type, type_env, mod);
+		},
 		[&](MakeExpr &e)
 		{
 			eval_types(*e.init, type_env, mod);
 			eval_types(*e.addr, type_env, mod);
 		},
 	};
+}
+
+void eval_types(Pattern &pattern, TypeEnv const &type_env, Module &mod)
+{
+	pattern.type = eval_types(*pattern.type, type_env, mod);
 }
 
 void eval_types(Stmt &stmt, TypeEnv const &type_env, Module &mod)
@@ -4297,6 +4573,7 @@ void eval_types(Stmt &stmt, TypeEnv const &type_env, Module &mod)
 		[&](LetStmt &s)
 		{
 			eval_types(s.init_expr, type_env, mod);
+			eval_types(s.lhs, type_env, mod);
 		},
 		[&](ExprStmt &s)
 		{
@@ -4424,7 +4701,8 @@ bool is_cast_ok(Type const &dest_type, Type const &src_type)
 		},
 		[&](ProcType const&) -> bool { assert(!"is_cast_ok: ProcType: TODO"); },
 		[&](AliasType const&) -> bool { UNREACHABLE; },
-		[&](UnresolvedType const&) -> bool { assert(!"is_cast_ok: UnresolvedType"); }
+		[&](UnresolvedType const&) -> bool { assert(!"is_cast_ok: UnresolvedType"); },
+		[&](PartialStructType const&) -> bool { assert(!"is_cast_ok: PartialStructType"); },
 	};
 }
 
@@ -4455,24 +4733,111 @@ Parameter* find_var_member(StructDefInstance *struct_inst, string const &field)
 void add_size_to_alloc_call(Expr &addr, Expr &&size_expr);
 
 
-vector<Parameter>& get_callee_params(CallExpr const &e)
+unordered_set<TypeVarDef*> get_callee_free_type_params(CallExpr const &e)
+{
+	unordered_set<TypeVarDef*> free_type_vars;
+	*e.callable->type | match
+	{
+		[&](ProcType &t)
+		{
+			free_type_vars.insert(t.def->type_params.begin(), t.def->type_params.end());
+		},
+		[&](auto&)
+		{
+			*e.callable | match
+			{
+				[&](TypeExpr &type_expr)
+				{
+					if(StructType *struct_type = std::get_if<StructType>(&type_expr.type))
+					{
+						if(not struct_type->inst->constructor_params)
+							throw ParseError("Struct does not provide a constructor: " + struct_type->inst->def->name);
+
+						// StructTypes are fully instantiated, so no free type vars
+					}
+					else if(PartialStructType *struct_type = std::get_if<PartialStructType>(&type_expr.type))
+					{
+						StructDef *struct_ = struct_type->struct_;
+						while(struct_)
+						{
+							for(TypeVarDef *param: struct_->type_params)
+							{
+								if(not struct_type->subst.contains(param))
+									free_type_vars.insert(param);
+							}
+
+							struct_ = struct_->try_get_parent();
+						}
+					}
+					else
+						throw ParseError("Type does not provide a constructor: " + str(type_expr.type));
+				},
+				[&](auto&)
+				{
+					throw ParseError("Expression is not callable");
+				},
+			};
+		},
+	};
+
+	return free_type_vars;
+}
+
+vector<Parameter> get_callee_params(CallExpr const &e, Module *mod)
 {
 	return *e.callable->type | match
 	{
-		[&](ProcType &t) -> vector<Parameter>&
+		[&](ProcType &t)
 		{
-			return t.def->params;
+			return clone(t.def->params);
 		},
-		[&](auto&) -> vector<Parameter>&
+		[&](auto&) -> vector<Parameter>
 		{
 			return *e.callable | match
 			{
-				[&](TypeExpr &type_expr) -> vector<Parameter>&
+				[&](TypeExpr &type_expr) -> vector<Parameter>
 				{
-					StructType *struct_type = std::get_if<StructType>(&type_expr.type);
-					return struct_type->inst->constructor_params.value();
+					if(StructType *struct_type = std::get_if<StructType>(&type_expr.type))
+						return clone(*struct_type->inst->constructor_params);
+
+					else if(PartialStructType *struct_type = std::get_if<PartialStructType>(&type_expr.type))
+					{
+						vector<Parameter> params;
+						for(Parameter const &p: *struct_type->struct_->constructor_params)
+						{
+							Parameter inst_param = clone(p);
+							inst_param.type = eval_types(inst_param.type, struct_type->subst, *mod);
+							params.push_back(std::move(inst_param));
+						}
+
+						return params;
+					}
+
+					UNREACHABLE;
 				},
-				[&](auto&) -> vector<Parameter>&
+				[&](auto&) -> vector<Parameter> { UNREACHABLE; },
+			};
+		},
+	};
+}
+
+Type const& get_callee_ret_type(CallExpr const &e)
+{
+	return *e.callable->type | match
+	{
+		[&](ProcType &t) -> Type const&
+		{
+			return t.def->ret;
+		},
+		[&](auto&) -> Type const&
+		{
+			return *e.callable | match
+			{
+				[&](TypeExpr &type_expr) -> Type const&
+				{
+					return type_expr.type;
+				},
+				[&](auto&) -> Type const&
 				{
 					UNREACHABLE;
 				},
@@ -4481,7 +4846,181 @@ vector<Parameter>& get_callee_params(CallExpr const &e)
 	};
 }
 
-void typecheck(Expr &expr, Module &mod)
+
+
+void add_subst(TypeEnv &env, TypeVarDef *var, Type const &type)
+{
+	auto it = env.find(var);
+	if(it != env.end() && not equiv(type, it->second))
+		throw ParseError("Unification failed: Inconsistent substitution");
+
+	env.emplace(pair{var, clone(type)});
+}
+
+TypeVarDef* try_get_free_var(Type const &type, std::unordered_set<TypeVarDef*> const &free_vars)
+{
+	if(VarType const *t = std::get_if<VarType>(&type); t && free_vars.contains(t->var))
+		return t->var;
+
+	return nullptr;
+}
+
+// See https://www.cs.cornell.edu/courses/cs3110/2011sp/Lectures/lec26-type-inference/type-inference.htm
+void unify(
+	Type const &dest,
+	Type const &src,
+	std::unordered_set<TypeVarDef*> const &free_vars,
+	TypeEnv &subst
+)
+{
+	Type const *dest_stripped = strip_alias(dest);
+	Type const *src_stripped = strip_alias(src);
+
+	TypeVarDef *dest_var = try_get_free_var(*dest_stripped, free_vars);
+	TypeVarDef *src_var = try_get_free_var(*src_stripped, free_vars);
+	if(dest_var && src_var)
+	{
+		if(dest_var != src_var)
+			add_subst(subst, dest_var, src);
+
+	}
+	else if(dest_var || src_var)
+	{
+		// TODO If `dest_var != nullptr`: Ensure that `dest_var` does not occur in `src`
+		//      If `src_var != nullptr`: Ensure that `src_var` does not occur in `dest`
+
+		TypeVarDef *var = dest_var;
+		Type const *type = &src;
+		if(!var)
+		{
+			var = src_var;
+			type = &dest;
+		}
+
+		add_subst(subst, var, *type);
+	}
+	else
+	{
+		*dest_stripped | match
+		{
+			[&](BuiltinType const&)
+			{
+				assert(!"unify: BuiltinType: TODO");
+			},
+			[&](VarType const&) { UNREACHABLE; },
+			[&](PointerType const &dest_t)
+			{
+				PointerType const *src_t = std::get_if<PointerType>(src_stripped);
+				if(not src_t)
+					throw ParseError("Unification failed: expected pointer type");
+
+				bool mut_compatible = src_t->is_mutable() || dest_t.is_const();
+				if(not mut_compatible)
+					throw ParseError("Unification failed: Pointer mutability is incompatible");
+
+				unify(*dest_t.target_type, *src_t->target_type, free_vars, subst);
+			},
+			[&](ManyPointerType const&)
+			{
+				assert(!"unify: ManyPointerType: TODO");
+			},
+			[&](StructType const &dest_t)
+			{
+				StructType const *src_t = std::get_if<StructType>(src_stripped);
+				if(not src_t)
+					throw ParseError("Unification failed: expected struct type");
+
+				if(dest_t.inst->def != src_t->inst->def)
+					throw ParseError("Unification failed: struct types differ");
+
+				assert(dest_t.inst->type_args.size() == src_t->inst->type_args.size());
+				for(size_t i = 0; i < dest_t.inst->type_args.size(); ++i)
+				{
+					Type const &dest_arg = dest_t.inst->type_args.args[i];
+					Type const &src_arg = src_t->inst->type_args.args[i];
+					unify(dest_arg, src_arg, free_vars, subst);
+				}
+			},
+			[&](ProcType const&)
+			{
+				assert(!"unify: ProcType: TODO");
+			},
+			[&](AliasType const&) { UNREACHABLE; },
+			[&](UnresolvedType const&) { assert(!"unify: UnresolvedType"); },
+			[&](PartialStructType const&) { assert(!"unify: PartialStructType"); },
+		};
+	}
+}
+
+
+bool has_free_vars(Type const &type, std::unordered_set<TypeVarDef*> const &free_vars)
+{
+	if(free_vars.empty())
+		return false;
+
+	return *strip_alias(type) | match
+	{
+		[&](BuiltinType const&) { return false; },
+		[&](VarType const &t) { return free_vars.contains(t.var); },
+		[&](PointerType const &t)
+		{
+			return has_free_vars(*t.target_type, free_vars);
+		},
+		[&](ManyPointerType const &t)
+		{
+			return has_free_vars(*t.element_type, free_vars);
+		},
+		[&](StructType const &t)
+		{
+			for(Type const &arg: t.inst->type_args)
+			{
+				if(has_free_vars(arg, free_vars))
+					return true;
+			}
+
+			return false;
+		},
+		[&](ProcType const &t)
+		{
+			if(has_free_vars(t.canonical_def->ret, free_vars))
+				return true;
+
+			for(Parameter const &p: t.canonical_def->params)
+			{
+				if(has_free_vars(p.type, free_vars))
+					return true;
+			}
+
+			return false;
+		},
+		[&](AliasType const&) -> bool { UNREACHABLE; },
+		[&](UnresolvedType const&) -> bool { assert(!"has_free_vars: UnresolvedType"); },
+		[&](PartialStructType const&) -> bool { assert(!"has_free_vars: PartialStructType"); },
+	};
+}
+
+struct TypingHint : variant<std::monostate, Type const*, TypeEnv const*>
+{
+	using variant::variant;
+
+	Type const* try_get_type() const
+	{
+		if(Type const *const*t = std::get_if<Type const*>(this))
+			return *t;
+
+		return nullptr;
+	}
+
+	TypeEnv const* try_get_subst() const
+	{
+		if(TypeEnv const *const*t = std::get_if<TypeEnv const*>(this))
+			return *t;
+
+		return nullptr;
+	}
+};
+
+void typecheck(Expr &expr, Module &mod, TypingHint hint = {})
 {
 	expr | match
 	{
@@ -4517,10 +5056,40 @@ void typecheck(Expr &expr, Module &mod)
 		},
 		[&](TypeExpr &e)
 		{
+			TypeEnv const *subst = hint.try_get_subst();
+			PartialStructType *t = std::get_if<PartialStructType>(&e.type);
+			if(t)
+			{
+				if(subst)
+				{
+					for(auto &[var, type]: *subst) {
+						auto res = t->subst.insert({var, clone(type)});
+						assert(res.second);
+					}
+					e.type = try_instantiate_struct(t->struct_, t->subst);
+				}
+			}
+
 			expr.type = clone(e.type);
 		},
 		[&](ProcExpr &e)
 		{
+			if(TypeEnv const *subst = hint.try_get_subst(); subst && e.inst->is_partial())
+			{
+				size_t num_already_provided_type_args = e.inst->type_args.size();
+				size_t num_type_params = e.inst->type.type_params.size();
+
+				TypeArgList new_type_args;
+				for(size_t i = num_already_provided_type_args; i < num_type_params; ++i)
+				{
+					Type type_arg = clone(subst->at(e.inst->type.type_params[i]));
+					new_type_args.args.push_back(std::move(type_arg));
+				}
+				assert(new_type_args.size() == subst->size());
+
+				e.inst = continue_proc_instantiation(e.inst, std::move(new_type_args));
+			}
+
 			expr.type = ProcType(&e.inst->type, mod.canonicalize(clone(e.inst->type)));
 		},
 		[&](UnaryExpr &e)
@@ -4548,10 +5117,29 @@ void typecheck(Expr &expr, Module &mod)
 				case BinaryOp::MUL:
 				case BinaryOp::DIV:
 				{
-					if(!is_integral_type(*e.left->type) || !equiv(*e.left->type, *e.right->type))
-						throw ParseError("Binary op: expected type equivalent integral types, got " + str(*e.left->type) + " and " + str(*e.right->type));
+					if(not is_integral_type(*e.left->type) || not equiv(*e.left->type, *e.right->type))
+						throw ParseError("Binary op: expected equivalent integral types, got " + str(*e.left->type) + " and " + str(*e.right->type));
 
 					expr.type = clone(*e.left->type);
+				} break;
+
+				case BinaryOp::EQ:
+				{
+					if(not equiv(*e.left->type, *e.right->type))
+						throw ParseError("Equality: expected equivalent types, got " + str(*e.left->type) + " and " + str(*e.right->type));
+
+					expr.type = BuiltinType::BOOL;
+				} break;
+
+				case BinaryOp::LT:
+				case BinaryOp::LE:
+				case BinaryOp::GT:
+				case BinaryOp::GE:
+				{
+					if(not is_integral_type(*e.left->type) || not equiv(*e.left->type, *e.right->type))
+						throw ParseError("Comparison: expected equivalent integral types, got " + str(*e.left->type) + " and " + str(*e.right->type));
+
+					expr.type = BuiltinType::BOOL;
 				} break;
 			}
 		},
@@ -4639,41 +5227,14 @@ void typecheck(Expr &expr, Module &mod)
 		{
 			typecheck(*e.callable, mod);
 
-			*e.callable->type | match
-			{
-				[&](ProcType &t)
-				{
-					expr.type = clone(t.def->ret);
-				},
-				[&](auto&)
-				{
-					*e.callable | match
-					{
-						[&](TypeExpr &type_expr)
-						{
-							StructType *struct_type = std::get_if<StructType>(&type_expr.type);
-							if(not struct_type)
-								throw ParseError("Type does not provide a constructor: " + str(type_expr.type));
-
-							if(not struct_type->inst->constructor_params)
-								throw ParseError("Struct does not provide a constructor: " + struct_type->inst->def->name);
-
-							expr.type = clone(*e.callable->type);
-						},
-						[&](auto&)
-						{
-							throw ParseError("Expression is not callable");
-						},
-					};
-				},
-			};
-
-			vector<Parameter> &callee_params = get_callee_params(e);
+			unordered_set<TypeVarDef*> free_type_vars = get_callee_free_type_params(e);
+			vector<Parameter> callee_params = get_callee_params(e, &mod);
 			if(e.args.size() > callee_params.size())
 				throw ParseError("Too many arguments");
 
 			unordered_set<size_t> assigned_params;
 			bool has_ooo_named_args = false;
+			TypeEnv subst;
 			for(size_t i = 0; i < e.args.size(); ++i)
 			{
 				Argument &arg = e.args[i];
@@ -4704,8 +5265,15 @@ void typecheck(Expr &expr, Module &mod)
 					throw ParseError("Multiple arguments for same parameter");
 
 				Parameter &param = callee_params.at(*arg.param_idx);
-				if(!is_expr_assignable(param.type, *arg.expr))
-					throw ParseError("Procedure/struct argument has invalid type");
+				if(has_free_vars(param.type, free_type_vars))
+				{
+					unify(param.type, *arg.expr->type, free_type_vars, subst);
+				}
+				else
+				{
+					if(!is_expr_assignable(param.type, *arg.expr))
+						throw ParseError("Procedure/struct argument has invalid type");
+				}
 			}
 
 			for(size_t param_idx = 0; param_idx < callee_params.size(); ++param_idx)
@@ -4716,6 +5284,11 @@ void typecheck(Expr &expr, Module &mod)
 						throw ParseError("Missing value for procedure/struct argument in call");
 				}
 			}
+
+			if(subst.size())
+				typecheck(*e.callable, mod, TypingHint(&subst));
+
+			expr.type = clone(get_callee_ret_type(e));
 		},
 		[&](SizeOfExpr&)
 		{
@@ -4796,7 +5369,9 @@ void typecheck_pattern(Pattern &lhs_pattern, Expr const &rhs_expr, Type const &r
 					throw ParseError("Inferred type does not match specified type in let statement");
 			}
 			else
-				p.var->type = std::move(inferred_var_type);
+				p.var->type = clone(inferred_var_type);
+
+			lhs_pattern.type = std::move(inferred_var_type);
 		}
 	};
 }
@@ -5155,6 +5730,7 @@ string mangle_type_segment(Type const &type)
 			return t.def->name;
 		},
 		[&](UnresolvedType const&) -> string { assert(!"mangle_type_segment: UnresolvedType"); },
+		[&](PartialStructType const&) -> string { assert(!"mangle_type_segment: PartialStructType"); },
 	};
 }
 
@@ -5238,6 +5814,7 @@ string generate_c_to_str(Type const &type)
 			return t.def->name;
 		},
 		[&](UnresolvedType const&) -> string { assert(!"generate_c_to_str: UnresolvedType"); },
+		[&](PartialStructType const&) -> string { assert(!"generate_c_to_str: PartialStructType"); },
 	};
 }
 
@@ -5342,6 +5919,12 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 				case BinaryOp::SUB: return "(" + left_val + " - " + right_val + ")";
 				case BinaryOp::MUL: return "(" + left_val + " * " + right_val + ")";
 				case BinaryOp::DIV: return "(" + left_val + " / " + right_val + ")";
+
+				case BinaryOp::EQ: return "(" + left_val + " == " + right_val + ")";
+				case BinaryOp::LT: return "(" + left_val + " < "  + right_val + ")";
+				case BinaryOp::LE: return "(" + left_val + " <= " + right_val + ")";
+				case BinaryOp::GT: return "(" + left_val + " > "  + right_val + ")";
+				case BinaryOp::GE: return "(" + left_val + " >= " + right_val + ")";
 			}
 
 			UNREACHABLE;
@@ -5379,7 +5962,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](CallExpr const &e)
 		{
-			vector<Parameter> const &params = get_callee_params(e);
+			vector<Parameter> const &params = get_callee_params(e, nullptr);
 
 			// Evaluate arguments in the order they were provided
 			vector<string> arg_vals(params.size());
@@ -5455,9 +6038,9 @@ void generate_c(Pattern const &lhs_pattern, string const &rhs_expr, Type const &
 	{
 		[&](VarPattern const &p)
 		{
-			backend << *p.var->type << " " << p.var->name << " = ";
+			backend << *lhs_pattern.type << " " << p.var->name << " = ";
 			string rhs = apply_pattern_op_to_c_expr(lhs_pattern.op, rhs_expr);
-			backend	<< generate_c_cast(*p.var->type, rhs, rhs_type) << ";" << LineEnd;
+			backend << generate_c_cast(*lhs_pattern.type, rhs, rhs_type) << ";" << LineEnd;
 		}
 	};
 }
@@ -5798,6 +6381,7 @@ void compute_struct_deps(Type const &type, StructDefInstance *cur_struct, Struct
 			compute_struct_deps(t.def->type, cur_struct, deps_by_struct);
 		},
 		[&](UnresolvedType const&) { assert(!"compute_struct_deps: UnresolvedType"); },
+		[&](PartialStructType const&) { assert(!"compute_struct_deps: PartialStructType"); },
 	};
 }
 
@@ -5911,6 +6495,7 @@ void compute_alias_deps(Type const &type, AliasDef *cur_alias, AliasDepMap &deps
 				deps_by_alias[cur_alias].insert(t.def);
 		},
 		[&](UnresolvedType const&) { assert(!"compute_alias_deps: UnresolvedType"); },
+		[&](PartialStructType const&) { assert(!"compute_alias_deps: PartialStructType"); },
 	};
 }
 
@@ -5963,7 +6548,7 @@ void gather_concrete_instances(StructDef *struct_, vector<StructDefInstance*> &r
 {
 	for(auto &[_, inst]: struct_->instances)
 	{
-		if(inst.is_concrete)
+		if(inst.is_concrete())
 			result.push_back(&inst);
 	}
 
@@ -5974,10 +6559,47 @@ void gather_concrete_instances(StructDef *struct_, vector<StructDefInstance*> &r
 	}
 }
 
-void generate_c(Module &mod, CBackend &backend)
+struct NewInstanceListener : ModuleListener
 {
+	virtual void new_struct_inst(StructDefInstance *inst) override
+	{
+		structs.push_back(inst);
+	}
+
+	virtual void new_proc_inst(ProcDefInstance *inst) override
+	{
+		procs.push_back(inst);
+	}
+
 	vector<StructDefInstance*> structs;
 	vector<ProcDefInstance*> procs;
+};
+
+struct ConcreteProcInstance
+{
+	ConcreteProcInstance(ProcDefInstance *proc, Module &mod) :
+		proc(proc)
+	{
+		assert(proc->is_concrete);
+		if(proc->def->body)
+		{
+			body = clone(*proc->def->body);
+			eval_types(*body, proc->type_env, mod);
+		}
+	}
+
+	ProcDefInstance *proc;
+	optional<Stmt> body;
+};
+
+void generate_c(Module &mod, CBackend &backend)
+{
+	NewInstanceListener listener;
+	mod.add_listener(&listener);
+
+
+	vector<StructDefInstance*> structs;
+	vector<ConcreteProcInstance> procs;
 	vector<AliasDef*> aliases;
 	for(TopLevelItem item: mod.items())
 	{
@@ -5986,19 +6608,38 @@ void generate_c(Module &mod, CBackend &backend)
 			[&](ProcDef *def)
 			{
 				// Make sure we have at least one instance
-				if(def->type_params.empty())
+				if(def->type.type_params.empty())
 					instantiate_proc(def, {});
 
 				for(auto &[_, inst]: def->instances)
 				{
-					if(inst.is_concrete)
-						procs.push_back(&inst);
+					if(inst->is_concrete)
+						procs.push_back(ConcreteProcInstance(inst, mod));
 				}
 			},
 			[&](StructDef *def) { gather_concrete_instances(def, structs); },
 			[&](AliasDef *def) { aliases.push_back(def); },
 		};
 	}
+
+	while(listener.structs.size() || listener.procs.size())
+	{
+		vector<StructDefInstance*> new_structs = std::move(listener.structs);
+		vector<ProcDefInstance*> new_procs = std::move(listener.procs);
+		listener.structs = {};
+		listener.procs = {};
+
+		for(StructDefInstance *new_struct: listener.structs)
+			structs.push_back(new_struct);
+
+		for(ProcDefInstance *new_proc: listener.procs)
+		{
+			if(new_proc->is_concrete)
+				procs.push_back(ConcreteProcInstance(new_proc, mod));
+		}
+	}
+
+	mod.remove_listener(&listener);
 
 	// Aliases
 	vector<AliasDef*> sorted_aliases = sort_alias_by_deps(aliases);
@@ -6024,22 +6665,19 @@ void generate_c(Module &mod, CBackend &backend)
 	}
 
 	// Procedures
-	for(ProcDefInstance *proc: procs)
+	for(ConcreteProcInstance &inst: procs)
 	{
-		generate_c_proc_sig(proc, backend);
+		generate_c_proc_sig(inst.proc, backend);
 		backend << ";" << LineEnd;
 	}
 
-	for(ProcDefInstance *proc: procs)
+	for(ConcreteProcInstance &inst: procs)
 	{
-		if(proc->def->body)
+		if(inst.body)
 		{
-			Stmt inst_body = clone(*proc->def->body);
-			eval_types(inst_body, proc->type_env, mod);
-
-			generate_c_proc_sig(proc, backend);
+			generate_c_proc_sig(inst.proc, backend);
 			backend << LineEnd;
-			generate_c(inst_body, proc, backend);
+			generate_c(*inst.body, inst.proc, backend);
 			backend << LineEnd;
 		}
 	}
