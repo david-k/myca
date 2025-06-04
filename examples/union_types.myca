@@ -1,0 +1,35 @@
+
+struct Pair'(S, T)
+{
+	first: S,
+	second: T,
+}
+
+typealias Vec2'T = Pair'(T, T);
+
+typealias Ptr'T = ^T;
+
+
+
+
+//typealias Quad'(T, S) = Pair'(Pair'(T, T), Pair'(S, S))
+
+//proc get'T() -> T {}
+
+proc main() -> i32
+{
+	//let f: proc(Vec2,Vec2) = get() as proc(Vec2'i32, Vec2'bool);
+	//let f: proc(Vec2,Vec2) = get() as proc(Vec2'i32, Vec2'bool);
+
+	let v = Vec2'i32(1, 2);
+	let p = Pair(true, 23);
+
+	let x = Pair(Vec2(1, 2), Vec2(true, false));
+
+	let ptr: Ptr = &p.second;
+
+	// let q = Quad(Pair(true, false), Pair(3, 4));
+	// return q.second.first;
+
+	return ptr^;
+}

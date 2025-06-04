@@ -55,7 +55,7 @@ proc main() -> i32
 	// When creating a dynamic array using `make`, only the left-most array size can be dynamic
 	/*let n = 10;
 	let arr2: []i32 = make[n] 42 @ malloc();
-	let arr2: [][2]i32 = make[n] {1,2}::[2]i32 @ malloc();*/
+	let arr2: [][2]i32 = make[n] {1,2} as [2]i32 @ malloc();*/
 
 	return p_foo^.i; // 23
 }
