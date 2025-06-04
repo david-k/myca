@@ -634,16 +634,21 @@ struct PathSegment
 };
 
 
-struct VarType
+struct TypeDeductionVar
+{
+	uint32_t id;
+
+	friend bool operator == (TypeDeductionVar a, TypeDeductionVar b) = default;
+};
+
+struct TypeParameterVar
 {
 	TypeVarDef *var;
-	// or
-	uint32_t deduction_var_id{};
 
-	friend bool operator == (VarType, VarType) = default;
-
-	bool is_deduction_var() const { return var == nullptr; }
+	friend bool operator == (TypeParameterVar a, TypeParameterVar b) = default;
 };
+
+using VarType = variant<TypeParameterVar, TypeDeductionVar>;
 
 enum class IsMutable
 {
@@ -850,8 +855,12 @@ namespace std
 		size_t operator () (::VarType const &var) const
 		{
 			size_t h = 0;
-			::combine_hashes(h, ::compute_hash(var.var));
-			::combine_hashes(h, ::compute_hash(var.deduction_var_id));
+			::combine_hashes(h, ::compute_hash(var.index()));
+			var | match
+			{
+				[&](::TypeParameterVar v) { ::combine_hashes(h, ::compute_hash(v.var)); },
+				[&](::TypeDeductionVar v) { ::combine_hashes(h, ::compute_hash(v.id)); },
+			};
 
 			return h;
 		}
@@ -1658,7 +1667,7 @@ namespace std
 				},
 				[&](::VarType const &t)
 				{
-					::combine_hashes(h, ::compute_hash(t.var));
+					::combine_hashes(h, ::compute_hash(t));
 				},
 				[&](::PointerType const &t)
 				{
@@ -2254,7 +2263,14 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 	type | match
 	{
 		[&](BuiltinType const &t) { os << str(t); },
-		[&](VarType const &t) { os << t.var->name; },
+		[&](VarType const &t)
+		{
+			t | match
+			{
+				[&](TypeParameterVar v) { os << v.var->name; },
+				[&](TypeDeductionVar v) { os << "$TypeDeductionVar(" << v.id << ")"; },
+			};
+		},
 		[&](PointerType const &t)
 		{
 			os << "^";
@@ -2877,7 +2893,7 @@ Type parse_type(Parser &parser, Module &mod)
 				return BuiltinType::USIZE;
 
 			if(TypeVarDef *tvar = mod.scope()->try_lookup_type_var(string(tok.text)))
-				return VarType(tvar);
+				return VarType(TypeParameterVar(tvar));
 
 			return parse_path(string(tok.text), parser, mod);
 		}
@@ -3709,7 +3725,7 @@ bool equiv(Type const &a, Type const &b)
 		[&](VarType const &ta)
 		{
 			if(VarType const *tb = std::get_if<VarType>(&b))
-				return ta.var == tb->var;
+				return ta == *tb;
 
 			return false;
 		},
@@ -4024,7 +4040,7 @@ variant<Type, Expr> resolve_path_ng(UnresolvedPath &&path, Module &mod)
 			TypeArgList remaining_args;
 			remaining_args.append(path.type_args);
 			while(num_missing_args--)
-				remaining_args.args.push_back(VarType(nullptr, NEXT_TYPE_VAR_ID++));
+				remaining_args.args.push_back(TypeDeductionVar(NEXT_TYPE_VAR_ID++));
 
 			return UnappliedStructType(&struct_, std::move(remaining_args), std::move(resolved_parent));
 		},
@@ -4036,7 +4052,7 @@ variant<Type, Expr> resolve_path_ng(UnresolvedPath &&path, Module &mod)
 			TypeArgList remaining_args;
 			remaining_args.append(path.type_args);
 			while(num_missing_args--)
-				remaining_args.args.push_back(VarType(nullptr, NEXT_TYPE_VAR_ID++));
+				remaining_args.args.push_back(TypeDeductionVar(NEXT_TYPE_VAR_ID++));
 
 			return Expr(UnappliedProcExpr(&proc, std::move(remaining_args)), {});
 		},
@@ -4050,12 +4066,12 @@ variant<Type, Expr> resolve_path_ng(UnresolvedPath &&path, Module &mod)
 			size_t arg_idx = 0;
 			while(arg_idx < path.type_args.size())
 			{
-				add_subst(env, VarType(alias.type_params[arg_idx]), path.type_args.args[arg_idx]);
+				add_subst(env, TypeParameterVar(alias.type_params[arg_idx]), path.type_args.args[arg_idx]);
 				arg_idx += 1;
 			}
 			while(arg_idx < alias.type_params.size())
 			{
-				add_subst(env, VarType(alias.type_params[arg_idx]), VarType(nullptr, NEXT_TYPE_VAR_ID++));
+				add_subst(env, TypeParameterVar(alias.type_params[arg_idx]), TypeDeductionVar(NEXT_TYPE_VAR_ID++));
 				arg_idx += 1;
 			}
 
@@ -4363,7 +4379,7 @@ void fill_type_env(TypeEnv &type_env, vector<TypeVarDef*> const &type_params, Ty
 	for(size_t i = 0; i < type_args.size(); ++i)
 	{
 		TypeVarDef *tparam = type_params[i];
-		type_env[VarType(tparam)] = std::move(type_args.args[i]);
+		type_env[TypeParameterVar(tparam)] = std::move(type_args.args[i]);
 	}
 }
 
@@ -4412,7 +4428,7 @@ bool has_type_deduction_vars(Type const &type)
 	return type | match
 	{
 		[&](BuiltinType const&) { return false; },
-		[&](VarType const &t) { return t.is_deduction_var(); },
+		[&](VarType const &t) { return is<TypeDeductionVar>(t); },
 		[&](UnresolvedPath const&) -> bool { assert(!"has_type_deduction_vars: UnresolvedPath"); },
 		[&](UnappliedStructType const &t)
 		{
@@ -4656,7 +4672,7 @@ void instantiate_type(Type &type, TypeEnv const &type_env, Module &mod)
 			ProcTypeDef new_type;
 			for(TypeVarDef *p: t.def->type_params)
 			{
-				if(not type_env.contains(VarType(p)))
+				if(not type_env.contains(TypeParameterVar(p)))
 					new_type.type_params.push_back(p);
 			}
 
@@ -4683,7 +4699,7 @@ void instantiate_type(Type &type, TypeEnv const &type_env, Module &mod)
 			ProcTypeDef new_type;
 			for(TypeVarDef *p: t.type->type_params)
 			{
-				if(not type_env.contains(VarType(p)))
+				if(not type_env.contains(TypeParameterVar(p)))
 					new_type.type_params.push_back(p);
 			}
 
@@ -4909,18 +4925,18 @@ std::unique_ptr<StructTypeParentClimber> mk_parent_climber(Type const &type)
 
 // Unify free variables
 //------------------------------------------------
-optional<VarType> try_get_type_deduction_var(Type const &type)
+optional<TypeDeductionVar> try_get_type_deduction_var(Type const &type)
 {
-	if(VarType const *t = std::get_if<VarType>(&type); t && t->is_deduction_var())
-		return *t;
+	if(VarType const *t = std::get_if<VarType>(&type); t && is<TypeDeductionVar>(*t))
+		return std::get<TypeDeductionVar>(*t);
 
 	return nullopt;
 }
 
 bool try_unify_type_deduction_variables(Type const &dest, Type const &src, TypeEnv &subst)
 {
-	optional<VarType> dest_var = try_get_type_deduction_var(dest);
-	optional<VarType> src_var = try_get_type_deduction_var(src);
+	optional<TypeDeductionVar> dest_var = try_get_type_deduction_var(dest);
+	optional<TypeDeductionVar> src_var = try_get_type_deduction_var(src);
 	if(dest_var && src_var)
 	{
 		if(*dest_var != *src_var)
@@ -5200,7 +5216,7 @@ void create_type_env(UnappliedStructType const &t, TypeEnv &result)
 		create_type_env(*t.parent, result);
 
 	for(size_t i = 0; i < t.type_args.size(); ++i)
-		add_subst(result, VarType(t.struct_->type_params[i]), clone(t.type_args.args[i]));
+		add_subst(result, TypeParameterVar(t.struct_->type_params[i]), clone(t.type_args.args[i]));
 }
 
 vector<Parameter> get_callee_params(Type const &callee_type)
@@ -5228,7 +5244,7 @@ vector<Parameter> get_callee_params(Type const &callee_type)
 		{
 			TypeEnv env;
 			for(size_t i = 0; i < t.type_args.size(); ++i)
-				add_subst(env, VarType(t.type->type_params[i]), clone(t.type_args.args[i]));
+				add_subst(env, TypeParameterVar(t.type->type_params[i]), clone(t.type_args.args[i]));
 
 			vector<Parameter> callee_params = clone(t.type->params);
 			for(Parameter &param: callee_params)
