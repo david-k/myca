@@ -39,7 +39,7 @@ proc length'T (arr: ^Array'T) -> usize
 
 proc add'T (arr: ^mut Array'T, val: T)
 {
-	if arr^.length + (1 as usize) > arr^.capacity {
+	if arr^.length + 1 > arr^.capacity {
 		let new_cap = max(arr^.capacity * 2, 1);
 		grow_capacity(arr, new_cap);
 	}

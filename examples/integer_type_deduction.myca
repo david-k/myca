@@ -1,0 +1,24 @@
+
+proc foo(a: usize) {}
+
+proc main() -> i32
+{
+	let a = 5; // i32
+	let b = 3 + 8; // i32
+	let c = 3 + 8 + 150; // i32
+	let d = -1 + (-3 as i8); // i8
+
+	let e = 2147483647; // i32
+	let f = 2147483648; // u32
+	let g = 2147483647 + 2147483648 + 1; // isize
+
+
+	foo(3);
+	foo(-3 + 5);
+	foo(-3 + 3);
+	// foo(-3 + 2); // Should fail
+	// foo(-3); // Should fail
+
+
+	return 0;
+}

@@ -31,5 +31,5 @@ proc main() -> i32
 	// let q = Quad(Pair(true, false), Pair(3, 4));
 	// return q.second.first;
 
-	return ptr^;
+	return ptr^; // 23
 }

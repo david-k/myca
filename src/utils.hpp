@@ -5,6 +5,7 @@
 #include <sstream>
 #include <memory>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <cassert>
 
@@ -264,34 +265,97 @@ class XInt64
 {
 public:
 	XInt64() :
-		m_is_signed(true),
+		m_is_negative(false),
 		m_value(0) {}
 
 	explicit XInt64(int64_t value) :
-		m_is_signed(true),
-		m_value(value) {}
+		m_is_negative(value < 0),
+		m_value(std::abs(value)) {}
 
 	explicit XInt64(uint64_t value) :
-		m_is_signed(false),
+		m_is_negative(false),
 		m_value(value) {}
 
-	bool is_signed() const { return m_is_signed; }
+	explicit XInt64(bool is_negative, uint64_t value) :
+		m_is_negative(is_negative),
+		m_value(value) {}
 
 	int64_t as_signed() const
 	{
-		assert(m_is_signed);
-		return (int64_t)m_value;
+		return m_is_negative ? -int64_t(m_value) : int64_t(m_value);
 	}
 
 	uint64_t as_unsigned() const
 	{
-		assert(!m_is_signed);
+		assert(!m_is_negative);
 		return m_value;
 	}
 
-	bool is_negative() const { return m_is_signed && (int64_t)m_value < 0; }
+	bool is_negative() const { return m_is_negative; }
+
+	XInt64 operator - () const
+	{
+		return XInt64(not m_is_negative, m_value);
+	}
+
+	friend XInt64 operator + (XInt64 a, XInt64 b)
+	{
+		if(a.is_negative() == b.is_negative())
+			return XInt64(a.is_negative(), a.m_value + b.m_value);
+		else
+		{
+			if(b.is_negative())
+				std::swap(a, b);
+
+			assert(a.is_negative());
+			assert(not b.is_negative());
+
+			if(a.m_value < b.m_value)
+				return XInt64(false, b.m_value - a.m_value);
+			else
+				return XInt64(true, a.m_value - b.m_value);
+		}
+	}
+
+	friend XInt64 operator - (XInt64 a, XInt64 b)
+	{
+		return a + (-b);
+	}
+
+	uint64_t raw() const { return m_value; }
+
+	friend bool operator == (XInt64 a, XInt64 b)
+	{
+		if(a.m_value == 0 && b.m_value == 0)
+			return true;
+
+		return a.m_value == b.m_value && a.m_is_negative == b.m_is_negative;
+	}
+
+	friend bool operator < (XInt64 a, XInt64 b)
+	{
+		if(a.is_negative())
+		{
+			if(b.is_negative())
+				return a.as_signed() < b.as_signed();
+
+			return true;
+		}
+		else
+		{
+			if(b.is_negative())
+				return false;
+
+			return a.as_unsigned() < b.as_unsigned();
+		}
+	}
+
+	friend bool operator <= (XInt64 a, XInt64 b)
+	{
+		return a == b || a < b;
+	}
 
 private:
-	bool m_is_signed;
+	bool m_is_negative;
 	uint64_t m_value;
 };
