@@ -1,35 +1,42 @@
+typealias IntOrBool = u32 | bool;
 
-struct Pair'(S, T)
+proc lookup(idx: i32) -> IntOrBool
 {
-	first: S,
-	second: T,
+	if idx == 0 {
+		return 3;
+	} else {
+		return false;
+	}
 }
 
-typealias Vec2'T = Pair'(T, T);
 
-typealias Ptr'T = ^T;
+struct ArithError
+{
+	case DivisionByZero{},
+}
 
+proc safe_divide(a: i32, b: i32) -> i32|ArithError
+{
+	if b == 0 {
+		return ArithError.DivisionByZero();
+	}
 
+	return a / b;
+}
 
-
-//typealias Quad'(T, S) = Pair'(Pair'(T, T), Pair'(S, S))
-
-//proc get'T() -> T {}
 
 proc main() -> i32
 {
-	//let f: proc(Vec2,Vec2) = get() as proc(Vec2'i32, Vec2'bool);
-	//let f: proc(Vec2,Vec2) = get() as proc(Vec2'i32, Vec2'bool);
+	let x = lookup(99);
+	let y: IntOrBool = false;
 
-	let v = Vec2'i32(1, 2);
-	let p = Pair(true, 23);
-
-	let x = Pair(Vec2(1, 2), Vec2(true, false));
-
-	let ptr: Ptr = &p.second;
-
-	// let q = Quad(Pair(true, false), Pair(3, 4));
-	// return q.second.first;
-
-	return ptr^; // 23
+	match safe_divide(23, 4)
+	{
+		case i32 -> v {
+			return v;
+		}
+		case ArithError {
+			return -1;
+		}
+	}
 }

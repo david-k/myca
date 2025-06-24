@@ -57,7 +57,6 @@ proc get_prime_factor_2(json: Json) -> i32
 	}
 }
 
-// TODO I should be required to use `^mut Json`
 proc increase_jint(json: ^mut Json)
 {
 	match json^ {

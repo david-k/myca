@@ -266,6 +266,7 @@ enum class Lexeme
 	QUESTIONMARK,
 	SINGLE_QUOTE,
 	AT,
+	BAR,
 	LEFT_PAREN,
 	RIGHT_PAREN,
 	LEFT_BRACE,
@@ -331,6 +332,7 @@ string_view str(Lexeme tok)
 		case Lexeme::QUESTIONMARK: return "QUESTIONMARK";
 		case Lexeme::SINGLE_QUOTE: return "SINGLE_QUOTE";
 		case Lexeme::AT: return "AT";
+		case Lexeme::BAR: return "BAR";
 		case Lexeme::LEFT_PAREN: return "LEFT_PAREN";
 		case Lexeme::RIGHT_PAREN: return "RIGHT_PAREN";
 		case Lexeme::LEFT_BRACE: return "LEFT_BRACE";
@@ -410,6 +412,7 @@ optional<Lexeme> try_read_punctuation(Lexer &lex)
 		case '?': lex.advance(); return Lexeme::QUESTIONMARK;
 		case '\'': lex.advance(); return Lexeme::SINGLE_QUOTE;
 		case '@': lex.advance(); return Lexeme::AT;
+		case '|': lex.advance(); return Lexeme::BAR;
 		case '(': lex.advance(); return Lexeme::LEFT_PAREN;
 		case ')': lex.advance(); return Lexeme::RIGHT_PAREN;
 		case '{': lex.advance(); return Lexeme::LEFT_BRACE;
@@ -573,6 +576,7 @@ struct VarDef;
 struct ProcDef;
 struct ProcDefInstance;
 struct ProcTypeDef;
+struct UnionTypeDef;
 struct StructDef;
 struct StructDefInstance;
 struct AliasDef;
@@ -653,6 +657,15 @@ struct TypeDeductionVar
 	friend bool operator == (TypeDeductionVar a, TypeDeductionVar b) = default;
 };
 
+// Q: Why have this indirection? Why not store the integer range directly in the type?
+// A: This allows TypeEnv to assign types to integer literals by referrering to the KnownIntTypeVar.
+struct KnownIntTypeVar
+{
+	uint32_t id;
+
+	friend bool operator == (KnownIntTypeVar a, KnownIntTypeVar b) = default;
+};
+
 struct TypeParameterVar
 {
 	TypeVarDef *var;
@@ -660,7 +673,7 @@ struct TypeParameterVar
 	friend bool operator == (TypeParameterVar a, TypeParameterVar b) = default;
 };
 
-using VarType = variant<TypeParameterVar, TypeDeductionVar>;
+using VarType = variant<TypeParameterVar, TypeDeductionVar, KnownIntTypeVar>;
 
 enum class IsMutable
 {
@@ -723,11 +736,21 @@ struct UnappliedProcType
 	TypeArgList type_args;
 };
 
-struct KnownIntType
+struct UnionType
 {
-	XInt64 value;
+	UnionTypeDef *def;
+
+	// Available after resolve_identifiers()
+	UnionTypeDef const *canonical_def = nullptr;
 };
 
+struct UnappliedUnionType
+{
+	UnappliedUnionType(UnionTypeDef &&type, TypeArgList &&type_args);
+
+	OwnPtr<UnionTypeDef> type;
+	TypeArgList type_args;
+};
 
 
 class Type : public variant
@@ -736,11 +759,12 @@ class Type : public variant
 	VarType,
 	PointerType,
 	ManyPointerType,
-	ProcType,
 	StructType,
-	KnownIntType,
+	ProcType,
+	UnionType,
 	UnappliedStructType,
 	UnappliedProcType,
+	UnappliedUnionType,
 	UnresolvedPath
 >
 {
@@ -781,14 +805,39 @@ struct ProcTypeDef
 };
 
 
+bool equiv(Type const &a, Type const &b);
+
+struct UnionTypeDef
+{
+	// Must always be sorted
+	vector<Type> alternatives;
+
+	optional<size_t> contains(Type const &type) const
+	{
+		for(size_t i = 0; i < alternatives.size(); ++i)
+		{
+			if(equiv(type, alternatives[i]))
+				return i;
+		}
+
+		return nullopt;
+	}
+};
+
+
 UnappliedProcType::UnappliedProcType(ProcTypeDef &&type, TypeArgList &&type_args) :
 	type(std::make_unique<ProcTypeDef>(std::move(type))),
+	type_args(std::move(type_args)) {}
+
+UnappliedUnionType::UnappliedUnionType(UnionTypeDef &&type, TypeArgList &&type_args) :
+	type(std::make_unique<UnionTypeDef>(std::move(type))),
 	type_args(std::move(type_args)) {}
 
 TypeArgList clone(TypeArgList const &list);
 UnresolvedPath clone(UnresolvedPath const &path);
 UnappliedStructType clone(UnappliedStructType const &unapplied);
 ProcTypeDef clone(ProcTypeDef const &unapplied);
+UnionTypeDef clone(UnionTypeDef const &unapplied);
 
 Type clone(Type const &type)
 {
@@ -800,9 +849,10 @@ Type clone(Type const &type)
 		[&](ManyPointerType const &t) -> Type { return ManyPointerType(clone(*t.element_type), t.mutability); },
 		[&](StructType const &t) -> Type { return t; },
 		[&](ProcType const &t) -> Type { return t; },
-		[&](KnownIntType const &t) -> Type { return t; },
+		[&](UnionType const &t) -> Type { return t; },
 		[&](UnappliedStructType const &t) -> Type { return clone(t); },
 		[&](UnappliedProcType const &t) -> Type { return UnappliedProcType(clone(*t.type), clone(t.type_args)); },
+		[&](UnappliedUnionType const &t) -> Type { return UnappliedUnionType(clone(*t.type), clone(t.type_args)); },
 		[&](UnresolvedPath const &t) -> Type { return clone(t); },
 	};
 }
@@ -817,6 +867,17 @@ UnappliedStructType clone(UnappliedStructType const &unapplied)
 		.struct_ = unapplied.struct_,
 		.type_args = clone(unapplied.type_args),
 		.parent = std::move(parent),
+	};
+}
+
+UnionTypeDef clone(UnionTypeDef const &union_)
+{
+	vector<Type> alternatives;
+	for(Type const &t: union_.alternatives)
+		alternatives.push_back(clone(t));
+
+	return UnionTypeDef{
+		.alternatives = std::move(alternatives),
 	};
 }
 
@@ -863,20 +924,93 @@ namespace std
 			{
 				[&](::TypeParameterVar v) { ::combine_hashes(h, ::compute_hash(v.var)); },
 				[&](::TypeDeductionVar v) { ::combine_hashes(h, ::compute_hash(v.id)); },
+				[&](::KnownIntTypeVar v) { ::combine_hashes(h, ::compute_hash(v.id)); },
 			};
 
 			return h;
 		}
 	};
+
+	template<>
+	struct hash<::KnownIntTypeVar>
+	{
+		size_t operator () (::KnownIntTypeVar const &v) const
+		{
+			return ::compute_hash(v.id);
+		}
+	};
 }
 
-using TypeEnv = unordered_map<VarType, Type>;
+bool integer_assignable_to(BuiltinType type, XInt64 val);
+optional<BuiltinType> smallest_int_type_for(XInt64 low, XInt64 high);
+struct SemaContext;
+
+class TypeEnv
+{
+public:
+	auto find(VarType var) const { return m_mapping.find(var); }
+	auto begin() const { return m_mapping.begin(); }
+	auto end() const { return m_mapping.end(); }
+	bool empty() const { return m_mapping.empty(); }
+	bool contains(VarType var) const { return m_mapping.contains(var); }
+
+	Type const* try_lookup(VarType var) const
+	{
+		auto it = m_mapping.find(var);
+		if(it == m_mapping.end())
+			return nullptr;
+
+		return &it->second;
+	}
+
+	Type& lookup(VarType var)
+	{
+		auto it = m_mapping.find(var);
+		assert(it != m_mapping.end());
+
+		return it->second;
+	}
+
+	void add_unique(VarType var, Type &&type)
+	{
+		update_deferred_type_annotations(var, type);
+
+		auto res = m_mapping.emplace(var, std::move(type));
+		assert(res.second);
+	}
+
+	void replace(VarType var, Type &&type)
+	{
+		update_deferred_type_annotations(var, type);
+
+		auto it = m_mapping.find(var);
+		if(it == m_mapping.end())
+			m_mapping.emplace(var, std::move(type));
+		else
+			it->second = std::move(type);
+	}
+
+	void instantiate_int_vars(SemaContext const &ctx);
+
+private:
+	unordered_map<VarType, Type> m_mapping;
+	unordered_map<VarType, unordered_set<KnownIntTypeVar>> m_deferred_type_instantiations;
+
+	void update_deferred_type_annotations(VarType var, Type const &type)
+	{
+		if(VarType const *t = std::get_if<VarType>(&type))
+		{
+			if(KnownIntTypeVar const *known_int_var = std::get_if<KnownIntTypeVar>(t))
+				m_deferred_type_instantiations[var].insert(*known_int_var);
+		}
+	}
+};
 
 TypeEnv clone(TypeEnv const &env)
 {
 	TypeEnv result;
 	for(auto &[var, type]: env)
-		result.emplace(pair{var, clone(type)});
+		result.add_unique(var, clone(type));
 
 	return result;
 }
@@ -1120,6 +1254,16 @@ struct ConstructorExpr
 	StructDefInstance *inst;
 };
 
+struct UnionInitExpr
+{
+	UnionInitExpr(size_t alt_idx, Expr &&value) :
+		alt_idx(alt_idx),
+		value(std::make_unique<Expr>(std::move(value))) {}
+
+	size_t alt_idx;
+	OwnPtr<Expr> value;
+};
+
 struct UnappliedConstructorExpr
 {
 	Type struct_;
@@ -1152,6 +1296,7 @@ class Expr : public variant
 	CallExpr,
 	SizeOfExpr,
 	MakeExpr,
+	UnionInitExpr,
 	UnappliedConstructorExpr,
 	UnappliedProcExpr,
 	UnresolvedPath
@@ -1281,6 +1426,10 @@ Expr clone(Expr const &expr)
 		{
 			return expr.clone_as(MakeExpr(std::make_unique<Expr>(clone(*e.init)), std::make_unique<Expr>(clone(*e.addr))));
 		},
+		[&](UnionInitExpr const &e)
+		{
+			return expr.clone_as(UnionInitExpr(e.alt_idx, clone(*e.value)));
+		},
 		[&](UnresolvedPath const &p)
 		{
 			return expr.clone_as(clone(p));
@@ -1300,16 +1449,18 @@ Expr clone(Expr const &expr)
 //--------------------------------------------------------------------
 // Patterns
 //--------------------------------------------------------------------
-struct NoPatternOp {};
-struct DerefPatternOp {};
+struct Pattern;
 
-struct AddressOfPatternOp
+struct DerefPattern
 {
-	IsMutable mutability;
+	OwnPtr<Pattern> sub;
 };
 
-using PatternOp = variant<NoPatternOp, DerefPatternOp, AddressOfPatternOp>;
-
+struct AddressOfPattern
+{
+	OwnPtr<Pattern> sub;
+	IsMutable mutability;
+};
 
 struct VarPattern
 {
@@ -1317,15 +1468,17 @@ struct VarPattern
 };
 
 
-struct Pattern : variant<VarPattern>
+struct Pattern : variant
+<
+	struct VarPattern,
+	struct DerefPattern,
+	struct AddressOfPattern
+>
 {
 	template<typename T>
-	Pattern(T &&t, PatternOp op, optional<Type> &&type = nullopt) :
+	Pattern(T &&t, optional<Type> &&type = nullopt) :
 		variant(std::forward<T>(t)),
-		op(op),
 		type(std::move(type)) {}
-
-	PatternOp op;
 
 	// Available after semantic analysis
 	optional<Type> type;
@@ -1333,18 +1486,26 @@ struct Pattern : variant<VarPattern>
 
 Pattern clone(Pattern const &pattern)
 {
-	PatternOp op_cloned = pattern.op;
-	optional<Type> type_cloned;
-	if(pattern.type)
-		type_cloned = clone(*pattern.type);
-
-		
 	return pattern | match
 	{
 		[&](VarPattern const &p)
 		{
-			return Pattern(p, std::move(op_cloned), std::move(type_cloned));
-		}
+			return Pattern(p, clone(pattern.type));
+		},
+		[&](DerefPattern const &p)
+		{
+			return Pattern(
+				DerefPattern(std::make_unique<Pattern>(clone(*p.sub))),
+				clone(pattern.type)
+			);
+		},
+		[&](AddressOfPattern const &p)
+		{
+			return Pattern(
+				AddressOfPattern(std::make_unique<Pattern>(clone(*p.sub)), p.mutability),
+				clone(pattern.type)
+			);
+		},
 	};
 }
 
@@ -1410,23 +1571,20 @@ struct MatchArm
 	OwnPtr<Stmt> stmt;
 	optional<Pattern> capture;
 
-	MatchArm(Type &&type, Stmt &&stmt, optional<Pattern> &&capture, StructDefInstance *struct_ = nullptr) :
+	MatchArm(Type &&type, Stmt &&stmt, optional<Pattern> &&capture, optional<size_t> discr = nullopt) :
 		type(std::move(type)),
 		stmt(std::make_unique<Stmt>(std::move(stmt))),
 		capture(std::move(capture)),
-		struct_(struct_) {}
+		discr(discr) {}
 
 	// Available after semantic analysis
-	StructDefInstance *struct_ = nullptr;
+	optional<size_t> discr{};
 };
 
 struct MatchStmt
 {
 	Expr expr;
 	vector<MatchArm> arms;
-
-	// Available after semantic analysis
-	StructDefInstance *subject = nullptr;
 };
 
 
@@ -1488,11 +1646,11 @@ Stmt clone(Stmt const &stmt)
 					clone(arm.type),
 					clone(*arm.stmt),
 					clone(arm.capture),
-					arm.struct_
+					arm.discr
 				));
 			}
 
-			return Stmt(MatchStmt(std::move(expr), std::move(arms), s.subject));
+			return Stmt(MatchStmt(std::move(expr), std::move(arms)));
 		},
 	};
 }
@@ -1572,8 +1730,8 @@ ProcTypeDef clone(ProcTypeDef const &proc)
 	};
 }
 
-// For simplicity, we do not consider α-equivlance. It's not necessary as generic procedures are not
-// first class and cannot be passed around.
+// For simplicity, we do not consider α-equivlance for type parameters. It's not necessary as
+// generic procedures are not first class and cannot be passed around.
 
 namespace std
 {
@@ -1594,6 +1752,19 @@ namespace std
 			}
 
 			::combine_hashes(h, ::compute_hash(proc.ret));
+			return h;
+		}
+	};
+
+	template<>
+	struct hash<::UnionTypeDef>
+	{
+		size_t operator () (::UnionTypeDef const &proc) const
+		{
+			size_t h = 0;
+			for(::Type const &alt: proc.alternatives)
+				::combine_hashes(h, ::compute_hash(alt));
+
 			return h;
 		}
 	};
@@ -1633,6 +1804,23 @@ struct ProcTypeEquiv
 
 		if(not equiv(a.ret, b.ret))
 			return false;
+
+		return true;
+	}
+};
+
+struct UnionTypeEquiv
+{
+	bool operator () (UnionTypeDef const &a, UnionTypeDef const &b) const
+	{
+		if(a.alternatives.size() != b.alternatives.size())
+			return false;
+
+		for(size_t i = 0; i < a.alternatives.size(); ++i)
+		{
+			if(not equiv(a.alternatives[i], b.alternatives[i]))
+				return false;
+		}
 
 		return true;
 	}
@@ -1714,14 +1902,14 @@ namespace std
 				{
 					::combine_hashes(h, ::compute_hash(*t.def));
 				},
-				[&](::KnownIntType const &t)
+				[&](::UnionType const &t)
 				{
-					::combine_hashes(h, ::compute_hash(t.value.is_negative()));
-					::combine_hashes(h, ::compute_hash(t.value.raw()));
+					::combine_hashes(h, ::compute_hash(*t.def));
 				},
 				[&](::UnresolvedPath const&) { assert(!"hash<Type>: UnresolvedPath"); },
 				[&](::UnappliedStructType const&) { assert(!"hash<Type>: UnappliedStructType"); },
 				[&](::UnappliedProcType const&) { assert(!"hash<Type>: UnappliedProcType"); },
+				[&](::UnappliedUnionType const&) { assert(!"hash<Type>: UnappliedUnionType"); },
 			};
 
 			return h;
@@ -2175,11 +2363,26 @@ public:
 		return &*res.first;
 	}
 
+	UnionTypeDef* add_union_type(UnionTypeDef &&union_)
+	{
+		m_union_types.push_back(std::make_unique<UnionTypeDef>(std::move(union_)));
+		return m_union_types.back().get();
+	}
+
+	UnionTypeDef const* get_canonical(UnionTypeDef const &union_)
+	{
+		auto it = m_canonical_union_types.find(union_);
+		if(it != m_canonical_union_types.end())
+			return &*it;
+
+		// TODO Make sure each alternative has a unique type
+
+		auto res = m_canonical_union_types.insert(clone(union_));
+		return &*res.first;
+	}
+
 	vector<TopLevelItem>& items() { return m_items; }
 	vector<TopLevelItem> const& items() const { return m_items; }
-
-	using ProcTypeIterator = vector<OwnPtr<ProcTypeDef>>::iterator;
-	Range<ProcTypeIterator> proc_types() { return {m_proc_types.begin(), m_proc_types.end()}; }
 
 	void add_listener(ModuleListener *listener)
 	{
@@ -2205,6 +2408,11 @@ public:
 			l->new_proc_inst(inst);
 	}
 
+	auto union_types() const -> auto
+	{
+		return Range{m_canonical_union_types.begin(), m_canonical_union_types.end()};
+	}
+
 private:
 	OwnPtr<Scope> m_global_scope;
 	Scope *m_cur_scope;
@@ -2212,6 +2420,9 @@ private:
 
 	vector<OwnPtr<ProcTypeDef>> m_proc_types;
 	unordered_set<ProcTypeDef, std::hash<ProcTypeDef>, ProcTypeEquiv> m_canonical_proc_types;
+
+	vector<OwnPtr<UnionTypeDef>> m_union_types;
+	unordered_set<UnionTypeDef, std::hash<UnionTypeDef>, UnionTypeEquiv> m_canonical_union_types;
 
 	vector<ModuleListener*> m_listeners;
 };
@@ -2300,6 +2511,7 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 			{
 				[&](TypeParameterVar v) { os << v.var->name; },
 				[&](TypeDeductionVar v) { os << "$TypeDeductionVar(" << v.id << ")"; },
+				[&](KnownIntTypeVar v) { os << "$KnownIntTypeVar(" << v.id << ")"; },
 			};
 		},
 		[&](PointerType const &t)
@@ -2333,14 +2545,12 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 			});
 			os << ") -> " << t.def->ret;
 		},
-		[&](KnownIntType const &t)
+		[&](UnionType const &t)
 		{
-			os << "$KnownIntType(";
-			if(t.value.is_negative())
-				os << t.value.as_signed();
-			else
-				os << t.value.as_unsigned();
-			os << ")";
+			os << RangeFmt(t.def->alternatives, " | ", [&](Type const &t)
+			{
+				os << t;
+			});
 		},
 		[&](UnresolvedPath const &p)
 		{
@@ -2357,7 +2567,7 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 		},
 		[&](UnappliedProcType const &t)
 		{
-			os << "proc(" << RangeFmt(t.type->params, ", ", [&](Parameter const  &p)
+			os << "proc(" << RangeFmt(t.type->params, ", ", [&](Parameter const &p)
 			{
 				os << p.type;
 			});
@@ -2365,6 +2575,13 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 			os << ") -> " << t.type->ret;
 			if(t.type_args.size())
 				os << "'(" << RangeFmt(t.type_args.args, ", ") << ")";
+		},
+		[&](UnappliedUnionType const &t)
+		{
+			os << RangeFmt(t.type->alternatives, " | ", [&](Type const &t)
+			{
+				os << t;
+			});
 		},
 	};
 
@@ -2523,6 +2740,10 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 			os << " @ ";
 			print(os, *e.addr, listener);
 		},
+		[&](UnionInitExpr const &e)
+		{
+			print(os, *e.value, listener);
+		},
 		[&](UnresolvedPath const &p)
 		{
 			os << p;
@@ -2551,26 +2772,6 @@ std::ostream& operator << (std::ostream &os, Expr const &expr)
 }
 
 
-std::ostream& print(std::ostream &os, PatternOp const &op)
-{
-	op | match
-	{
-		[&](NoPatternOp) {},
-		[&](DerefPatternOp)
-		{
-			os << " ^";
-		},
-		[&](AddressOfPatternOp const &o)
-		{
-			os << " &";
-			if(o.mutability == IsMutable::YES)
-				os << "mut";
-		},
-	};
-
-	return os << " ";
-}
-
 std::ostream& print(std::ostream &os, Pattern const &pattern)
 {
 	pattern | match
@@ -2581,11 +2782,21 @@ std::ostream& print(std::ostream &os, Pattern const &pattern)
 				os << "mut ";
 			os << p.var->name;
 
-			print(os, pattern.op);
-
 			if(p.var->type)
 				os << ": " << *p.var->type;
-		}
+		},
+		[&](DerefPattern const &p)
+		{
+			print(os, *p.sub);
+			os << " ^";
+		},
+		[&](AddressOfPattern const &p)
+		{
+			print(os, *p.sub);
+			os << " &";
+			if(p.mutability == IsMutable::YES)
+				os << "mut";
+		},
 	};
 
 	return os;
@@ -2904,7 +3115,9 @@ UnresolvedPath parse_path(string &&first_name, Parser &parser, Module &mod)
 	return path;
 }
 
-Type parse_type(Parser &parser, Module &mod)
+Type parse_type(Parser &parser, Module &mod);
+
+Type parse_prefix_type(Parser &parser, Module &mod)
 {
 	require_not_done(parser, "type");
 	Token const &tok = parser.next();
@@ -2974,6 +3187,24 @@ Type parse_type(Parser &parser, Module &mod)
 
 		default: throw ParseError("Invalid token while parsing type: "s + str(tok.kind));
 	}
+}
+
+Type parse_union_type(Parser &parser, Module &mod)
+{
+	vector<Type> alternatives;
+	alternatives.push_back(parse_prefix_type(parser, mod));
+	while(try_consume(parser, Lexeme::BAR))
+		alternatives.push_back(parse_prefix_type(parser, mod));
+
+	if(alternatives.size() == 1)
+		return std::move(alternatives.back());
+
+	return UnionType(mod.add_union_type(UnionTypeDef(std::move(alternatives))));
+}
+
+Type parse_type(Parser &parser, Module &mod)
+{
+	return parse_union_type(parser, mod);
 }
 
 
@@ -3255,24 +3486,7 @@ Expr parse_infix_expr(Parser &parser, Module &mod, Expr &&left)
 //--------------------------------------------------------------------
 // Patterns
 //--------------------------------------------------------------------
-PatternOp parse_pattern_op(Parser &parser)
-{
-	if(try_consume(parser, Lexeme::CIRCUMFLEX))
-		return DerefPatternOp();
-
-	if(try_consume(parser, Lexeme::AMPERSAND))
-	{
-		IsMutable mutability = IsMutable::NO;
-		if(try_consume(parser, Lexeme::MUT))
-			mutability = IsMutable::YES;
-
-		return AddressOfPatternOp(mutability);
-	}
-
-	return NoPatternOp();
-}
-
-Pattern parse_pattern(Parser &parser, Module &mod)
+Pattern parse_primary_pattern(Parser &parser, Module &mod)
 {
 	require_not_done(parser, "pattern");
 	switch(parser.tok().kind)
@@ -3286,17 +3500,35 @@ Pattern parse_pattern(Parser &parser, Module &mod)
 
 			string_view ident = consume(parser, Lexeme::IDENTIFIER).text;
 			VarDef *var = mod.scope()->declare_var(string(ident), mutability, VarKind::LOCAL);
-			PatternOp pattern_op = parse_pattern_op(parser);
 
 			if(try_consume(parser, Lexeme::COLON))
 				var->type = parse_type(parser, mod);
 
-			return Pattern(VarPattern(var), pattern_op);
+			return Pattern(VarPattern(var));
 		}
 
 		default:
 			throw ParseError("Invalid lexeme while parsing pattern");
 	}
+}
+
+Pattern parse_pattern(Parser &parser, Module &mod)
+{
+	Pattern p = parse_primary_pattern(parser, mod);
+
+	if(try_consume(parser, Lexeme::CIRCUMFLEX))
+		p = Pattern(DerefPattern(std::make_unique<Pattern>(std::move(p))));
+
+	if(try_consume(parser, Lexeme::AMPERSAND))
+	{
+		IsMutable mutability = IsMutable::NO;
+		if(try_consume(parser, Lexeme::MUT))
+			mutability = IsMutable::YES;
+
+		p = Pattern(AddressOfPattern(std::make_unique<Pattern>(std::move(p)), mutability));
+	}
+
+	return p;
 }
 
 
@@ -3644,7 +3876,7 @@ namespace std
 struct SemaContext
 {
 	explicit SemaContext(Module &mod) :
-		mod(mod) {}
+		m_mod(mod) {}
 
 	TypeDeductionVar new_type_deduction_var()
 	{
@@ -3659,13 +3891,84 @@ struct SemaContext
 		return var;
 	}
 
+	KnownIntTypeVar new_int_type_var(XInt64 value)
+	{
+		KnownIntTypeVar var(next_known_int_var_id++);
+		known_ints.emplace(var, pair{value, value});
 
+		return var;
+	}
+
+	KnownIntTypeVar new_int_type_var(XInt64 low, XInt64 high)
+	{
+		KnownIntTypeVar var(next_known_int_var_id++);
+		known_ints.emplace(var, pair{low, high});
+
+		return var;
+	}
+
+	pair<XInt64, XInt64> const* try_get_known_int(Type const &type) const
+	{
+		if(VarType const *t = std::get_if<VarType>(&type))
+		{
+			if(KnownIntTypeVar const *var = std::get_if<KnownIntTypeVar>(t))
+				return &known_ints.at(*var);
+		}
+
+		return nullptr;
+	}
+
+	TypeConstraint* try_get_constraints(TypeDeductionVar var)
+	{
+		auto it = constraints.find(var);
+		if(it == constraints.end())
+			return nullptr;
+
+		return &it->second;
+	}
+
+	Module& mod() { return m_mod; }
+
+
+private:
 	// The lower bound of constraints that the type must satisfy
 	unordered_map<TypeDeductionVar, TypeConstraint> constraints;
 
-	Module &mod;
+	// TODO(performance): Consider replacing with a std::vector that is cleared after typechecking a
+	//                    single full expression
+	unordered_map<KnownIntTypeVar, pair<XInt64, XInt64>> known_ints;
+
+	Module &m_mod;
 	uint32_t next_type_deduction_var_id = 0;
+	uint32_t next_known_int_var_id = 0;
 };
+
+Type instantiate_known_int(pair<XInt64, XInt64> range)
+{
+	if(integer_assignable_to(BuiltinType::I32, range.first) and integer_assignable_to(BuiltinType::I32, range.second))
+		return BuiltinType::I32;
+	else
+		return *smallest_int_type_for(range.first, range.second);
+}
+
+void TypeEnv::instantiate_int_vars(SemaContext const &ctx)
+{
+	for(auto &[var, known_int_vars]: m_deferred_type_instantiations)
+	{
+		Type &final_type = lookup(var);
+
+		if(pair<XInt64, XInt64> const *value = ctx.try_get_known_int(final_type))
+			final_type = instantiate_known_int(*value);
+		
+		for(KnownIntTypeVar int_var: known_int_vars)
+		{
+			auto res = m_mapping.emplace(int_var, clone(final_type));
+			assert(res.second);
+		}
+	}
+
+	m_deferred_type_instantiations.clear();
+}
 
 
 void resolve_identifiers(SemaContext &ctx);
@@ -3776,6 +4079,11 @@ bool is_signed(BuiltinType type)
 	UNREACHABLE;
 }
 
+bool is_unsigned(BuiltinType type)
+{
+	return not is_signed(type);
+}
+
 MemoryLayout get_layout(BuiltinType type)
 {
 	switch(type)
@@ -3795,37 +4103,118 @@ MemoryLayout get_layout(BuiltinType type)
 	UNREACHABLE;
 }
 
-optional<Type> common_int_type(Type const &a, Type const &b)
+optional<BuiltinType> merge_int_types(BuiltinType a, BuiltinType b)
 {
-	assert(is_integer_type(a));
-	assert(is_integer_type(b));
+	bool signed_type = is_signed(a) || is_signed(b);
+	size_t size = std::max(get_layout(a).size, get_layout(b).size);
+	if(is_signed(a) != is_signed(b))
+		size *= 2;
 
-	BuiltinType const *a_bt = std::get_if<BuiltinType>(&a);
-	BuiltinType const *b_bt = std::get_if<BuiltinType>(&b);
-	KnownIntType const *a_known = std::get_if<KnownIntType>(&a);
-	KnownIntType const *b_known = std::get_if<KnownIntType>(&b);
+	switch(size)
+	{
+		case 1:
+			return signed_type ? BuiltinType::I8 : BuiltinType::U8;
 
-	if(a_bt && b_bt)
-	{
-		if(*a_bt == *b_bt)
-			return *a_bt;
-	}
-	else if(a_bt && b_known)
-	{
-		if(integer_assignable_to(*a_bt, b_known->value))
-			return *a_bt;
-	}
-	else if(a_known && b_bt)
-	{
-		if(integer_assignable_to(*b_bt, a_known->value))
-			return *b_bt;
-	}
-	else {
-		assert(!"common_int_type: KnownIntType && KnownIntType");
-	}
+		case 2:
+		case 4:
+			return signed_type ? BuiltinType::I32 : BuiltinType::U32;
 
-	return nullopt;
+		case 8:
+			return signed_type ? BuiltinType::ISIZE : BuiltinType::USIZE;
+
+		default: return nullopt;
+	}
 }
+
+struct AbstractInt
+{
+	BuiltinType smallest_type;
+	bool is_negative;
+};
+
+AbstractInt get_abstract_int(XInt64 val)
+{
+	if(val.is_negative())
+	{
+		if(std::numeric_limits<int8_t>::min() <= val.as_signed())
+			return AbstractInt{BuiltinType::I8, true};
+
+		if(std::numeric_limits<int32_t>::min() <= val.as_signed())
+			return AbstractInt{BuiltinType::I32, true};
+
+		return AbstractInt{BuiltinType::ISIZE, true};
+	}
+	else
+	{
+		if(val.as_unsigned() <= std::numeric_limits<int8_t>::max())
+			return AbstractInt{BuiltinType::I8, false};
+
+		if(val.as_unsigned() <= std::numeric_limits<uint8_t>::max())
+			return AbstractInt{BuiltinType::U8, false};
+
+		if(val.as_unsigned() <= std::numeric_limits<int32_t>::max())
+			return AbstractInt{BuiltinType::I32, false};
+
+		if(val.as_unsigned() <= std::numeric_limits<uint32_t>::max())
+			return AbstractInt{BuiltinType::U32, false};
+
+		if(val.as_unsigned() <= std::numeric_limits<int64_t>::max())
+			return AbstractInt{BuiltinType::ISIZE, false};
+
+		return AbstractInt{BuiltinType::USIZE, false};
+	}
+}
+
+BuiltinType get_int_type_for(size_t size, bool is_signed)
+{
+	switch(size)
+	{
+		case 1:
+			return is_signed ? BuiltinType::I8 : BuiltinType::U8;
+
+		case 2:
+		case 4:
+			return is_signed ? BuiltinType::I32 : BuiltinType::U32;
+
+		case 8:
+			return is_signed ? BuiltinType::ISIZE : BuiltinType::USIZE;
+
+		default: UNREACHABLE;
+	}
+}
+
+
+// smallest_int_type_for(3, 220) == u8
+//
+optional<BuiltinType> smallest_int_type_for(XInt64 low, XInt64 high)
+{
+	AbstractInt low_abs = get_abstract_int(low);
+	AbstractInt high_abs = get_abstract_int(high);
+
+	if(low_abs.smallest_type == high_abs.smallest_type)
+		return low_abs.smallest_type;
+
+	if(low_abs.is_negative == high_abs.is_negative)
+	{
+		size_t required_size = std::max(
+			get_layout(low_abs.smallest_type).size,
+			get_layout(high_abs.smallest_type).size
+		);
+
+		bool use_signed_type = is_signed(low_abs.smallest_type) and is_signed(high_abs.smallest_type);
+		return get_int_type_for(required_size, use_signed_type);
+	}
+	else
+	{
+		size_t required_size = std::max(
+			get_layout(low_abs.smallest_type).size,
+			get_layout(high_abs.smallest_type).size
+		) * 2;
+
+		return get_int_type_for(required_size, true);
+	}
+}
+
 
 size_t size_of(BuiltinType type)
 {
@@ -3857,6 +4246,47 @@ bool builtin_losslessly_convertible(BuiltinType dest, BuiltinType src)
 		// unsigned <- unsigned
 		return size_of(dest) >= size_of(src);
 	}
+}
+
+optional<Type> common_int_type(Type const &a, Type const &b, SemaContext &ctx)
+{
+	assert(is_integer_type(a));
+	assert(is_integer_type(b));
+
+	BuiltinType const *a_bt = std::get_if<BuiltinType>(&a);
+	BuiltinType const *b_bt = std::get_if<BuiltinType>(&b);
+	pair<XInt64, XInt64> const *a_known = ctx.try_get_known_int(a);
+	pair<XInt64, XInt64> const *b_known = ctx.try_get_known_int(b);
+
+	if(a_bt && b_bt)
+	{
+		if(*a_bt == *b_bt)
+			return *a_bt;
+
+		if(builtin_losslessly_convertible(*a_bt, *b_bt))
+			return *a_bt;
+
+		if(builtin_losslessly_convertible(*b_bt, *a_bt))
+			return *b_bt;
+	}
+	else if(a_bt && b_known)
+	{
+		if(integer_assignable_to(*a_bt, b_known->first) and integer_assignable_to(*a_bt, b_known->second))
+			return *a_bt;
+	}
+	else if(a_known && b_bt)
+	{
+		if(integer_assignable_to(*b_bt, a_known->first) and integer_assignable_to(*b_bt, a_known->second))
+			return *b_bt;
+	}
+	else
+	{
+		XInt64 low = a_known->first < b_known->first ? a_known->first : b_known->first;
+		XInt64 high = a_known->second > b_known->second ? a_known->second : b_known->second;
+		return Type(VarType(ctx.new_int_type_var(low, high)));
+	}
+
+	return nullopt;
 }
 
 
@@ -3907,21 +4337,124 @@ bool equiv(Type const &a, Type const &b)
 
 			return false;
 		},
-		[&](KnownIntType const&) -> bool { assert(!"equiv: KnownIntType"); },
+		[&](UnionType const &ta)
+		{
+			if(UnionType const *tb = std::get_if<UnionType>(&b))
+				return ta.canonical_def == tb->canonical_def;
+
+			return false;
+		},
 		[&](UnresolvedPath const&) -> bool { assert(!"equiv: UnresolvedPath"); },
 		[&](UnappliedStructType const&) -> bool { assert(!"equiv: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> bool { assert(!"equiv: UnappliedProcType"); },
+		[&](UnappliedUnionType const&) -> bool { assert(!"equiv: UnappliedUnionType"); },
+	};
+}
+
+bool operator < (Type const &a, Type const &b)
+{
+	if(a.index() != b.index())
+		return a.index() < b.index();
+
+	return a | match
+	{
+		[&](BuiltinType const &ta)
+		{
+			return (int)ta < (int)std::get<BuiltinType>(b);
+		},
+		[&](VarType const &ta)
+		{
+			VarType const &tb = std::get<VarType>(b);
+			if(ta.index() != tb.index())
+				return ta.index() < tb.index();
+
+			return ta | match
+			{
+				[&](TypeParameterVar v)
+				{
+					// TODO Comparison based on pointers is non-deterministic. I need a way to
+					//      generate unique names for type parameters
+					return v.var < std::get<TypeParameterVar>(tb).var;
+				},
+				[&](TypeDeductionVar) -> bool { assert(!"operator < (Type, Type): VarType: TypeDeductionVar"); },
+				[&](KnownIntTypeVar) -> bool { assert(!"operator < (Type, Type): VarType: KnownIntTypeVar"); },
+			};
+		},
+		[&](PointerType const &ta)
+		{
+			PointerType const &tb = std::get<PointerType>(b);
+			if(ta.mutability != tb.mutability)
+				return (int)ta.mutability < (int)tb.mutability;
+
+			return *ta.target_type < *tb.target_type;
+		},
+		[&](ManyPointerType const &ta)
+		{
+			ManyPointerType const &tb = std::get<ManyPointerType>(b);
+			if(ta.mutability != tb.mutability)
+				return (int)ta.mutability < (int)tb.mutability;
+
+			return *ta.element_type < *tb.element_type;
+		},
+		[&](StructType const &ta)
+		{
+			StructType const &tb = std::get<StructType>(b);
+
+			// TODO Comparison based on pointers is non-deterministic. I need a way to
+			//      generate unique names for type parameters
+			return ta.inst < tb.inst;
+		},
+		[&](ProcType const &ta)
+		{
+			ProcType const &tb = std::get<ProcType>(b);
+
+			// TODO Comparison based on pointers is non-deterministic. I need a way to
+			//      generate unique names for type parameters
+			return ta.canonical_def < tb.canonical_def;
+		},
+		[&](UnionType const &ta)
+		{
+			UnionType const &tb = std::get<UnionType>(b);
+
+			// TODO Comparison based on pointers is non-deterministic. I need a way to
+			//      generate unique names for type parameters
+			return ta.canonical_def < tb.canonical_def;
+		},
+		[&](UnresolvedPath const&) -> bool { assert(!"operator < (Type, Type): UnresolvedPath"); },
+		[&](UnappliedStructType const&) -> bool { assert(!"operator < (Type, Type): UnappliedStructType"); },
+		[&](UnappliedProcType const&) -> bool { assert(!"operator < (Type, Type): UnappliedProcType"); },
+		[&](UnappliedUnionType const&) -> bool { assert(!"operator < (Type, Type): UnappliedUnionType"); },
 	};
 }
 
 
-void unify(Type const &dest, Type const &src, TypeEnv &subst, SemaContext &ctx);
+enum class UnificationMode
+{
+	VALUE_ASSIGNMENT,
 
-bool is_type_assignable(Type const &dest, Type const &src, SemaContext &ctx)
+	POINTER_ASSIGNMENT,
+
+	// Find a common type while treating both sides equally. The common type might differ from both
+	// the left and the right side (e.g., unifying i8 and u8 yields i16)
+	COMMON_TYPE,
+
+	EQUAL,
+};
+
+void unify(
+	Type const &dest,
+	Type const &src,
+	TypeEnv &subst,
+	SemaContext &ctx,
+	UnificationMode mode,
+	Expr *src_expr = nullptr
+);
+
+bool is_type_assignable(Type const &dest, Type const &src, SemaContext &ctx, Expr *src_expr = nullptr)
 {
 	TypeEnv subst;
 	try {
-		unify(dest, src, subst, ctx);
+		unify(dest, src, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, src_expr);
 		assert(subst.empty());
 		return true;
 	} catch (ParseError const&) {
@@ -3930,7 +4463,7 @@ bool is_type_assignable(Type const &dest, Type const &src, SemaContext &ctx)
 }
 
 
-bool is_expr_assignable(Type const &dest, Expr const &src, SemaContext &ctx)
+bool is_expr_assignable(Type const &dest, Expr &src, SemaContext &ctx)
 {
 	if(IntLiteralExpr const *src_val = std::get_if<IntLiteralExpr>(&src))
 	{
@@ -3939,7 +4472,7 @@ bool is_expr_assignable(Type const &dest, Expr const &src, SemaContext &ctx)
 	}
 
 	assert(src.type);
-	return is_type_assignable(dest, *src.type, ctx);
+	return is_type_assignable(dest, *src.type, ctx, &src);
 }
 
 
@@ -3971,10 +4504,14 @@ MemoryLayout compute_layout(Type const &type, unordered_set<StructDefInstance*> 
 			return compute_own_layout(inst, seen);
 		},
 		[&](ProcType const&) -> MemoryLayout { assert(!"compute_layout: ProcType"); },
-		[&](KnownIntType const&) -> MemoryLayout { assert(!"compute_layout: KnownIntType"); },
+		[&](UnionType const&) -> MemoryLayout
+		{
+			assert(!"compute_layout: UnionType: TODO");
+		},
 		[&](UnresolvedPath const&) -> MemoryLayout { assert(!"compute_layout: UnresolvedPath"); },
 		[&](UnappliedStructType const&) -> MemoryLayout { assert(!"compute_layout: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> MemoryLayout { assert(!"compute_layout: UnappliedProcType"); },
+		[&](UnappliedUnionType const&) -> MemoryLayout { assert(!"compute_layout: UnappliedUnionType"); },
 	};
 }
 
@@ -4054,7 +4591,7 @@ MemoryLayout compute_own_layout(StructDefInstance *struct_, unordered_set<Struct
 }
 
 
-MemoryLayout compute_layout(Type &type)
+MemoryLayout compute_layout(Type const &type)
 {
 	unordered_set<StructDefInstance*> seen;
 	return compute_layout(type, seen);
@@ -4111,14 +4648,18 @@ void type_substitute(Type &type, TypeEnv const &type_env)
 		[&](StructType&)
 		{
 			// The way type_substitute() is used should ensure that `type_env` does not affect the
-			// type arguments of StructType
+			// type arguments of a fully instantiated StructType
 		},
 		[&](ProcType&)
 		{
 			// The way type_substitute() is used should ensure that `type_env` does not affect the
-			// type arguments of ProcType
+			// type arguments of a fully instantiated ProcType
 		},
-		[&](KnownIntType&) {},
+		[&](UnionType&)
+		{
+			// The way type_substitute() is used should ensure that `type_env` does not affect the
+			// type arguments of a fully instantiated UnionType
+		},
 		[&](UnappliedStructType &t)
 		{
 			UnappliedStructType *cur = &t;
@@ -4136,17 +4677,14 @@ void type_substitute(Type &type, TypeEnv const &type_env)
 				type_substitute(arg, type_env);
 
 		},
+		[&](UnappliedUnionType &t)
+		{
+			for(Type &arg: t.type_args)
+				type_substitute(arg, type_env);
+
+		},
 		[&](UnresolvedPath&) { assert(!"type_substitute: Type: UnresolvedPath"); },
 	};
-}
-
-void add_subst(TypeEnv &env, VarType var, Type const &type)
-{
-	auto it = env.find(var);
-	if(it != env.end() && not equiv(type, it->second))
-		throw ParseError("Unification failed: Inconsistent substitution");
-
-	env.emplace(pair{var, clone(type)});
 }
 
 Type resolve_path_to_type(UnresolvedPath &&path, SemaContext &ctx);
@@ -4216,12 +4754,12 @@ variant<Type, Expr> resolve_path(UnresolvedPath &&path, SemaContext &ctx)
 			size_t arg_idx = 0;
 			while(arg_idx < path.type_args.size())
 			{
-				add_subst(env, TypeParameterVar(alias.type_params[arg_idx]), path.type_args.args[arg_idx]);
+				env.add_unique(TypeParameterVar(alias.type_params[arg_idx]), clone(path.type_args.args[arg_idx]));
 				arg_idx += 1;
 			}
 			while(arg_idx < alias.type_params.size())
 			{
-				add_subst(env, TypeParameterVar(alias.type_params[arg_idx]), ctx.new_type_deduction_var());
+				env.add_unique(TypeParameterVar(alias.type_params[arg_idx]), ctx.new_type_deduction_var());
 				arg_idx += 1;
 			}
 
@@ -4262,6 +4800,8 @@ Expr resolve_path_to_expr(UnresolvedPath &&path, SemaContext &ctx)
 	};
 }
 
+void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx);
+
 void resolve_types(Type &type, SemaContext &ctx)
 {
 	type | match
@@ -4279,19 +4819,36 @@ void resolve_types(Type &type, SemaContext &ctx)
 		[&](StructType&) {},
 		[&](ProcType &t)
 		{
-			resolve_types(t.def->ret, ctx);
-			for(Parameter &p: t.def->params)
-				resolve_types(p.type, ctx);
+			if(not t.canonical_def)
+			{
+				resolve_types(t.def->ret, ctx);
+				for(Parameter &p: t.def->params)
+					resolve_types(p.type, ctx);
 
-			t.canonical_def = ctx.mod.get_canonical(*t.def);
+				t.canonical_def = ctx.mod().get_canonical(*t.def);
+			}
 		},
-		[&](KnownIntType&) {},
+		[&](UnionType &t)
+		{
+			if(not t.canonical_def)
+			{
+				for(Type &alt: t.def->alternatives)
+				{
+					resolve_types(alt, ctx);
+					instantiate_type(alt, {}, ctx);
+				}
+
+				std::sort(t.def->alternatives.begin(), t.def->alternatives.end());
+				t.canonical_def = ctx.mod().get_canonical(*t.def);
+			}
+		},
 		[&](UnresolvedPath &p)
 		{
 			type = resolve_path_to_type(std::move(p), ctx);
 		},
 		[&](UnappliedStructType&) {},
 		[&](UnappliedProcType&) {},
+		[&](UnappliedUnionType&) {},
 	};
 }
 
@@ -4364,6 +4921,10 @@ void resolve_identifiers(Expr &expr, SemaContext &ctx)
 			resolve_identifiers(*e.init, ctx);
 			resolve_identifiers(*e.addr, ctx);
 		},
+		[&](UnionInitExpr &e)
+		{
+			resolve_identifiers(*e.value, ctx);
+		},
 	};
 }
 
@@ -4375,7 +4936,15 @@ void resolve_identifiers(Pattern &pattern, SemaContext &ctx)
 		{
 			if(p.var->type)
 				resolve_types(*p.var->type, ctx);
-		}
+		},
+		[&](DerefPattern const &p)
+		{
+			resolve_identifiers(*p.sub, ctx);
+		},
+		[&](AddressOfPattern const &p)
+		{
+			resolve_identifiers(*p.sub, ctx);
+		},
 	};
 }
 
@@ -4484,7 +5053,7 @@ void resolve_identifiers(TopLevelItem item, SemaContext &ctx)
 
 void resolve_identifiers(SemaContext &ctx)
 {
-	for(TopLevelItem item: ctx.mod.items())
+	for(TopLevelItem item: ctx.mod().items())
 		resolve_identifiers(item, ctx);
 }
 
@@ -4492,23 +5061,30 @@ void resolve_identifiers(SemaContext &ctx)
 //--------------------------------------------------------------------
 // Type instantiation
 //--------------------------------------------------------------------
-struct TypingHint : variant<std::monostate, Type const*, TypeEnv const*>
+struct TypingHint
 {
-	using variant::variant;
+	TypingHint() = default;
 
-	Type const* try_get_type() const
+	explicit TypingHint(TypeEnv *subst) :
+		subst(subst) {}
+
+	explicit TypingHint(Type const *type, TypeEnv *subst) :
+		type(type),
+		subst(subst) {}
+
+	Type const *type = nullptr;
+	TypeEnv *subst;
+
+	TypingHint with_type(Type const *new_type)
 	{
-		if(Type const *const*t = std::get_if<Type const*>(this))
-			return *t;
-
-		return nullptr;
+		return TypingHint(new_type, subst);
 	}
 
 	optional<BuiltinType> try_int_get_type() const
 	{
-		if(Type const *t = try_get_type())
+		if(type)
 		{
-			if(BuiltinType const *bt = std::get_if<BuiltinType>(t))
+			if(BuiltinType const *bt = std::get_if<BuiltinType>(type))
 			{
 				if(is_builtin_int_type(*bt))
 					return *bt;
@@ -4517,25 +5093,12 @@ struct TypingHint : variant<std::monostate, Type const*, TypeEnv const*>
 
 		return nullopt;
 	}
-
-	TypeEnv const* try_get_subst() const
-	{
-		if(TypeEnv const *const*t = std::get_if<TypeEnv const*>(this))
-			return *t;
-
-		return nullptr;
-	}
 };
 
-enum class InstantiateType
-{
-	YES,
-	NO,
-};
 
-bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint = {}, InstantiateType should_instantiate = InstantiateType::YES);
+void typecheck(Expr &expr, SemaContext &ctx, Type const *type_hint = nullptr);
 
-void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx, Type const *context_type = nullptr);
+void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx);
 void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx);
 
 void fill_type_env(TypeEnv &type_env, vector<TypeVarDef*> const &type_params, TypeArgList &&type_args)
@@ -4544,7 +5107,7 @@ void fill_type_env(TypeEnv &type_env, vector<TypeVarDef*> const &type_params, Ty
 	for(size_t i = 0; i < type_args.size(); ++i)
 	{
 		TypeVarDef *tparam = type_params[i];
-		type_env[TypeParameterVar(tparam)] = std::move(type_args.args[i]);
+		type_env.add_unique(TypeParameterVar(tparam), std::move(type_args.args[i]));
 	}
 }
 
@@ -4554,10 +5117,6 @@ bool is_concrete(Type &type)
 	{
 		[&](BuiltinType const&) { return true; },
 		[&](VarType const&) { return false; },
-		[&](UnresolvedPath const&) -> bool { assert(!"is_concrete: UnresolvedPath"); },
-		[&](UnappliedStructType const&) -> bool { assert(!"is_concrete: UnappliedStructType"); },
-		[&](UnappliedProcType const&) -> bool { assert(!"is_concrete: UnappliedProcType"); },
-		[&](KnownIntType const&) -> bool { assert(!"is_concrete: KnownIntType"); },
 		[&](PointerType const &t)
 		{
 			return is_concrete(*t.target_type);
@@ -4586,6 +5145,20 @@ bool is_concrete(Type &type)
 
 			return is_concrete(t.def->ret);
 		},
+		[&](UnionType &t)
+		{
+			for(Type &alt: t.def->alternatives)
+			{
+				if(not is_concrete(alt))
+					return false;
+			}
+
+			return true;
+		},
+		[&](UnresolvedPath const&) -> bool { assert(!"is_concrete: UnresolvedPath"); },
+		[&](UnappliedStructType const&) -> bool { assert(!"is_concrete: UnappliedStructType"); },
+		[&](UnappliedProcType const&) -> bool { assert(!"is_concrete: UnappliedProcType"); },
+		[&](UnappliedUnionType const&) -> bool { assert(!"is_concrete: UnappliedUnionType"); },
 	};
 }
 
@@ -4594,34 +5167,7 @@ bool is_fully_instantiated(Type const &type)
 	return type | match
 	{
 		[&](BuiltinType const&) { return true; },
-		[&](VarType const &t) { return not is<TypeDeductionVar>(t); },
-		[&](UnresolvedPath const&) -> bool { assert(!"is_fully_instantiated: UnresolvedPath"); },
-		[&](UnappliedStructType const &t)
-		{
-			UnappliedStructType const *cur = &t;
-			while(cur)
-			{
-				for(Type const &arg: cur->type_args)
-				{
-					if(not is_fully_instantiated(arg))
-						return false;
-				}
-
-				cur = cur->parent.get();
-			}
-
-			return true;
-		},
-		[&](UnappliedProcType const &t)
-		{
-			for(Type const &arg: t.type_args)
-			{
-				if(not is_fully_instantiated(arg))
-					return false;
-			}
-
-			return true;
-		},
+		[&](VarType const &t) { return not is<TypeDeductionVar>(t) && not is<KnownIntTypeVar>(t); },
 		[&](PointerType const &t)
 		{
 			return is_fully_instantiated(*t.target_type);
@@ -4650,7 +5196,53 @@ bool is_fully_instantiated(Type const &type)
 
 			return is_fully_instantiated(t.def->ret);
 		},
-		[&](KnownIntType const&) { return false; },
+		[&](UnionType const &t)
+		{
+			for(Type &alt: t.def->alternatives)
+			{
+				if(not is_fully_instantiated(alt))
+					return false;
+			}
+
+			return true;
+		},
+		[&](UnresolvedPath const&) -> bool { assert(!"is_fully_instantiated: UnresolvedPath"); },
+		[&](UnappliedStructType const &t)
+		{
+			UnappliedStructType const *cur = &t;
+			while(cur)
+			{
+				for(Type const &arg: cur->type_args)
+				{
+					if(not is_fully_instantiated(arg))
+						return false;
+				}
+
+				cur = cur->parent.get();
+			}
+
+			return true;
+		},
+		[&](UnappliedProcType const &t)
+		{
+			for(Type const &arg: t.type_args)
+			{
+				if(not is_fully_instantiated(arg))
+					return false;
+			}
+
+			return true;
+		},
+		[&](UnappliedUnionType const &t)
+		{
+			for(Type const &arg: t.type_args)
+			{
+				if(not is_fully_instantiated(arg))
+					return false;
+			}
+
+			return true;
+		},
 	};
 }
 
@@ -4725,7 +5317,7 @@ StructDefInstance* instantiate_struct(
 		};
 	}
 
-	ctx.mod.notify_new_struct_inst(inst);
+	ctx.mod().notify_new_struct_inst(inst);
 
 	return inst;
 }
@@ -4748,7 +5340,7 @@ ProcDefInstance* instantiate_proc(
 	for(Type &type: type_args)
 	{
 		if(not is_fully_instantiated(type)) {
-			assert(!"instantiate_struct with type deduction vars");
+			assert(!"instantiate_proc with type deduction vars");
 		}
 
 		if(not is_concrete(type))
@@ -4774,7 +5366,7 @@ ProcDefInstance* instantiate_proc(
 
 	instantiate_type(inst->type.ret, inst->type_env, ctx);
 
-	ctx.mod.notify_new_proc_inst(inst);
+	ctx.mod().notify_new_proc_inst(inst);
 
 	return inst;
 }
@@ -4812,26 +5404,85 @@ StructDefInstance* instantiate_unapplied_struct(
 	return instantiate_struct(unapplied.struct_, std::move(unapplied.type_args), outer_inst, ctx);
 }
 
+ProcType instantiate_proc_type(ProcTypeDef const &proc_def, TypeEnv const &type_env, SemaContext &ctx)
+{
+	ProcTypeDef new_type;
+	for(TypeVarDef *p: proc_def.type_params)
+	{
+		if(not type_env.contains(TypeParameterVar(p)))
+			new_type.type_params.push_back(p);
+	}
+
+	for(Parameter const &p: proc_def.params)
+	{
+		Parameter new_param = clone(p);
+		instantiate_type(new_param.type, type_env, ctx);
+		new_type.params.push_back(std::move(new_param));
+	}
+
+	new_type.ret = clone(proc_def.ret);
+	instantiate_type(new_type.ret, type_env, ctx);
+
+	ProcTypeDef *def = ctx.mod().add_proc_type(std::move(new_type));
+	return ProcType{
+		.def = def,
+		.canonical_def = ctx.mod().get_canonical(*def),
+	};
+}
+
+UnionType instantiate_union_type(UnionTypeDef const &union_, TypeEnv const &type_env, SemaContext &ctx)
+{
+	UnionTypeDef new_type;
+	for(Type const &alt: union_.alternatives)
+	{
+		Type new_alt = clone(alt);
+		instantiate_type(new_alt, type_env, ctx);
+		new_type.alternatives.push_back(std::move(new_alt));
+	}
+	std::sort(new_type.alternatives.begin(), new_type.alternatives.end());
+
+	UnionType ut;
+	ut.def = ctx.mod().add_union_type(std::move(new_type));
+	ut.canonical_def = ctx.mod().get_canonical(*ut.def);
+
+	return ut;
+}
+
 
 optional<TypeDeductionVar> try_get_type_deduction_var(Type const &type);
 
-void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx, Type const *context_type)
+void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx)
 {
 	type | match
 	{
 		[&](BuiltinType&) {},
-		[&](VarType &t)
+		[&](VarType&)
 		{
-			auto it = type_env.find(t);
-			if(it != type_env.end())
-				type = clone(it->second);
-			else if(is<TypeDeductionVar>(t))
+			do
 			{
-				// If the type var is not in the environment it means it is either a TypeParameterVar
-				// and we are in an abstract context, or it is a free TypeDeductionVar. In the latter
-				// case we don't have enough information to deduce a type, which is an error.
-				throw ParseError("Insufficiently constrained type");
+				auto it = type_env.find(std::get<VarType>(type));
+				if(it == type_env.end())
+					break;
+
+				type = clone(it->second);
 			}
+			while(is<VarType>(type));
+
+			if(pair<XInt64, XInt64> const *value = ctx.try_get_known_int(type))
+				type = instantiate_known_int(*value);
+			else if(VarType const *t = std::get_if<VarType>(&type))
+			{
+				if(is<TypeDeductionVar>(*t) || is<KnownIntTypeVar>(*t))
+				{
+					// If the type var is not in the environment it means it is either a TypeParameterVar
+					// and we are in an abstract context, or it is a free TypeDeductionVar. In the
+					// latter case we don't have enough information to deduce a type, which is an error.
+					throw ParseError("Insufficiently constrained type");
+				}
+			}
+			else
+				// TODO Instantiate all types in TypeEnv just once
+				instantiate_type(type, type_env, ctx);
 		},
 		[&](PointerType &t)
 		{
@@ -4845,67 +5496,27 @@ void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx, Typ
 		{
 			t.inst = reinstantiate_struct_instance(t.inst, type_env, ctx);
 		},
-		[&](KnownIntType &t)
-		{
-			BuiltinType const *bt = context_type ? std::get_if<BuiltinType>(context_type) : nullptr;
-			if(bt && is_builtin_int_type(*bt) && integer_assignable_to(*bt, t.value))
-				type = *bt;
-			else if(integer_assignable_to(BuiltinType::I32, t.value))
-				type = BuiltinType::I32;
-			else
-				type = smallest_int_type_for(t.value);
-		},
 		[&](ProcType &t)
 		{
-			ProcTypeDef new_type;
-			for(TypeVarDef *p: t.def->type_params)
-			{
-				if(not type_env.contains(TypeParameterVar(p)))
-					new_type.type_params.push_back(p);
-			}
-
-			for(Parameter const &p: t.def->params)
-			{
-				Parameter new_param = clone(p);
-				instantiate_type(new_param.type, type_env, ctx);
-				new_type.params.push_back(std::move(new_param));
-			}
-
-			new_type.ret = clone(t.def->ret);
-			instantiate_type(new_type.ret, type_env, ctx);
-
-			t.def = ctx.mod.add_proc_type(std::move(new_type));
-			t.canonical_def = ctx.mod.get_canonical(*t.def);
+			type = instantiate_proc_type(*t.def, type_env, ctx);
 		},
-		[&](UnresolvedPath&) { assert(!"instantiate_type: Type: UnresolvedPath"); },
+		[&](UnionType &t)
+		{
+			type = instantiate_union_type(*t.def, type_env, ctx);
+		},
 		[&](UnappliedStructType &t)
 		{
 			type = StructType(instantiate_unapplied_struct(std::move(t), type_env, ctx));
 		},
 		[&](UnappliedProcType &t)
 		{
-			ProcTypeDef new_type;
-			for(TypeVarDef *p: t.type->type_params)
-			{
-				if(not type_env.contains(TypeParameterVar(p)))
-					new_type.type_params.push_back(p);
-			}
-
-			for(Parameter const &p: t.type->params)
-			{
-				Parameter new_param = clone(p);
-				instantiate_type(new_param.type, type_env, ctx);
-				new_type.params.push_back(std::move(new_param));
-			}
-
-			new_type.ret = clone(t.type->ret);
-			instantiate_type(new_type.ret, type_env, ctx);
-
-			ProcType pt;
-			pt.def = ctx.mod.add_proc_type(std::move(new_type));
-			pt.canonical_def = ctx.mod.get_canonical(*pt.def);
-			type = pt;
+			type = instantiate_proc_type(*t.type, type_env, ctx);
 		},
+		[&](UnappliedUnionType &t)
+		{
+			type = instantiate_union_type(*t.type, type_env, ctx);
+		},
+		[&](UnresolvedPath&) { assert(!"instantiate_type: Type: UnresolvedPath"); },
 	};
 }
 
@@ -4920,21 +5531,41 @@ void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx)
 		[&](NullLiteralExpr&) {},
 		[&](StringLiteralExpr&) {},
 		[&](UnresolvedPath const&) { assert(!"instantiate_types: Expr: UnresolvedPath"); },
-		[&](UnappliedProcExpr&) { assert(!"instantiate_types: UnappliedProcExpr"); },
-		[&](UnappliedConstructorExpr&) { assert(!"instantiate_types: UnappliedConstructorExpr"); },
+		[&](UnappliedProcExpr &e)
+		{
+			for(Type &arg: e.type_args)
+				instantiate_type(arg, type_env, ctx);
+
+			ProcDefInstance *inst = instantiate_proc(e.proc, std::move(e.type_args), ctx);
+			expr = expr.clone_as(ProcExpr(inst));
+			expr.type = ProcType(&inst->type, ctx.mod().get_canonical(inst->type));
+		},
+		[&](UnappliedConstructorExpr &e)
+		{
+			instantiate_type(e.struct_, type_env, ctx);
+			if(StructType *st = std::get_if<StructType>(&e.struct_))
+				expr = expr.clone_as(ConstructorExpr(st->inst));
+			else
+				throw ParseError("Only structs can be used as constructors");
+		},
 		[&](VarExpr&) {},
 		[&](ConstructorExpr &e)
 		{
+			// TODO(performance): We only need to reinstantiate the struct if `type_env` contains
+			//                    TypeParameterVars. Importantly, typecheck() only passes TypeEnvs
+			//                    to instantiate_types() that only contain TypeDeductionVar.
 			e.inst = reinstantiate_struct_instance(e.inst, type_env, ctx);
 		},
 		[&](ProcExpr &e)
 		{
+			// TODO(performance): Same as for ConstructorExpr above
+
 			TypeArgList new_type_args = clone(e.inst->type_args);
 			for(Type &arg: new_type_args)
 				instantiate_type(arg, type_env, ctx);
 
 			e.inst = instantiate_proc(e.inst->def, std::move(new_type_args), ctx);
-			expr.type = ProcType(&e.inst->type, ctx.mod.get_canonical(e.inst->type));
+			expr.type = ProcType(&e.inst->type, ctx.mod().get_canonical(e.inst->type));
 		},
 		[&](UnaryExpr &e)
 		{
@@ -4987,6 +5618,10 @@ void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx)
 		{
 			instantiate_types(*e.init, type_env, ctx);
 			instantiate_types(*e.addr, type_env, ctx);
+		},
+		[&](UnionInitExpr &e)
+		{
+			instantiate_types(*e.value, type_env, ctx);
 		},
 	};
 }
@@ -5048,6 +5683,62 @@ void instantiate_types(Stmt &stmt, TypeEnv const &type_env, SemaContext &ctx)
 //--------------------------------------------------------------------
 // Unification
 //--------------------------------------------------------------------
+bool type_var_occurs_in(TypeDeductionVar var, Type const &type)
+{
+	return type | match
+	{
+		[&](BuiltinType const&) { return false; },
+		[&](VarType const &t)
+		{
+			if(TypeDeductionVar const *dv = std::get_if<TypeDeductionVar>(&t))
+				return *dv == var;
+
+			return false;
+		},
+		[&](PointerType const &t)
+		{
+			return type_var_occurs_in(var, *t.target_type);
+		},
+		[&](ManyPointerType const &t)
+		{
+			return type_var_occurs_in(var, *t.element_type);
+		},
+		[&](StructType const&) { return false; },
+		[&](ProcType const&) { return false; },
+		[&](UnionType const&) { return false; },
+		[&](UnappliedStructType const &t)
+		{
+			for(Type const &arg: t.type_args)
+			{
+				if(type_var_occurs_in(var, arg))
+					return true;
+			}
+
+			return false;
+		},
+		[&](UnappliedProcType const &t)
+		{
+			for(Type const &arg: t.type_args)
+			{
+				if(type_var_occurs_in(var, arg))
+					return true;
+			}
+
+			return false;
+		},
+		[&](UnappliedUnionType const &t)
+		{
+			for(Type const &arg: t.type_args)
+			{
+				if(type_var_occurs_in(var, arg))
+					return true;
+			}
+
+			return false;
+		},
+		[&](UnresolvedPath const&) -> bool { assert(!"type_var_occurs_in: UnresolvedPath"); },
+	};
+}
 
 // Traversing the parents of a struct
 //------------------------------------------------
@@ -5109,7 +5800,7 @@ std::unique_ptr<StructTypeParentClimber> mk_parent_climber(Type const &type)
 }
 
 
-// Unify free variables
+// Unify type deduction variables
 //------------------------------------------------
 optional<TypeDeductionVar> try_get_type_deduction_var(Type const &type)
 {
@@ -5119,38 +5810,65 @@ optional<TypeDeductionVar> try_get_type_deduction_var(Type const &type)
 	return nullopt;
 }
 
-bool try_unify_type_deduction_variables(Type const &dest, Type const &src, TypeEnv &subst, SemaContext &ctx)
+bool try_unify_type_deduction_variables(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx, UnificationMode mode)
 {
-	optional<TypeDeductionVar> dest_var = try_get_type_deduction_var(dest);
-	optional<TypeDeductionVar> src_var = try_get_type_deduction_var(src);
-	if(dest_var && src_var)
+	optional<TypeDeductionVar> left_var = try_get_type_deduction_var(left);
+	optional<TypeDeductionVar> right_var = try_get_type_deduction_var(right);
+	if(left_var && right_var)
 	{
-		if(*dest_var != *src_var)
+		if(*left_var != *right_var)
 		{
-			ctx.constraints[*src_var].subsume(ctx.constraints[*dest_var]);
-			add_subst(subst, *dest_var, src);
+			if(Type const *existing_type = subst.try_lookup(*left_var))
+				unify(*existing_type, right, subst, ctx, mode);
+			else
+				subst.add_unique(*left_var, clone(right));
+
+
+			TypeConstraint *right_constraint = ctx.try_get_constraints(*right_var);
+			TypeConstraint *left_constraint = ctx.try_get_constraints(*left_var);
+			if(right_constraint && left_constraint)
+			{
+				right_constraint->subsume(*left_constraint);
+				left_constraint->subsume(*right_constraint);
+			}
 		}
 
 		return true;
 	}
 
-	if(dest_var || src_var)
+	if(left_var || right_var)
 	{
-		// TODO If `dest_var != nullptr`: Ensure that `dest_var` does not occur in `src`
-		//      If `src_var != nullptr`: Ensure that `src_var` does not occur in `dest`
+		optional<TypeDeductionVar> var = left_var ? left_var : right_var;
+		Type const *type = left_var ? &right : &left;
+		bool args_swapped = left_var ? false : true;
 
-		optional<TypeDeductionVar> var = dest_var;
-		Type const *type = &src;
-		if(!var)
+		assert(not type_var_occurs_in(*var, *type));
+		if(Type const *existing_type = subst.try_lookup(*var))
 		{
-			var = src_var;
-			type = &dest;
-		}
+			if(is_integer_type(*existing_type) && is_integer_type(*type))
+			{
+				optional<Type> common_type = common_int_type(*existing_type, *type, ctx);
+				if(not common_type)
+					throw ParseError("Unification failed: No common integer type for " + str(*existing_type) + " and " + str(*type));
 
-		if(not ctx.constraints[*var].satisfied_by(*type))
+				subst.replace(*var, std::move(*common_type));
+			}
+			else
+			{
+				if(args_swapped)
+					unify(*type, *existing_type, subst, ctx, mode);
+				else
+					unify(*existing_type, *type, subst, ctx, mode);
+			}
+		}
+		else
+			subst.add_unique(*var, clone(*type));
+
+
+		TypeConstraint const *var_constraint = ctx.try_get_constraints(*var);
+		if(var_constraint && not var_constraint->satisfied_by(*type))
 			throw ParseError("Unification failed: Type does not satisfy constraints");
 
-		add_subst(subst, *var, *type);
 		return true;
 	}
 
@@ -5158,11 +5876,88 @@ bool try_unify_type_deduction_variables(Type const &dest, Type const &src, TypeE
 }
 
 
+// Unify known integer variables
+//------------------------------------------------
+optional<KnownIntTypeVar> try_get_known_int_var(Type const &type)
+{
+	if(VarType const *t = std::get_if<VarType>(&type); t && is<KnownIntTypeVar>(*t))
+		return std::get<KnownIntTypeVar>(*t);
+
+	return nullopt;
+}
+
+bool try_unify_integer_types(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx, UnificationMode mode)
+{
+	if(not is_integer_type(left) or not is_integer_type(right))
+		return false;
+
+	optional<Type> common_type = common_int_type(left, right, ctx);
+	if(not common_type)
+		throw ParseError("Failed to unify integer types " + str(left) + " and " + str(right));
+
+	switch(mode)
+	{
+		case UnificationMode::VALUE_ASSIGNMENT:
+		{
+			if(optional<KnownIntTypeVar> int_var = try_get_known_int_var(left))
+				subst.add_unique(*int_var, clone(*common_type));
+			else if(not equiv(left, *common_type))
+					throw ParseError("Unification failed: Cannot assign " + str(right) + " to " + str(left));
+
+			if(optional<KnownIntTypeVar> int_var = try_get_known_int_var(right))
+				subst.add_unique(*int_var, clone(*common_type));
+		} break;
+
+		case UnificationMode::POINTER_ASSIGNMENT:
+		{
+			optional<KnownIntTypeVar> left_int_var = try_get_known_int_var(left);
+			if(left_int_var)
+				subst.add_unique(*left_int_var, clone(*common_type));
+
+			optional<KnownIntTypeVar> right_int_var = try_get_known_int_var(right);
+			if(right_int_var)
+				subst.add_unique(*right_int_var, clone(*common_type));
+
+			if(not left_int_var and not right_int_var)
+			{
+				if(not equiv(left, right))
+					throw ParseError("Unification failed: Got " + str(right) + " and " + str(left));
+			}
+
+		} break;
+
+		case UnificationMode::COMMON_TYPE:
+		{
+			if(optional<KnownIntTypeVar> left_int_var = try_get_known_int_var(left))
+				subst.add_unique(*left_int_var, clone(*common_type));
+
+			if(optional<KnownIntTypeVar> right_int_var = try_get_known_int_var(right))
+				subst.add_unique(*right_int_var, clone(*common_type));
+		} break;
+
+		case UnificationMode::EQUAL:
+		{
+			if(optional<KnownIntTypeVar> left_int_var = try_get_known_int_var(left))
+				subst.add_unique(*left_int_var, clone(*common_type));
+			else if(not equiv(left, *common_type))
+					throw ParseError("Unification failed: Got " + str(left) + " and " + str(right));
+
+			if(optional<KnownIntTypeVar> right_int_var = try_get_known_int_var(right))
+				subst.add_unique(*right_int_var, clone(*common_type));
+			else if(not equiv(right, *common_type))
+					throw ParseError("Unification failed: Got " + str(left) + " and " + str(right));
+		} break;
+	}
+
+	return true;
+}
+
+
 // Unify struct types
 //------------------------------------------------
 
 // Handle unification for both StructType and UnappliedStructPath
-bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaContext &ctx)
+bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaContext &ctx, UnificationMode mode)
 {
 	std::unique_ptr<StructTypeParentClimber> dest_struct_climber = mk_parent_climber(dest);
 	if(not dest_struct_climber)
@@ -5179,6 +5974,9 @@ bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaCo
 
 	if(src_spec->first != dest_spec->first)
 	{
+		if(mode == UnificationMode::COMMON_TYPE)
+			throw ParseError("Unification failed: Expected "s + str(dest) + ", got " + str(src));
+
 		while(true)
 		{
 			if(src_spec->first->is_case_member_of(dest_spec->first))
@@ -5202,7 +6000,7 @@ bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaCo
 		{
 			Type const &dest_arg = dest_spec->second->args[i];
 			Type const &src_arg = src_spec->second->args[i];
-			unify(dest_arg, src_arg, subst, ctx);
+			unify(dest_arg, src_arg, subst, ctx, UnificationMode::EQUAL);
 		}
 
 		dest_spec = dest_struct_climber->next();
@@ -5219,67 +6017,186 @@ bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaCo
 // See
 // - https://eli.thegreenplace.net/2018/unification/
 // - https://www.cs.cornell.edu/courses/cs3110/2011sp/Lectures/lec26-type-inference/type-inference.htm
-void unify(Type const &dest, Type const &src, TypeEnv &subst, SemaContext &ctx)
+
+void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx, UnificationMode mode, Expr *right_expr)
 {
-	if(try_unify_type_deduction_variables(dest, src, subst, ctx))
+	if(try_unify_type_deduction_variables(left, right, subst, ctx, mode))
 		return;
 
-	if(try_unify_structs(dest, src, subst, ctx))
+	if(try_unify_integer_types(left, right, subst, ctx, mode))
+		return;
+
+	if(try_unify_structs(left, right, subst, ctx, mode))
 		return;
 
 	// Handle everything else
-	dest | match
+	left | match
 	{
-		[&](BuiltinType const &dest_t)
+		[&](BuiltinType const &left_t)
 		{
-			BuiltinType const *src_t = std::get_if<BuiltinType>(&src);
-			if(not src_t)
-				throw ParseError("Unification failed: Expected " + str(dest) + ", got " + str(src));
-
-			if(not builtin_losslessly_convertible(dest_t, *src_t))
-				throw ParseError("Unification failed: Expected " + str(dest) + ", got " + str(src));
-		},
-		[&](PointerType const &dest_t)
-		{
-			if(PointerType const *src_t = std::get_if<PointerType>(&src))
+			// Integer types have already been handled above
+			if(BuiltinType const *right_t = std::get_if<BuiltinType>(&right))
 			{
-				bool mut_compatible = src_t->is_mutable() || dest_t.is_const();
-				if(not mut_compatible)
-					throw ParseError("Unification failed: Pointer mutability is incompatible");
-
-				unify(*dest_t.target_type, *src_t->target_type, subst, ctx);
+				if(left_t == *right_t)
+					return;
 			}
-			else if(equiv(src, Type(BuiltinType::NULL_))) {}
-			else
-				throw ParseError("Unification failed: expected pointer type");
+
+			throw ParseError("Unification failed: Expected " + str(left) + ", got " + str(right));
 		},
-		[&](ManyPointerType const &dest_t)
+		[&](PointerType const &left_t)
 		{
-			if(ManyPointerType const *src_t = std::get_if<ManyPointerType>(&src))
+			switch(mode)
 			{
-				bool mut_compatible = src_t->is_mutable() || dest_t.is_const();
-				if(not mut_compatible)
-					throw ParseError("Unification failed: Pointer mutability is incompatible");
+				case UnificationMode::VALUE_ASSIGNMENT:
+				case UnificationMode::POINTER_ASSIGNMENT:
+				{
+					if(PointerType const *right_t = std::get_if<PointerType>(&right))
+					{
+						bool mut_compatible = right_t->is_mutable() || left_t.is_const();
+						if(not mut_compatible)
+							throw ParseError("Unification failed: Pointer mutability is incompatible");
 
-				unify(*dest_t.element_type, *src_t->element_type, subst, ctx);
+						unify(*left_t.target_type, *right_t->target_type, subst, ctx, UnificationMode::POINTER_ASSIGNMENT);
+					}
+					else if(equiv(right, Type(BuiltinType::NULL_)) and mode == UnificationMode::VALUE_ASSIGNMENT) {}
+					else
+						throw ParseError("Unification failed: expected pointer type");
+				} break;
+
+				case UnificationMode::EQUAL:
+				{
+					if(PointerType const *right_t = std::get_if<PointerType>(&right))
+					{
+						if(left_t.mutability != right_t->mutability)
+							throw ParseError("Unification failed: Pointer mutability is incompatible");
+
+						unify(*left_t.target_type, *right_t->target_type, subst, ctx, UnificationMode::EQUAL);
+					}
+					else
+						throw ParseError("Unification failed: expected pointer type");
+				} break;
+
+				case UnificationMode::COMMON_TYPE:
+				{
+					assert(!"unify: PointerType: COMMON_TYPE: TODO");
+				} break;
 			}
-			else if(equiv(src, Type(BuiltinType::NULL_))) {}
-			else
-				throw ParseError("Unification failed: expected many pointer type");
 		},
-
-		[&](VarType const&)
+		[&](ManyPointerType const &left_t)
 		{
-			// Above we already handled the case where `dest` is a type deduction variable.
-			// Thus, if we get here, we know that `dest` is a normal variable.
+			switch(mode)
+			{
+				case UnificationMode::VALUE_ASSIGNMENT:
+				case UnificationMode::POINTER_ASSIGNMENT:
+				{
+					if(ManyPointerType const *right_t = std::get_if<ManyPointerType>(&right))
+					{
+						bool mut_compatible = right_t->is_mutable() || left_t.is_const();
+						if(not mut_compatible)
+							throw ParseError("Unification failed: Pointer mutability is incompatible");
 
-			if(not equiv(dest, src))
-				throw ParseError("Unification failed: Expected " + str(dest) + ", got " + str(src));
+						unify(*left_t.element_type, *right_t->element_type, subst, ctx, UnificationMode::POINTER_ASSIGNMENT);
+					}
+					else if(equiv(right, Type(BuiltinType::NULL_)) and mode == UnificationMode::VALUE_ASSIGNMENT) {}
+					else
+						throw ParseError("Unification failed: expected many pointer type");
+				} break;
+
+				case UnificationMode::EQUAL:
+				{
+					if(ManyPointerType const *right_t = std::get_if<ManyPointerType>(&right))
+					{
+						if(left_t.mutability != right_t->mutability)
+							throw ParseError("Unification failed: Pointer mutability is incompatible");
+
+						unify(*left_t.element_type, *right_t->element_type, subst, ctx, UnificationMode::EQUAL);
+					}
+					else
+						throw ParseError("Unification failed: expected pointer type");
+				} break;
+
+				case UnificationMode::COMMON_TYPE:
+				{
+					assert(!"unify: ManyPointerType: COMMON_TYPE: TODO");
+				} break;
+			}
 		},
 
-		[&](KnownIntType const&) { assert(!"unify: KnownIntType: TODO"); },
+		[&](VarType const &left_t)
+		{
+			// Above we already handled the case where `left` is a TypeDeductionVar or a KnownIntTypeVar.
+			// Thus, if we get here, we know that `left` is a TypeParameterVar.
+			assert(is<TypeParameterVar>(left_t));
+
+			if(not equiv(left, right))
+				throw ParseError("Unification failed: Expected " + str(left) + ", got " + str(right));
+
+			return;
+		},
+
 		[&](ProcType const&) { assert(!"unify: ProcType: TODO"); },
 		[&](UnappliedProcType const&) { assert(!"unify: UnappliedProcType: TODO"); },
+
+		[&](UnionType const &left_t) 
+		{
+			if(equiv(left, right))
+				return;
+
+			assert(mode == UnificationMode::VALUE_ASSIGNMENT);
+
+			vector<Type> const &alts = left_t.canonical_def->alternatives;
+			optional<size_t> exact_match_idx;
+			optional<size_t> similar_match_idx;
+			for(size_t i = 0; i < alts.size(); ++i)
+			{
+				Type const &alt = alts[i];
+				pair<XInt64, XInt64> const *right_known_int = ctx.try_get_known_int(right);
+				if(is_integer_type(alt) and right_known_int)
+				{
+					BuiltinType alt_int_type = std::get<BuiltinType>(alt);
+					if(integer_assignable_to(alt_int_type, right_known_int->first) and integer_assignable_to(alt_int_type, right_known_int->second))
+					{
+						if(exact_match_idx or similar_match_idx)
+							throw ParseError("Assignment of integer value to union type is ambiguous");
+
+						subst.add_unique(std::get<VarType>(right), clone(alt));
+						similar_match_idx = i;
+					}
+					else
+						throw ParseError("Assignment to union failed: no alternative found for type " + str(right));
+				}
+				else
+				{
+					if(equiv(alt, right))
+					{
+						if(exact_match_idx)
+							throw ParseError("Assignment to union type is ambiguous");
+
+						exact_match_idx = i;
+					}
+					else if(is_type_assignable(alt, right, ctx))
+					{
+						if(similar_match_idx)
+							throw ParseError("Assignment to union type is ambiguous");
+
+						similar_match_idx = i;
+					}
+				}
+			}
+
+			if(not exact_match_idx and not similar_match_idx)
+				throw ParseError("Assignment to union failed: no alternative found for type " + str(right));
+
+			if(right_expr)
+			{
+				*right_expr = Expr(UnionInitExpr(
+					exact_match_idx ? *exact_match_idx : *similar_match_idx,
+					std::move(*right_expr)
+				), {});
+				right_expr->type = clone(left);
+			}
+		},
+		[&](UnappliedUnionType const&) { assert(!"unify: UnappliedUnionType: TODO"); },
 
 		// Already handled above
 		[&](StructType const&) { UNREACHABLE; },
@@ -5372,10 +6289,11 @@ bool is_cast_ok(Type const &dest_type, Type const &src_type, SemaContext &ctx)
 			return is_type_assignable(dest_type, src_type, ctx);
 		},
 		[&](ProcType const&) -> bool { assert(!"is_cast_ok: ProcType: TODO"); },
-		[&](KnownIntType const&) -> bool { assert(!"is_cast_ok: KnownIntType: TODO"); },
-		[&](UnresolvedPath const&) -> bool { assert(!"is_cast_ok: UnresolvedPath"); },
+		[&](UnionType const&) -> bool { assert(!"is_cast_ok: UnionType: TODO"); },
 		[&](UnappliedStructType const&) -> bool { assert(!"is_cast_ok: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> bool { assert(!"is_cast_ok: UnappliedProcType"); },
+		[&](UnappliedUnionType const&) -> bool { assert(!"is_cast_ok: UnappliedUnionType"); },
+		[&](UnresolvedPath const&) -> bool { assert(!"is_cast_ok: UnresolvedPath"); },
 	};
 }
 
@@ -5384,7 +6302,7 @@ bool is_integer_type(Type const &type)
 	return type | match
 	{
 		[&](BuiltinType const &t) { return is_builtin_int_type(t); },
-		[&](KnownIntType const&) { return true; },
+		[&](VarType const &t) { return is<KnownIntTypeVar>(t); },
 		[&](auto const&) { return false; },
 	};
 }
@@ -5406,26 +6324,24 @@ Parameter* find_var_member(StructDefInstance *struct_inst, string const &field)
 
 void add_size_to_alloc_call(Expr &addr, Expr &&size_expr);
 
-
-
 void create_type_env(UnappliedStructType const &t, TypeEnv &result)
 {
 	if(t.parent)
 		create_type_env(*t.parent, result);
 
 	for(size_t i = 0; i < t.type_args.size(); ++i)
-		add_subst(result, TypeParameterVar(t.struct_->type_params[i]), clone(t.type_args.args[i]));
+		result.add_unique(TypeParameterVar(t.struct_->type_params[i]), clone(t.type_args.args[i]));
 }
 
-vector<Parameter> get_callee_params(Type const &callee_type)
+ProcTypeDef get_callee_proc_type(Type const &callee_type)
 {
 	return callee_type | match
 	{
 		[&](ProcType const &t)
 		{
-			return clone(t.def->params);
+			return clone(*t.def);
 		},
-		[&](UnappliedStructType const &t)
+		[&](UnappliedStructType const &t) -> ProcTypeDef
 		{
 			assert(t.struct_->constructor_params);
 
@@ -5436,21 +6352,32 @@ vector<Parameter> get_callee_params(Type const &callee_type)
 			for(Parameter &param: callee_params)
 				type_substitute(param.type, env);
 
-			return callee_params;
+			return ProcTypeDef{
+				.type_params = {},
+				.params = std::move(callee_params),
+				.ret = clone(callee_type),
+			};
 		},
-		[&](UnappliedProcType const &t) -> vector<Parameter>
+		[&](UnappliedProcType const &t) -> ProcTypeDef
 		{
 			TypeEnv env;
 			for(size_t i = 0; i < t.type_args.size(); ++i)
-				add_subst(env, TypeParameterVar(t.type->type_params[i]), clone(t.type_args.args[i]));
+				env.add_unique(TypeParameterVar(t.type->type_params[i]), clone(t.type_args.args[i]));
 
 			vector<Parameter> callee_params = clone(t.type->params);
 			for(Parameter &param: callee_params)
 				type_substitute(param.type, env);
 
-			return callee_params;
+			Type ret = clone(t.type->ret);
+			type_substitute(ret, env);
+
+			return ProcTypeDef{
+				.type_params = {},
+				.params = std::move(callee_params),
+				.ret = std::move(ret),
+			};
 		},
-		[&](auto const&) -> vector<Parameter>
+		[&](auto const&) -> ProcTypeDef
 		{
 			throw ParseError("Expression is not callable");
 		}
@@ -5458,24 +6385,15 @@ vector<Parameter> get_callee_params(Type const &callee_type)
 }
 
 
-void instantiate_type_with_hint(Type &type, TypingHint hint, SemaContext &ctx)
-{
-	if(TypeEnv const *subst = hint.try_get_subst())
-		instantiate_type(type, *subst, ctx, hint.try_get_type());
-	else
-		instantiate_type(type, {}, ctx, hint.try_get_type());
-
-}
-
-bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType should_instantiate)
+bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 {
 	bool fully_instantiated = expr | match
 	{
 		[&](IntLiteralExpr &e)
 		{
-			if(Type const *type_hint = hint.try_get_type())
+			if(hint.type)
 			{
-				if(BuiltinType const *bt = std::get_if<BuiltinType>(type_hint))
+				if(BuiltinType const *bt = std::get_if<BuiltinType>(hint.type))
 				{
 					if(integer_assignable_to(*bt, e.value))
 					{
@@ -5485,7 +6403,7 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 				}
 			}
 
-			expr.type = KnownIntType(e.value);
+			expr.type = ctx.new_int_type_var(e.value);
 			return false;
 		},
 		[&](BoolLiteralExpr&)
@@ -5504,7 +6422,7 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 			{
 				case StringLiteralType::C:
 				{
-					ItemDef *c_char_item = ctx.mod.global()->lookup_item("c_char");
+					ItemDef *c_char_item = ctx.mod().global()->lookup_item("c_char");
 					AliasDef &c_char = std::get<AliasDef>(*c_char_item);
 					expr.type = ManyPointerType(clone(c_char.aliased_type), IsMutable::NO);
 				} break;
@@ -5512,47 +6430,20 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 
 			return true;
 		},
-		[&](UnresolvedPath&) -> bool { assert(!"typecheck: UnresolvedPath"); },
+		[&](UnresolvedPath&) -> bool { assert(!"typecheck_partial: UnresolvedPath"); },
 		[&](UnappliedProcExpr &e)
 		{
-			if(hint.try_get_subst() || should_instantiate == InstantiateType::YES)
-			{
-				for(Type &arg: e.type_args)
-					instantiate_type_with_hint(arg, hint, ctx);
-
-				ProcDefInstance *inst = instantiate_proc(e.proc, std::move(e.type_args), ctx);
-				expr = expr.clone_as(ProcExpr(inst));
-				return typecheck(expr, ctx, hint);
-			}
-			else
-			{
-				expr.type = UnappliedProcType(clone(e.proc->type), clone(e.type_args));
-				return false;
-			}
+			expr.type = UnappliedProcType(clone(e.proc->type), clone(e.type_args));
+			return false;
 		},
 		[&](UnappliedConstructorExpr &e)
 		{
-			TypeEnv const *subst = hint.try_get_subst();
-			if(subst || should_instantiate == InstantiateType::YES)
-			{
-				instantiate_type_with_hint(e.struct_, hint, ctx);
-				if(StructType *st = std::get_if<StructType>(&e.struct_))
-				{
-					expr = expr.clone_as(ConstructorExpr(st->inst));
-					return typecheck(expr, ctx, hint);
-				}
-				else
-					throw ParseError("Only structs can be used as constructors");
-			}
-			else
-			{
-				expr.type = clone(e.struct_);
-				return false;
-			}
+			expr.type = clone(e.struct_);
+			return false;
 		},
 		[&](VarExpr &e)
 		{
-			assert(e.var->type && "typecheck(VarExpr): VarDef::type is null");
+			assert(e.var->type && "typecheck_partial(VarExpr): VarDef::type is null");
 			expr.type = clone(*e.var->type);
 
 			return true;
@@ -5566,15 +6457,15 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 			ctor_type.ret = StructType(e.inst);
 
 			expr.type = ProcType{
-				.def = ctx.mod.add_proc_type(clone(ctor_type)),
-				.canonical_def = ctx.mod.get_canonical(ctor_type)
+				.def = ctx.mod().add_proc_type(clone(ctor_type)),
+				.canonical_def = ctx.mod().get_canonical(ctor_type)
 			};
 
 			return true;
 		},
 		[&](ProcExpr &e)
 		{
-			expr.type = ProcType(&e.inst->type, ctx.mod.get_canonical(e.inst->type));
+			expr.type = ProcType(&e.inst->type, ctx.mod().get_canonical(e.inst->type));
 			return true;
 		},
 		[&](UnaryExpr &e)
@@ -5593,10 +6484,10 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 
 				case UnaryOp::NEG:
 				{
-					bool sub_fully_instantiated = typecheck(*e.sub, ctx, {}, InstantiateType::NO);
+					bool sub_fully_instantiated = typecheck_partial(*e.sub, ctx, TypingHint(hint.subst));
 
-					if(KnownIntType *known_int = std::get_if<KnownIntType>(&*e.sub->type))
-						expr.type = KnownIntType(-known_int->value);
+					if(pair<XInt64, XInt64> const *known_int = ctx.try_get_known_int(*e.sub->type))
+						expr.type = ctx.new_int_type_var(-known_int->second, -known_int->first);
 					else if(is_integer_type(*e.sub->type))
 						expr.type = clone(*e.sub->type);
 					else
@@ -5617,28 +6508,34 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 				case BinaryOp::MUL:
 				case BinaryOp::DIV:
 				{
-					bool left_fully_instantiated = typecheck(*e.left, ctx, {}, InstantiateType::NO);
-					bool right_fully_instantiated = typecheck(*e.right, ctx, {}, InstantiateType::NO);
+					bool left_fully_instantiated = typecheck_partial(*e.left, ctx, TypingHint(hint.subst));
+					bool right_fully_instantiated = typecheck_partial(*e.right, ctx, TypingHint(hint.subst));
 
-					KnownIntType *left_known_int = std::get_if<KnownIntType>(&*e.left->type);
-					KnownIntType *right_known_int = std::get_if<KnownIntType>(&*e.right->type);
+					unify(*e.left->type, *e.right->type, *hint.subst, ctx, UnificationMode::COMMON_TYPE);
+
+					pair<XInt64, XInt64> const *left_known_int = ctx.try_get_known_int(*e.left->type);
+					pair<XInt64, XInt64> const *right_known_int = ctx.try_get_known_int(*e.right->type);
 					if(left_known_int && right_known_int)
 					{
+						// TODO Implement interval arithmetic
+						assert(left_known_int->first == left_known_int->second);
+						assert(right_known_int->first == right_known_int->second);
+
 						XInt64 result;
 						switch(e.op)
 						{
-							case BinaryOp::ADD: result = left_known_int->value + right_known_int->value; break;
-							case BinaryOp::SUB: result = left_known_int->value - right_known_int->value; break;
-							case BinaryOp::MUL: assert(!"typecheck: BinaryExpr: KnownIntType: MUL: TODO"); break;
-							case BinaryOp::DIV: assert(!"typecheck: BinaryExpr: KnownIntType: DIV: TODO"); break;
+							case BinaryOp::ADD: result = left_known_int->first + right_known_int->first; break;
+							case BinaryOp::SUB: result = left_known_int->first - right_known_int->first; break;
+							case BinaryOp::MUL: assert(!"typecheck_partial: BinaryExpr: KnownIntType: MUL: TODO"); break;
+							case BinaryOp::DIV: assert(!"typecheck_partial: BinaryExpr: KnownIntType: DIV: TODO"); break;
 							default: UNREACHABLE;
 						}
 
-						expr.type = KnownIntType(result);
+						expr.type = ctx.new_int_type_var(result);
 					}
 					else if(is_integer_type(*e.left->type) && is_integer_type(*e.right->type))
 					{
-						optional<Type> result_type = common_int_type(*e.left->type, *e.right->type);
+						optional<Type> result_type = common_int_type(*e.left->type, *e.right->type, ctx);
 						if(not result_type)
 							throw ParseError("Binary op: expected same integral types, got " + str(*e.left->type) + " and " + str(*e.right->type));
 
@@ -5668,8 +6565,14 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 				case BinaryOp::GT:
 				case BinaryOp::GE:
 				{
-					typecheck(*e.left, ctx);
-					typecheck(*e.right, ctx);
+					TypeEnv subst;
+					bool left_fully_instantiated = typecheck_partial(*e.left, ctx, TypingHint(&subst));
+					bool right_fully_instantiated = typecheck_partial(*e.right, ctx, TypingHint(&subst));
+
+					unify(*e.left->type, *e.right->type, subst, ctx, UnificationMode::COMMON_TYPE);
+
+					if(not left_fully_instantiated) instantiate_types(*e.left, subst, ctx);
+					if(not right_fully_instantiated) instantiate_types(*e.right, subst, ctx);
 
 					if(not is_integer_type(*e.left->type) || not equiv(*e.left->type, *e.right->type))
 						throw ParseError("Comparison: expected equivalent integral types, got " + str(*e.left->type) + " and " + str(*e.right->type));
@@ -5745,7 +6648,7 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 		[&](AssignmentExpr &e)
 		{
 			typecheck(*e.lhs, ctx);
-			typecheck(*e.rhs, ctx, TypingHint(&*e.lhs->type));
+			typecheck(*e.rhs, ctx, &*e.lhs->type);
 			if(!is_expr_assignable(*e.lhs->type, *e.rhs, ctx))
 				throw ParseError("LHS and RHS have incompatible types in assignment");
 
@@ -5759,7 +6662,7 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 		[&](AsExpr &e)
 		{
 			typecheck(*e.src_expr, ctx);
-			instantiate_type_with_hint(e.target_type, hint, ctx);
+			instantiate_type(e.target_type, *hint.subst, ctx);
 
 			if(!is_cast_ok(e.target_type, *e.src_expr->type, ctx))
 				throw ParseError("Invalid cast");
@@ -5770,15 +6673,17 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 		},
 		[&](CallExpr &e)
 		{
-			bool callable_fully_instantiated = typecheck(*e.callable, ctx, TypingHint(), InstantiateType::NO);
+			bool fully_instantiated = typecheck_partial(*e.callable, ctx, TypingHint(hint.subst));
 
-			vector<Parameter> callee_params = get_callee_params(*e.callable->type);
-			if(e.args.size() > callee_params.size())
+			ProcTypeDef callee_type = get_callee_proc_type(*e.callable->type);
+			if(e.args.size() > callee_type.params.size())
 				throw ParseError("Too many arguments");
+
+			if(hint.type)
+				unify(*hint.type, callee_type.ret, *hint.subst, ctx, UnificationMode::VALUE_ASSIGNMENT);
 
 			unordered_set<size_t> assigned_params;
 			bool has_ooo_named_args = false;
-			TypeEnv subst;
 			for(size_t i = 0; i < e.args.size(); ++i)
 			{
 				Argument &arg = e.args[i];
@@ -5786,7 +6691,7 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 				// Find the corresponding parameter depending on whether the argument is named or not
 				if(arg.name)
 				{
-					if(optional<size_t> param_idx_opt = find_by_name(callee_params, *arg.name))
+					if(optional<size_t> param_idx_opt = find_by_name(callee_type.params, *arg.name))
 					{
 						arg.param_idx = *param_idx_opt;
 						if(*param_idx_opt != i)
@@ -5807,33 +6712,30 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 				if(!res.second)
 					throw ParseError("Multiple arguments for same parameter");
 
-				Parameter const &param = callee_params.at(*arg.param_idx);
-				typecheck(*arg.expr, ctx, TypingHint(&param.type));
+				Parameter const &param = callee_type.params.at(*arg.param_idx);
+				bool arg_fully_instantiated = typecheck_partial(*arg.expr, ctx, hint.with_type(&param.type));
+				if(not arg_fully_instantiated) fully_instantiated = false;
 
 				try {
-					unify(param.type, *arg.expr->type, subst, ctx);
+					unify(param.type, *arg.expr->type, *hint.subst, ctx, UnificationMode::VALUE_ASSIGNMENT, arg.expr.get());
 				} catch(ParseError const &e) {
 					throw ParseError("Procedure/struct argument has invalid type: "s + e.what());
 				}
 			}
 
-			for(size_t param_idx = 0; param_idx < callee_params.size(); ++param_idx)
+			for(size_t param_idx = 0; param_idx < callee_type.params.size(); ++param_idx)
 			{
 				if(!assigned_params.contains(param_idx))
 				{
-					if(!callee_params.at(param_idx).default_value)
+					if(!callee_type.params.at(param_idx).default_value)
 						throw ParseError("Missing value for procedure/struct argument in call");
 				}
 			}
 
-			if(not callable_fully_instantiated)
-				typecheck(*e.callable, ctx, TypingHint(&subst));
+			expr.type = clone(callee_type.ret);
+			type_substitute(*expr.type, *hint.subst);
 
-
-			ProcType const &proc_type = std::get<ProcType>(*e.callable->type);
-			expr.type = clone(proc_type.def->ret);
-
-			return true;
+			return fully_instantiated;
 		},
 		[&](SizeOfExpr&)
 		{
@@ -5850,15 +6752,20 @@ bool typecheck(Expr &expr, SemaContext &ctx, TypingHint hint, InstantiateType sh
 			expr.type = PointerType(clone(*e.init->type), IsMutable::YES);
 			return true;
 		},
+		[&](UnionInitExpr &e)
+		{
+			return typecheck_partial(*e.value, ctx, hint);
+		},
 	};
 
-	if(not fully_instantiated && should_instantiate == InstantiateType::YES)
-	{
-		instantiate_type_with_hint(*expr.type, hint, ctx);
-		fully_instantiated = true;
-	}
-
 	return fully_instantiated;
+}
+
+void typecheck(Expr &expr, SemaContext &ctx, Type const *type_hint)
+{
+	TypeEnv subst;
+	if(not typecheck_partial(expr, ctx, TypingHint(type_hint, &subst)))
+		instantiate_types(expr, subst, ctx);
 }
 
 
@@ -5895,66 +6802,70 @@ void add_size_to_alloc_call(Expr &addr, Expr &&size_expr)
 	}
 }
 
-Type apply_pattern_op(PatternOp const &op, Expr const &expr, Type const &expr_type)
-{
-	return op | match
-	{
-		[&](NoPatternOp) { return clone(expr_type); },
-		[&](DerefPatternOp)
-		{
-			if(PointerType const *pointer = std::get_if<PointerType>(&expr_type))
-				return clone(*pointer->target_type);
-
-			throw ParseError("Invalid pattern op: target type not a pointer");
-		},
-		[&](AddressOfPatternOp const &o)
-		{
-			if(optional<IsMutable> mutability = is_lvalue_expr(expr))
-			{
-				if(*mutability == IsMutable::YES || o.mutability == IsMutable::NO)
-					return Type(PointerType(clone(expr_type), o.mutability));
-
-				throw ParseError("Cannot make mutable reference to const object");
-			}
-
-			throw ParseError("Can only take address of lvalue expression");
-		},
-	};
-}
-
-void typecheck_pattern(Pattern &lhs_pattern, Expr const &rhs_expr, Type const &rhs_type, SemaContext &ctx)
+void typecheck_pattern(Pattern &lhs_pattern, Type const &rhs_type, optional<IsMutable> rhs_is_lvalue, SemaContext &ctx, Expr *rhs_expr)
 {
 	lhs_pattern | match
 	{
-		[&](VarPattern const &p)
+		[&](VarPattern &p)
 		{
-			Type inferred_var_type = apply_pattern_op(lhs_pattern.op, rhs_expr, rhs_type);
 			if(p.var->type)
 			{
 				TypeEnv subst;
 				try {
-					unify(*p.var->type, inferred_var_type, subst, ctx);
+					unify(*p.var->type, rhs_type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, rhs_expr);
 				} catch (ParseError const &e) {
 					throw ParseError("Inferred type does not match specified type in let statement: "s + e.what());
 				}
 				instantiate_type(*p.var->type, subst, ctx);
 			}
 			else
-				p.var->type = clone(inferred_var_type);
+				p.var->type = clone(rhs_type);
 
-			lhs_pattern.type = std::move(inferred_var_type);
-		}
+			lhs_pattern.type = clone(*p.var->type);
+		},
+		[&](DerefPattern &p)
+		{
+			if(PointerType const *pointer = std::get_if<PointerType>(&rhs_type))
+			{
+				lhs_pattern.type = clone(*pointer->target_type);
+				typecheck_pattern(*p.sub, *lhs_pattern.type, rhs_is_lvalue, ctx, nullptr);
+			}
+			else
+				throw ParseError("Invalid pattern op: target type not a pointer");
+		},
+		[&](AddressOfPattern const &p)
+		{
+			if(rhs_is_lvalue)
+			{
+				if(*rhs_is_lvalue == IsMutable::YES || p.mutability == IsMutable::NO)
+				{
+					lhs_pattern.type = PointerType(clone(rhs_type), p.mutability);
+					typecheck_pattern(*p.sub, *lhs_pattern.type, rhs_is_lvalue, ctx, nullptr);
+				}
+				else
+					throw ParseError("Cannot make mutable reference to const object");
+			}
+			else
+				throw ParseError("Can only take address of lvalue expression");
+		},
 	};
 }
 
-Type const* try_get_pattern_type(Pattern &lhs_pattern)
+Type const* try_get_explicit_type(Pattern &pattern)
 {
-	return lhs_pattern | match
+	return pattern | match
 	{
 		[&](VarPattern const &p) -> Type const*
 		{
 			if(p.var->type)
 				return &*p.var->type;
+
+			return nullptr;
+		},
+		[&](auto const&) -> Type const*
+		{
+			if(pattern.type)
+				return &*pattern.type;
 
 			return nullptr;
 		}
@@ -5967,8 +6878,8 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 	{
 		[&](LetStmt &s)
 		{
-			typecheck(s.init_expr, ctx, try_get_pattern_type(s.lhs));
-			typecheck_pattern(s.lhs, s.init_expr, *s.init_expr.type, ctx);
+			typecheck(s.init_expr, ctx, try_get_explicit_type(s.lhs));
+			typecheck_pattern(s.lhs, *s.init_expr.type, is_lvalue_expr(s.init_expr), ctx, &s.init_expr);
 		},
 		[&](ExprStmt &s)
 		{
@@ -5983,14 +6894,21 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 		{
 			if(s.ret_expr)
 			{
-				typecheck(*s.ret_expr, ctx);
-				if(!is_expr_assignable(proc->type.ret, *s.ret_expr, ctx))
-					throw ParseError("Return statement must return value of appropriate type");
+				TypeEnv subst;
+				bool fully_instantiated = typecheck_partial(*s.ret_expr, ctx, TypingHint(&proc->type.ret, &subst));
+				try {
+					unify(proc->type.ret, *s.ret_expr->type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, &*s.ret_expr);
+					if(not fully_instantiated)
+						instantiate_types(*s.ret_expr, subst, ctx);
+				}
+				catch(ParseError const &e) {
+					throw ParseError("Invalid return expression: "s + e.what());
+				}
 			}
 			else
 			{
 				if(!equiv(proc->type.ret, BuiltinType::UNIT))
-					throw ParseError("Return statement must return value of appropriate type");
+					throw ParseError("Return statement must return unit value");
 			}
 		},
 		[&](IfStmt &s)
@@ -6013,38 +6931,66 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 		[&](MatchStmt &s)
 		{
 			typecheck(s.expr, ctx);
-			s.subject = *s.expr.type | match
+			*s.expr.type | match
 			{
-				[&](StructType const &t) { return t.inst; },
-				[&](auto const &) -> StructDefInstance* { throw ParseError("Match statements only work on structs, got " + str(*s.expr.type)); },
-			};
-
-			unordered_set<StructDefInstance const*> matched_cases;
-			for(MatchArm &arm: s.arms)
-			{
-				instantiate_type(arm.type, {}, ctx);
-				arm.type | match
+				[&](StructType const &t)
 				{
-					[&](StructType const &t)
+					StructDefInstance *subject = t.inst;
+					unordered_set<StructDefInstance const*> matched_cases;
+					for(MatchArm &arm: s.arms)
 					{
-						if(t.inst->outer_struct != s.subject)
-							throw ParseError("Case statements must match against the case members of the match subject");
+						instantiate_type(arm.type, {}, ctx);
+						arm.type | match
+						{
+							[&](StructType const &t)
+							{
+								if(t.inst->outer_struct != subject)
+									throw ParseError("Case statements must match against the case members of the match subject");
 
-						arm.struct_ = t.inst;
-						if(!matched_cases.insert(arm.struct_).second)
+								arm.discr = t.inst->def->get_case_idx();
+								if(!matched_cases.insert(t.inst).second)
+									throw ParseError("Duplicate case value");
+							},
+							[&](auto const &) { throw ParseError("Match case statements only work on structs"); },
+						};
+
+						if(arm.capture)
+							typecheck_pattern(*arm.capture, arm.type, is_lvalue_expr(s.expr), ctx, nullptr);
+
+						typecheck(*arm.stmt, proc, ctx);
+					}
+
+					if(matched_cases.size() != subject->def->num_cases)
+						throw ParseError("Match is not exhaustive");
+				},
+				[&](UnionType const &t)
+				{
+					unordered_set<Type, std::hash<Type>, TypeEquiv> matched_cases;
+					for(MatchArm &arm: s.arms)
+					{
+						instantiate_type(arm.type, {}, ctx);
+						if(optional<size_t> discr = t.canonical_def->contains(arm.type))
+							arm.discr = *discr;
+						else
+							throw ParseError("Case statements must match against the alternatives of the match subject, got " + str(arm.type));
+
+						if(!matched_cases.insert(clone(arm.type)).second)
 							throw ParseError("Duplicate case value");
-					},
-					[&](auto const &) { throw ParseError("Match case statements only work on structs"); },
-				};
 
-				if(arm.capture)
-					typecheck_pattern(*arm.capture, s.expr, arm.type, ctx);
+						if(arm.capture)
+							typecheck_pattern(*arm.capture, arm.type, is_lvalue_expr(s.expr), ctx, nullptr);
 
-				typecheck(*arm.stmt, proc, ctx);
-			}
+						typecheck(*arm.stmt, proc, ctx);
+					}
 
-			if(matched_cases.size() != s.subject->def->num_cases)
-				throw ParseError("Match is not exhaustive");
+					if(matched_cases.size() != t.canonical_def->alternatives.size())
+						throw ParseError("Match is not exhaustive");
+				},
+				[&](auto const&)
+				{
+					throw ParseError("Match statements only work on structs and union types, got " + str(*s.expr.type));
+				},
+			};
 		},
 	};
 }
@@ -6097,7 +7043,7 @@ void typecheck(TopLevelItem item, SemaContext &ctx)
 
 						if(var_member.default_value)
 						{
-							typecheck(*var_member.default_value, ctx, TypingHint(&var_member.type));
+							typecheck(*var_member.default_value, ctx, &var_member.type);
 							if(!is_type_assignable(var_member.type, *var_member.default_value->type, ctx))
 								throw ParseError(
 									"Default value for struct member `"s + var_member.name + "` has incorrect type. "
@@ -6124,7 +7070,7 @@ void typecheck(TopLevelItem item, SemaContext &ctx)
 
 void typecheck(SemaContext &ctx)
 {
-	for(TopLevelItem item: ctx.mod.items())
+	for(TopLevelItem item: ctx.mod().items())
 		typecheck(item, ctx);
 }
 
@@ -6259,6 +7205,7 @@ private:
 //
 // <type-segment> ::= 'P' 'm'? <path-segment>  // Pointer
 //                  | 'M' 'm'? <path-segment>  // Many pointer
+//                  | 'U' <path-segment>+ 'E'  // Union type
 
 string mangle_type_segment(Type const &type);
 
@@ -6269,6 +7216,15 @@ string mangle_type_args(TypeArgList const &types)
 		mangled += 'G' + mangle_type_segment(arg) + 'E';
 
 	return mangled;
+}
+
+string mangle_union_type_segment(UnionTypeDef const &union_)
+{
+	string mangled = "U";
+	for(Type const &alt: union_.alternatives)
+		mangled += mangle_type_segment(alt);
+
+	return mangled + "E";
 }
 
 string mangle_type_segment(Type const &type)
@@ -6294,7 +7250,6 @@ string mangle_type_segment(Type const &type)
 			UNREACHABLE;
 		},
 		[&](VarType const&) -> string { assert(!"mangle_type_segment: VarType"); },
-		[&](KnownIntType const&) -> string { assert(!"mangle_type_segment: KnownIntType"); },
 		[&](PointerType const &t)
 		{
 			string mangled = "P";
@@ -6322,9 +7277,15 @@ string mangle_type_segment(Type const &type)
 			return segment;
 		},
 		[&](ProcType const&) -> string { assert(!"mangle_type_segment: ProcType: TODO"); },
-		[&](UnresolvedPath const&) -> string { assert(!"mangle_type_segment: UnresolvedPath"); },
+		[&](UnionType const &t) -> string
+		{
+			return mangle_union_type_segment(*t.canonical_def);
+		},
+
 		[&](UnappliedStructType const&) -> string { assert(!"mangle_type_segment: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> string { assert(!"mangle_type_segment: UnappliedProcType"); },
+		[&](UnappliedUnionType const&) -> string { assert(!"mangle_type_segment: UnappliedUnionType"); },
+		[&](UnresolvedPath const&) -> string { assert(!"mangle_type_segment: UnresolvedPath"); },
 	};
 }
 
@@ -6332,6 +7293,11 @@ string mangle_type_segment(Type const &type)
 string mangle_type(Type const &type)
 {
 	return "_YT" + mangle_type_segment(type);
+}
+
+string mangle_union_type(UnionTypeDef const &union_)
+{
+	return "_YT" + mangle_union_type_segment(union_);
 }
 
 string mangle_constructor(Type const &type)
@@ -6348,6 +7314,82 @@ string mangle_procedure(ProcDefInstance const *proc)
 	mangled += mangle_type_args(proc->type_args);
 
 	return "_YF" + mangled;
+}
+
+
+//--------------------------------------------------------------------
+// CStruct
+//--------------------------------------------------------------------
+struct CMemberNormal { string name; };
+struct CMemberConst { string name; size_t value; };
+struct CMemberPadding {};
+
+using CMemberKind = variant<CMemberNormal, CMemberConst, CMemberPadding>;
+
+struct CMember
+{
+	CMemberKind kind;
+	Type type;
+
+	CMember(string const &name, Type &&type) :
+		kind(CMemberNormal(name)), type(std::move(type)) {}
+
+	CMember(string name, optional<size_t> value, Type &&type) :
+		kind(value ?
+			CMemberKind(CMemberConst(name, *value)) :
+			CMemberKind(CMemberNormal(name))
+		),
+		type(std::move(type)) {}
+
+	CMember(Type &&type) :
+		kind(CMemberPadding()), type(std::move(type)) {}
+
+
+	CMember(CMember const &rhs) :
+		kind(rhs.kind),
+		type(clone(rhs.type)) {}
+};
+
+struct CStruct
+{
+	string name;
+	string constructor_name;
+	MemoryLayout cur_layout{};
+	vector<CMember> members;
+
+	explicit CStruct(string const &name, string const &constructor_name) :
+		name(name),
+		constructor_name(constructor_name) {}
+
+	size_t add(CMember &&m)
+	{
+		cur_layout.extend(compute_layout(m.type));
+		members.push_back(std::move(m));
+		return members.size() - 1;
+	}
+};
+
+void generate_c_struct_def(CStruct const &cstruct, CBackend &backend)
+{
+	// In Myca, types can have zero alignment (e.g., Never), but this is not allowed in C.
+	size_t alignment = std::max(cstruct.cur_layout.alignment, size_t(1));
+	backend << "struct " << "__attribute__((aligned(" << alignment << "))) " << cstruct.name << LineEnd << "{" << LineEnd;
+	backend.increase_indent();
+
+	for(CMember const &member: cstruct.members)
+	{
+		backend << member.type << " ";
+		member.kind | match
+		{
+			[&](CMemberNormal const &m) { backend << m.name; },
+			[&](CMemberConst const &m) { backend << m.name; },
+			[&](CMemberPadding) { backend << backend.new_tmp_var(); },
+		};
+		backend << ";" << LineEnd;
+	}
+
+	backend.decrease_indent();
+	backend << "};" << LineEnd;
 }
 
 
@@ -6403,10 +7445,12 @@ string generate_c_to_str(Type const &type)
 			return "struct " + mangle_type(type);
 		},
 		[&](ProcType const&) -> string { assert(!"generate_c_to_str: ProcType: TODO"); },
-		[&](KnownIntType const&) -> string { assert(!"generate_c_to_str: KnownIntType: TODO"); },
-		[&](UnresolvedPath const&) -> string { assert(!"generate_c_to_str: UnresolvedPath"); },
+		[&](UnionType const&) -> string { return "struct " + mangle_type(type); },
+
 		[&](UnappliedStructType const&) -> string { assert(!"generate_c_to_str: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> string { assert(!"generate_c_to_str: UnappliedProcType"); },
+		[&](UnappliedUnionType const&) -> string { assert(!"generate_c_to_str: UnappliedUnionType"); },
+		[&](UnresolvedPath const&) -> string { assert(!"generate_c_to_str: UnresolvedPath"); },
 	};
 }
 
@@ -6554,8 +7598,12 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](CallExpr const &e)
 		{
-			ProcType const &proc_type = std::get<ProcType>(*e.callable->type);
-			vector<Parameter> const &params = proc_type.def->params;
+			vector<Parameter> const &params = *e.callable->type | match
+			{
+				[](ProcType const &t) -> vector<Parameter> const& { return t.def->params; },
+				[](StructType const &t) -> vector<Parameter> const& { return *t.inst->constructor_params; },
+				[](auto const &) -> vector<Parameter> const& { UNREACHABLE; },
+			};
 
 			// Evaluate arguments in the order they were provided
 			vector<string> arg_vals(params.size());
@@ -6608,6 +7656,18 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 
 			return result_var;
 		},
+		[&](UnionInitExpr const &e)
+		{
+			UnionTypeDef const  &union_ = *std::get<UnionType>(*expr.type).canonical_def;
+			string init_val = generate_c_cast(union_.alternatives[e.alt_idx], *e.value, backend);
+
+			string union_var = backend.new_tmp_var();
+			backend << "struct " << mangle_type(*expr.type) << " " << union_var << ";" << LineEnd;
+			backend << union_var << ".__myca__discr = " << e.alt_idx << ";" << LineEnd;
+			backend << union_var << ".__myca_alt" << e.alt_idx << " = " << init_val << ";" << LineEnd;
+
+			return union_var;
+		},
 	};
 }
 
@@ -6615,26 +7675,25 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 //--------------------------------------------------------------------
 // Statements
 //--------------------------------------------------------------------
-string apply_pattern_op_to_c_expr(PatternOp const &op, string const &expr)
-{
-	return op | match
-	{
-		[&](NoPatternOp) { return expr; },
-		[&](DerefPatternOp) { return "*(" + expr + ")"; },
-		[&](AddressOfPatternOp const&) { return "&(" + expr + ")"; },
-	};
-}
-
-void generate_c(Pattern const &lhs_pattern, string const &rhs_expr, Type const &rhs_type, CBackend &backend)
+void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type const &rhs_type, CBackend &backend)
 {
 	lhs_pattern | match
 	{
 		[&](VarPattern const &p)
 		{
-			backend << *lhs_pattern.type << " " << p.var->name << " = ";
-			string rhs = apply_pattern_op_to_c_expr(lhs_pattern.op, rhs_expr);
-			backend << generate_c_cast(*lhs_pattern.type, rhs, rhs_type) << ";" << LineEnd;
-		}
+			string expr_str = generate_c_cast(*lhs_pattern.type, rhs_expr, rhs_type);
+			backend << *lhs_pattern.type << " " << p.var->name << " = " << expr_str << ";" << LineEnd;
+		},
+		[&](DerefPattern const &p)
+		{
+			string deref_expr = generate_c_cast(*lhs_pattern.type, "*(" + rhs_expr + ")", *std::get<PointerType>(rhs_type).target_type);
+			generate_c_pattern(*p.sub, deref_expr, *lhs_pattern.type, backend);
+		},
+		[&](AddressOfPattern const &p)
+		{
+			string addr_expr = generate_c_cast(*lhs_pattern.type, "&(" + rhs_expr + ")", PointerType(clone(rhs_type), p.mutability));
+			generate_c_pattern(*p.sub, addr_expr, *lhs_pattern.type, backend);
+		},
 	};
 }
 
@@ -6645,7 +7704,7 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 		[&](LetStmt const &s)
 		{
 			string init_expr_var = generate_c(s.init_expr, backend);
-			generate_c(s.lhs, init_expr_var, *s.init_expr.type, backend);
+			generate_c_pattern(s.lhs, init_expr_var, *s.init_expr.type, backend);
 		},
 		[&](ExprStmt const &s)
 		{
@@ -6703,12 +7762,20 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 			backend.increase_indent();
 				for(MatchArm const &arm: s.arms)
 				{
-					backend << "case " << arm.struct_->def->get_case_idx() << ":" << LineEnd;
+					backend << "case " << *arm.discr << ":" << LineEnd;
 					backend << "{" << LineEnd;
 					backend.increase_indent();
 
 					if(arm.capture)
-						generate_c(*arm.capture, subject_str, *s.expr.type, backend);
+					{
+						if(is<UnionType>(*s.expr.type))
+						{
+							string arm_expr = subject_str + ".__myca_alt" + std::to_string(*arm.discr);
+							generate_c_pattern(*arm.capture, arm_expr, arm.type, backend);
+						}
+						else
+							generate_c_pattern(*arm.capture, subject_str, *s.expr.type, backend);
+					}
 
 					generate_c(*arm.stmt, proc, backend);
 
@@ -6726,55 +7793,8 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 
 
 //--------------------------------------------------------------------
-// Top-level elements
+// Structs
 //--------------------------------------------------------------------
-struct CMemberNormal { string name; };
-struct CMemberConst { string name; size_t value; };
-struct CMemberPadding {};
-
-using CMemberKind = variant<CMemberNormal, CMemberConst, CMemberPadding>;
-
-struct CMember
-{
-	CMemberKind kind;
-	Type type;
-
-	CMember(string const &name, Type &&type) :
-		kind(CMemberNormal(name)), type(std::move(type)) {}
-
-	CMember(string name, optional<size_t> value, Type &&type) :
-		kind(value ?
-			CMemberKind(CMemberConst(name, *value)) :
-			CMemberKind(CMemberNormal(name))
-		),
-		type(std::move(type)) {}
-
-	CMember(Type &&type) :
-		kind(CMemberPadding()), type(std::move(type)) {}
-
-
-	CMember(CMember const &rhs) :
-		kind(rhs.kind),
-		type(clone(rhs.type)) {}
-};
-
-struct CStruct
-{
-	Type type;
-	MemoryLayout cur_layout{};
-	vector<CMember> members;
-
-	explicit CStruct(Type &&struct_type) :
-		type(std::move(struct_type)) {}
-
-	size_t add(CMember &&m)
-	{
-		cur_layout.extend(compute_layout(m.type));
-		members.push_back(std::move(m));
-		return members.size() - 1;
-	}
-};
-
 
 // Generate C struct fields for all the variable members of `struct_` that come before the first
 // case member
@@ -6819,7 +7839,10 @@ void create_c_struct_trailing_vars(StructDefInstance const *struct_inst, CStruct
 
 CStruct create_c_struct(StructDefInstance *struct_inst)
 {
-	CStruct result{StructType(struct_inst)};
+	CStruct result{
+		mangle_type(StructType(struct_inst)),
+		mangle_constructor(StructType(struct_inst))
+	};
 
 	create_c_struct_initial_vars(struct_inst, nullopt, &result);
 
@@ -6838,37 +7861,12 @@ CStruct create_c_struct(StructDefInstance *struct_inst)
 	return result;
 }
 
-
-
-void generate_c_struct_def(CStruct const &cstruct, CBackend &backend)
-{
-	// In Myca, types can have zero alignment (e.g., Never), but this is not allowed in C.
-	size_t alignment = std::max(cstruct.cur_layout.alignment, size_t(1));
-	backend << "struct " << "__attribute__((aligned(" << alignment << "))) " << mangle_type(cstruct.type) << LineEnd << "{" << LineEnd;
-	backend.increase_indent();
-
-	for(CMember const &member: cstruct.members)
-	{
-		backend << member.type << " ";
-		member.kind | match
-		{
-			[&](CMemberNormal const &m) { backend << m.name; },
-			[&](CMemberConst const &m) { backend << m.name; },
-			[&](CMemberPadding) { backend << backend.new_tmp_var(); },
-		};
-		backend << ";" << LineEnd;
-	}
-
-	backend.decrease_indent();
-	backend << "};" << LineEnd;
-}
-
 void generate_c_struct_methods(CStruct const &cstruct, CBackend &backend)
 {
 	// Generate constructor
 	{
 		// Function header
-		backend << "struct " << mangle_type(cstruct.type) << " " << mangle_constructor(cstruct.type) << "(";
+		backend << "struct " << cstruct.name << " " << cstruct.constructor_name << "(";
 		bool first = true;
 		for(CMember const &member: cstruct.members)
 		{
@@ -6890,7 +7888,7 @@ void generate_c_struct_methods(CStruct const &cstruct, CBackend &backend)
 		// Function body
 		backend << "{" << LineEnd;
 		backend.increase_indent();
-			backend << "struct " << mangle_type(cstruct.type) << " __myca__object = {";
+			backend << "struct " << cstruct.name << " __myca__object = {";
 			backend.increase_indent();
 				backend << RangeFmt(cstruct.members, ", ", [&](CMember const &member)
 				{
@@ -6910,6 +7908,37 @@ void generate_c_struct_methods(CStruct const &cstruct, CBackend &backend)
 }
 
 
+//--------------------------------------------------------------------
+// Union types
+//--------------------------------------------------------------------
+void generate_c_union_type(UnionTypeDef const &union_, CBackend &backend)
+{
+	assert(union_.alternatives.size() <= 255);
+
+
+
+	backend << "struct " << mangle_union_type(union_) << LineEnd;
+	backend << "{" << LineEnd;
+	backend.increase_indent();
+		backend << "uint8_t __myca__discr;" << LineEnd;
+		backend << "union" << LineEnd;
+		backend << "{" << LineEnd;
+		backend.increase_indent();
+			for(size_t i = 0; i < union_.alternatives.size(); ++i)
+			{
+				Type const &alt = union_.alternatives[i];
+				backend << alt << " " << "__myca_alt" << i << ";" << LineEnd;
+			}
+		backend.decrease_indent();
+		backend << "};" << LineEnd;
+	backend.decrease_indent();
+	backend << "};" << LineEnd;
+}
+
+
+//--------------------------------------------------------------------
+// Procedures
+//--------------------------------------------------------------------
 void generate_c_proc_sig(ProcDefInstance const *proc, CBackend &backend)
 {
 	if(equiv(proc->type.ret, BuiltinType::UNIT))
@@ -6927,11 +7956,8 @@ void generate_c_proc_sig(ProcDefInstance const *proc, CBackend &backend)
 
 
 //--------------------------------------------------------------------
-// Whole module
-//--------------------------------------------------------------------
-
 // Dependency computation for structs
-//------------------------------------------------
+//--------------------------------------------------------------------
 using StructDepMap = unordered_map<StructDefInstance*, unordered_set<StructDefInstance*>>;
 
 void compute_struct_deps(Type const &type, StructDefInstance *cur_struct, StructDepMap &deps_by_struct)
@@ -6969,10 +7995,15 @@ void compute_struct_deps(Type const &type, StructDefInstance *cur_struct, Struct
 
 			compute_struct_deps(t.def->ret, cur_struct, deps_by_struct);
 		},
-		[&](KnownIntType const&) { assert(!"compute_struct_deps: KnownIntType"); },
-		[&](UnresolvedPath const&) { assert(!"compute_struct_deps: UnresolvedPath"); },
+		[&](UnionType const &t)
+		{
+			for(Type const &alt: t.def->alternatives)
+				compute_struct_deps(alt, cur_struct, deps_by_struct);
+		},
 		[&](UnappliedStructType const&) { assert(!"compute_struct_deps: UnappliedStructType"); },
 		[&](UnappliedProcType const&) { assert(!"compute_struct_deps: UnappliedProcType"); },
+		[&](UnappliedUnionType const&) { assert(!"compute_struct_deps: UnionType"); },
+		[&](UnresolvedPath const&) { assert(!"compute_struct_deps: UnresolvedPath"); },
 	};
 }
 
@@ -7035,8 +8066,9 @@ vector<StructDefInstance*> sort_structs_by_deps(vector<StructDefInstance*> const
 }
 
 
-// Finally generate some correctly ordered code
-//------------------------------------------------
+//--------------------------------------------------------------------
+// Whole module
+//--------------------------------------------------------------------
 void gather_concrete_instances(StructDef *struct_, vector<StructDefInstance*> &result)
 {
 	for(auto &[_, inst]: struct_->instances)
@@ -7150,6 +8182,12 @@ void generate_c(Module &mod, CBackend &backend)
 	{
 		generate_c_struct_methods(cstructs.at(inst), backend);
 		backend << LineEnd;
+	}
+
+	// Union types
+	for(UnionTypeDef const &union_: mod.union_types())
+	{
+		generate_c_union_type(union_, backend);
 	}
 
 	// Procedures

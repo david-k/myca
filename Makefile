@@ -16,5 +16,5 @@ build/examples/%: examples/%.myca RUN_ALWAYS
 	./build/myca $< -o $@.c
 	gcc -Wall -Wextra -Wpedantic $@.c -o $@
 
-run: build/examples/generics
+run: build/examples/union_types
 	./$<

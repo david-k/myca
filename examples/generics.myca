@@ -73,6 +73,15 @@ proc max(a: usize, b: usize) -> usize
 	return a;
 }
 
+/*proc max'T (a: T, b: T) -> T
+{
+	if a < b {
+		return b;
+	}
+
+	return a;
+}*/
+
 
 // &own is essentially equivalent to an r-value reference in C++
 /*proc Array.add(self &mut, val: &own T)
@@ -157,3 +166,18 @@ struct Player'T
 }
 
 typealias Vec2i = Vec2'i32;
+
+
+
+
+
+typealias Ptr'T = ^T;
+
+proc baz()
+{
+	let a = 5;
+	let b = true;
+
+	let pa: Ptr = &a;
+	let pb: Ptr = &b;
+}

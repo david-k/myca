@@ -355,7 +355,13 @@ public:
 		return a == b || a < b;
 	}
 
+	friend bool operator > (XInt64 a, XInt64 b)
+	{
+		return b < a;
+	}
+
 private:
 	bool m_is_negative;
 	uint64_t m_value;
 };
+
