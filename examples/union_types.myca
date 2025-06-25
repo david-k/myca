@@ -24,9 +24,33 @@ proc safe_divide(a: i32, b: i32) -> i32|ArithError
 	return a / b;
 }
 
+struct Option'T
+{
+	case Some{value: T},
+	case None{},
+}
+
+proc foo(v: Option'i32|ArithError) -> i32
+{
+	match v
+	{
+		case ArithError { return 23; }
+		case Option -> opt
+		{
+			match opt
+			{
+				case Option.Some -> v { return v.value; }
+				case Option.None { return -1; }
+			}
+		}
+	}
+}
+
 
 proc main() -> i32
 {
+	return foo(Option.Some(3));
+
 	let x = lookup(99);
 	let y: IntOrBool = false;
 

@@ -18,7 +18,10 @@ proc main() -> i32
 
 	puts(c"Hello?");
 
-	return id(foo()) + arr.buf[0] + (length(&arr) as i32); // 113
+	let opt = Option'i32.None();
+	let d = get_default(opt, ._default=42);
+
+	return id(foo()) + arr.buf[0] + (length(&arr) as i32) + d; // 155
 }
 
 
@@ -180,4 +183,14 @@ proc baz()
 
 	let pa: Ptr = &a;
 	let pb: Ptr = &b;
+}
+
+
+proc get_default'T(opt: Option'T, _default: T) -> T
+{
+	match opt
+	{
+		case Option.Some -> v { return v.value; }
+		case Option.None { return _default; }
+	}
 }

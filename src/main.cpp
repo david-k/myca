@@ -992,6 +992,15 @@ public:
 
 	void instantiate_int_vars(SemaContext const &ctx);
 
+	void take(TypeEnv &&other)
+	{
+		for(auto &[var, type]: other.m_mapping)
+			add_unique(var, std::move(type));
+
+		for(auto &[var, known_ints]: other.m_deferred_type_instantiations)
+			m_deferred_type_instantiations[var].insert(known_ints.begin(), known_ints.end());
+	}
+
 private:
 	unordered_map<VarType, Type> m_mapping;
 	unordered_map<VarType, unordered_set<KnownIntTypeVar>> m_deferred_type_instantiations;
@@ -1960,8 +1969,8 @@ struct StructDef;
 
 struct MemoryLayout
 {
-	size_t size;
-	size_t alignment;
+	size_t size{};
+	size_t alignment{};
 
 	size_t extend(MemoryLayout other)
 	{
@@ -3074,6 +3083,7 @@ inline optional<Token> try_consume(Parser &parser, Lexeme kind)
 //--------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------
+Type parse_prefix_type(Parser &parser, Module &mod);
 Type parse_type(Parser &parser, Module &mod);
 
 TypeArgList parse_type_arg_list(Parser &parser, Module &mod)
@@ -3090,7 +3100,7 @@ TypeArgList parse_type_arg_list(Parser &parser, Module &mod)
 		consume(parser, Lexeme::RIGHT_PAREN);
 	}
 	else
-		arg_list.args.push_back(parse_type(parser, mod));
+		arg_list.args.push_back(parse_prefix_type(parser, mod));
 
 	return arg_list;
 }
@@ -3114,8 +3124,6 @@ UnresolvedPath parse_path(string &&first_name, Parser &parser, Module &mod)
 
 	return path;
 }
-
-Type parse_type(Parser &parser, Module &mod);
 
 Type parse_prefix_type(Parser &parser, Module &mod)
 {
@@ -4452,10 +4460,19 @@ void unify(
 
 bool is_type_assignable(Type const &dest, Type const &src, SemaContext &ctx, Expr *src_expr = nullptr)
 {
-	TypeEnv subst;
 	try {
+		TypeEnv subst;
 		unify(dest, src, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, src_expr);
-		assert(subst.empty());
+		return true;
+	} catch (ParseError const&) {
+		return false;
+	}
+}
+
+bool is_type_assignable(Type const &dest, Type const &src, SemaContext &ctx, TypeEnv &subst)
+{
+	try {
+		unify(dest, src, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, nullptr);
 		return true;
 	} catch (ParseError const&) {
 		return false;
@@ -4504,9 +4521,20 @@ MemoryLayout compute_layout(Type const &type, unordered_set<StructDefInstance*> 
 			return compute_own_layout(inst, seen);
 		},
 		[&](ProcType const&) -> MemoryLayout { assert(!"compute_layout: ProcType"); },
-		[&](UnionType const&) -> MemoryLayout
+		[&](UnionType const &t) -> MemoryLayout
 		{
-			assert(!"compute_layout: UnionType: TODO");
+			UnionTypeDef const *union_ = t.canonical_def;
+			BuiltinType discr_type = smallest_int_type_for(XInt64(union_->alternatives.size()));
+
+			MemoryLayout layout;
+			layout.extend(get_layout(discr_type));
+
+			MemoryLayout alt_layouts;
+			for(Type const &alt: union_->alternatives)
+				alt_layouts.extend(compute_layout(alt, seen));
+
+			layout.extend(alt_layouts);
+			return layout;
 		},
 		[&](UnresolvedPath const&) -> MemoryLayout { assert(!"compute_layout: UnresolvedPath"); },
 		[&](UnappliedStructType const&) -> MemoryLayout { assert(!"compute_layout: UnappliedStructType"); },
@@ -5674,6 +5702,8 @@ void instantiate_types(Stmt &stmt, TypeEnv const &type_env, SemaContext &ctx)
 			{
 				instantiate_type(arm.type, type_env, ctx);
 				instantiate_types(*arm.stmt, type_env, ctx);
+				if(arm.capture)
+					instantiate_types(*arm.capture, type_env, ctx);
 			}
 		},
 	};
@@ -6147,6 +6177,7 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 			vector<Type> const &alts = left_t.canonical_def->alternatives;
 			optional<size_t> exact_match_idx;
 			optional<size_t> similar_match_idx;
+			TypeEnv alt_subst;
 			for(size_t i = 0; i < alts.size(); ++i)
 			{
 				Type const &alt = alts[i];
@@ -6167,6 +6198,7 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 				}
 				else
 				{
+					TypeEnv alt_subst_tmp;
 					if(equiv(alt, right))
 					{
 						if(exact_match_idx)
@@ -6174,12 +6206,13 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 
 						exact_match_idx = i;
 					}
-					else if(is_type_assignable(alt, right, ctx))
+					else if(is_type_assignable(alt, right, ctx, alt_subst_tmp))
 					{
 						if(similar_match_idx)
 							throw ParseError("Assignment to union type is ambiguous");
 
 						similar_match_idx = i;
+						alt_subst = std::move(alt_subst_tmp);
 					}
 				}
 			}
@@ -6187,6 +6220,7 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 			if(not exact_match_idx and not similar_match_idx)
 				throw ParseError("Assignment to union failed: no alternative found for type " + str(right));
 
+			subst.take(std::move(alt_subst));
 			if(right_expr)
 			{
 				*right_expr = Expr(UnionInitExpr(
@@ -6341,23 +6375,6 @@ ProcTypeDef get_callee_proc_type(Type const &callee_type)
 		{
 			return clone(*t.def);
 		},
-		[&](UnappliedStructType const &t) -> ProcTypeDef
-		{
-			assert(t.struct_->constructor_params);
-
-			TypeEnv env;
-			create_type_env(t, env);
-
-			vector<Parameter> callee_params = clone(*t.struct_->constructor_params);
-			for(Parameter &param: callee_params)
-				type_substitute(param.type, env);
-
-			return ProcTypeDef{
-				.type_params = {},
-				.params = std::move(callee_params),
-				.ret = clone(callee_type),
-			};
-		},
 		[&](UnappliedProcType const &t) -> ProcTypeDef
 		{
 			TypeEnv env;
@@ -6383,6 +6400,7 @@ ProcTypeDef get_callee_proc_type(Type const &callee_type)
 		}
 	};
 }
+
 
 
 bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
@@ -6438,7 +6456,22 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 		},
 		[&](UnappliedConstructorExpr &e)
 		{
-			expr.type = clone(e.struct_);
+			UnappliedStructType &struct_type = std::get<UnappliedStructType>(e.struct_);
+			assert(struct_type.struct_->constructor_params);
+
+			TypeEnv env;
+			create_type_env(struct_type, env);
+			vector<Parameter> callee_params = clone(*struct_type.struct_->constructor_params);
+			for(Parameter &param: callee_params)
+				type_substitute(param.type, env);
+
+			ProcTypeDef ctor_type{
+				.type_params = {},
+				.params = std::move(callee_params),
+				.ret = clone(e.struct_),
+			};
+
+			expr.type = UnappliedProcType(std::move(ctor_type), {});
 			return false;
 		},
 		[&](VarExpr &e)
@@ -6939,7 +6972,10 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 					unordered_set<StructDefInstance const*> matched_cases;
 					for(MatchArm &arm: s.arms)
 					{
-						instantiate_type(arm.type, {}, ctx);
+						TypeEnv subst;
+						unify(*s.expr.type, arm.type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT);
+						instantiate_type(arm.type, subst, ctx);
+
 						arm.type | match
 						{
 							[&](StructType const &t)
@@ -6968,7 +7004,10 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 					unordered_set<Type, std::hash<Type>, TypeEquiv> matched_cases;
 					for(MatchArm &arm: s.arms)
 					{
-						instantiate_type(arm.type, {}, ctx);
+						TypeEnv subst;
+						unify(*s.expr.type, arm.type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT);
+						instantiate_type(arm.type, subst, ctx);
+
 						if(optional<size_t> discr = t.canonical_def->contains(arm.type))
 							arm.discr = *discr;
 						else
