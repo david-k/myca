@@ -590,6 +590,9 @@ class Type;
 
 struct TypeArgList
 {
+	TypeArgList() = default;
+	explicit TypeArgList(Type &&type);
+
 	vector<Type> args;
 
 	size_t size() const;
@@ -744,14 +747,6 @@ struct UnionType
 	UnionTypeDef const *canonical_def = nullptr;
 };
 
-struct UnappliedUnionType
-{
-	UnappliedUnionType(UnionTypeDef &&type, TypeArgList &&type_args);
-
-	OwnPtr<UnionTypeDef> type;
-	TypeArgList type_args;
-};
-
 
 class Type : public variant
 <
@@ -764,7 +759,6 @@ class Type : public variant
 	UnionType,
 	UnappliedStructType,
 	UnappliedProcType,
-	UnappliedUnionType,
 	UnresolvedPath
 >
 {
@@ -829,9 +823,6 @@ UnappliedProcType::UnappliedProcType(ProcTypeDef &&type, TypeArgList &&type_args
 	type(std::make_unique<ProcTypeDef>(std::move(type))),
 	type_args(std::move(type_args)) {}
 
-UnappliedUnionType::UnappliedUnionType(UnionTypeDef &&type, TypeArgList &&type_args) :
-	type(std::make_unique<UnionTypeDef>(std::move(type))),
-	type_args(std::move(type_args)) {}
 
 TypeArgList clone(TypeArgList const &list);
 UnresolvedPath clone(UnresolvedPath const &path);
@@ -852,7 +843,6 @@ Type clone(Type const &type)
 		[&](UnionType const &t) -> Type { return t; },
 		[&](UnappliedStructType const &t) -> Type { return clone(t); },
 		[&](UnappliedProcType const &t) -> Type { return UnappliedProcType(clone(*t.type), clone(t.type_args)); },
-		[&](UnappliedUnionType const &t) -> Type { return UnappliedUnionType(clone(*t.type), clone(t.type_args)); },
 		[&](UnresolvedPath const &t) -> Type { return clone(t); },
 	};
 }
@@ -1060,6 +1050,11 @@ void TypeArgList::append(TypeArgList const &other)
 {
 	for(Type const &t: other)
 		args.push_back(clone(t));
+}
+
+TypeArgList::TypeArgList(Type &&type)
+{
+	args.push_back(std::move(type));
 }
 
 
@@ -1918,7 +1913,6 @@ namespace std
 				[&](::UnresolvedPath const&) { assert(!"hash<Type>: UnresolvedPath"); },
 				[&](::UnappliedStructType const&) { assert(!"hash<Type>: UnappliedStructType"); },
 				[&](::UnappliedProcType const&) { assert(!"hash<Type>: UnappliedProcType"); },
-				[&](::UnappliedUnionType const&) { assert(!"hash<Type>: UnappliedUnionType"); },
 			};
 
 			return h;
@@ -2011,6 +2005,29 @@ using Member = variant<
 
 using InstanceMember = variant<Parameter, struct StructDefInstance*>;
 
+using TypeDefInstance = variant<struct StructDefInstance*, UnionTypeDef const*>;
+
+namespace std
+{
+	template<>
+	struct hash<::TypeDefInstance>
+	{
+		size_t operator () (::TypeDefInstance const &v) const
+		{
+			size_t h = 0;
+			::combine_hashes(h, ::compute_hash(v.index()));
+			v | match
+			{
+				[&](struct StructDefInstance const *s) { ::combine_hashes(h, ::compute_hash(s)); },
+				[&](UnionTypeDef const *s) { ::combine_hashes(h, ::compute_hash(s)); },
+			};
+
+			return h;
+		}
+	};
+}
+
+
 struct StructDefInstance
 {
 	// Reference to the struct definition of which this is an instance of
@@ -2024,6 +2041,8 @@ struct StructDefInstance
 	optional<vector<Parameter>> constructor_params;
 	vector<InstanceMember> members;
 	bool own_args_concrete;
+
+	unordered_set<TypeDefInstance> type_deps;
 
 	bool sema_done = false;
 	// Available after semantic analysis (i.e., when `sema_done == true`)
@@ -2072,6 +2091,7 @@ struct StructDef
 	vector<TypeVarDef*> type_params;
 	Scope *scope; // Contains the struct's type and member variables
 	optional<vector<Parameter>> constructor_params; // Available iff the struct does not contain any `case`s
+	bool ctor_without_parens = false;
 
 	ParentRelation parent{};
 
@@ -2327,7 +2347,14 @@ private:
 struct ModuleListener
 {
 	virtual void new_struct_inst(StructDefInstance*) {}
+	virtual void new_union_inst(UnionTypeDef const*) {}
 	virtual void new_proc_inst(ProcDefInstance*) {}
+};
+
+struct UnionTypeInfo
+{
+	MemoryLayout layout;
+	unordered_set<TypeDefInstance> type_deps;
 };
 
 class Module
@@ -2387,7 +2414,29 @@ public:
 		// TODO Make sure each alternative has a unique type
 
 		auto res = m_canonical_union_types.insert(clone(union_));
-		return &*res.first;
+		UnionTypeDef const *def = &*res.first;
+
+		for(ModuleListener *l: m_listeners)
+			l->new_union_inst(def);
+
+		return def;
+	}
+
+	UnionTypeInfo* try_get_union_info(UnionTypeDef const *canonical_def)
+	{
+		auto it = m_union_type_info.find(canonical_def);
+		if(it == m_union_type_info.end())
+			return nullptr;
+
+		return &it->second;
+	}
+
+	UnionTypeInfo* set_union_info(UnionTypeDef const *canonical_def, UnionTypeInfo &&info)
+	{
+		auto res = m_union_type_info.emplace(canonical_def, std::move(info));
+		assert(res.second);
+
+		return &res.first->second;
 	}
 
 	vector<TopLevelItem>& items() { return m_items; }
@@ -2432,6 +2481,7 @@ private:
 
 	vector<OwnPtr<UnionTypeDef>> m_union_types;
 	unordered_set<UnionTypeDef, std::hash<UnionTypeDef>, UnionTypeEquiv> m_canonical_union_types;
+	unordered_map<UnionTypeDef const*, UnionTypeInfo> m_union_type_info;
 
 	vector<ModuleListener*> m_listeners;
 };
@@ -2556,10 +2606,10 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 		},
 		[&](UnionType const &t)
 		{
-			os << RangeFmt(t.def->alternatives, " | ", [&](Type const &t)
+			os << "(" << RangeFmt(t.def->alternatives, " | ", [&](Type const &t)
 			{
 				os << t;
-			});
+			}) << ")";
 		},
 		[&](UnresolvedPath const &p)
 		{
@@ -2584,13 +2634,6 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 			os << ") -> " << t.type->ret;
 			if(t.type_args.size())
 				os << "'(" << RangeFmt(t.type_args.args, ", ") << ")";
-		},
-		[&](UnappliedUnionType const &t)
-		{
-			os << RangeFmt(t.type->alternatives, " | ", [&](Type const &t)
-			{
-				os << t;
-			});
 		},
 	};
 
@@ -3163,7 +3206,7 @@ Type parse_prefix_type(Parser &parser, Module &mod)
 		case Lexeme::CIRCUMFLEX:
 		{
 			IsMutable mutability = try_consume(parser, Lexeme::MUT) ? IsMutable::YES : IsMutable::NO;
-			Type target_type = parse_type(parser, mod);
+			Type target_type = parse_prefix_type(parser, mod);
 			return PointerType(std::move(target_type), mutability);
 		}
 
@@ -3172,8 +3215,14 @@ Type parse_prefix_type(Parser &parser, Module &mod)
 			consume(parser, Lexeme::CIRCUMFLEX);
 			consume(parser, Lexeme::RIGHT_BRACKET);
 			IsMutable mutability = try_consume(parser, Lexeme::MUT) ? IsMutable::YES : IsMutable::NO;
-			Type element_type = parse_type(parser, mod);
+			Type element_type = parse_prefix_type(parser, mod);
 			return ManyPointerType(std::move(element_type), mutability);
+		}
+
+		case Lexeme::QUESTIONMARK:
+		{
+			Type type = parse_prefix_type(parser, mod);
+			return UnresolvedPath("Option", TypeArgList(std::move(type)), mod.global());
 		}
 
 		case Lexeme::PROC:
@@ -3777,37 +3826,41 @@ StructDef* parse_struct(Parser &parser, Module &mod, ParentRelation parent = NoP
 	struct_->type_params = parse_type_param_list(parser, mod);
 
 	// Parse members
-	consume(parser, Lexeme::LEFT_BRACE);
-	while(parser.peek() != Lexeme::RIGHT_BRACE)
+	if(try_consume(parser, Lexeme::LEFT_BRACE))
 	{
-		if(try_consume(parser, Lexeme::CASE))
+		while(parser.peek() != Lexeme::RIGHT_BRACE)
 		{
-			StructDef *case_member = parse_struct(parser, mod, CaseMemberOf(struct_, struct_->num_cases));
-			struct_->members.push_back(case_member);
-			struct_->num_cases += 1;
+			if(try_consume(parser, Lexeme::CASE))
+			{
+				StructDef *case_member = parse_struct(parser, mod, CaseMemberOf(struct_, struct_->num_cases));
+				struct_->members.push_back(case_member);
+				struct_->num_cases += 1;
+			}
+			else
+			{
+				string_view member_name = consume(parser, Lexeme::IDENTIFIER).text;
+				consume(parser, Lexeme::COLON);
+				VarDef *member_var = mod.scope()->declare_var(string(member_name), IsMutable::YES, VarKind::FIELD);
+				member_var->type = parse_type(parser, mod);
+
+				NullableOwnPtr<Expr> init_expr;
+				if(try_consume(parser, Lexeme::EQ))
+					init_expr = std::make_unique<Expr>(parse_expr(parser, mod));
+				struct_->members.push_back(Parameter(member_var->name, clone(*member_var->type), std::move(init_expr)));
+
+				if(struct_->num_cases == 0)
+					struct_->num_initial_var_members += 1;
+			}
+
+			if(parser.peek() != Lexeme::RIGHT_BRACE)
+				consume(parser, Lexeme::COMMA);
 		}
-		else
-		{
-			string_view member_name = consume(parser, Lexeme::IDENTIFIER).text;
-			consume(parser, Lexeme::COLON);
-			VarDef *member_var = mod.scope()->declare_var(string(member_name), IsMutable::YES, VarKind::FIELD);
-			member_var->type = parse_type(parser, mod);
-
-			NullableOwnPtr<Expr> init_expr;
-			if(try_consume(parser, Lexeme::EQ))
-				init_expr = std::make_unique<Expr>(parse_expr(parser, mod));
-			struct_->members.push_back(Parameter(member_var->name, clone(*member_var->type), std::move(init_expr)));
-
-			if(struct_->num_cases == 0)
-				struct_->num_initial_var_members += 1;
-		}
-
-		if(parser.peek() != Lexeme::RIGHT_BRACE)
-			consume(parser, Lexeme::COMMA);
+		consume(parser, Lexeme::RIGHT_BRACE);
 	}
-	consume(parser, Lexeme::RIGHT_BRACE);
-	mod.close_scope();
+	else
+		struct_->ctor_without_parens = true;
 
+	mod.close_scope();
 	if(is<NoParent>(parent))
 		init_constructor_params(struct_);
 
@@ -3850,7 +3903,7 @@ void parse_top_level_item(Parser &parser, Module &mod)
 			mod.add_item(proc);
 		} break;
 
-		default: throw ParseError("Invalid token while parsing top-level item: "s + str(parser.tok().kind));
+		default: throw ParseError("Invalid token while parsing top-level item: "s + str(tok.kind));
 	}
 }
 
@@ -4300,14 +4353,15 @@ optional<Type> common_int_type(Type const &a, Type const &b, SemaContext &ctx)
 
 bool equiv(Type const &a, Type const &b)
 {
+	if(a.index() != b.index())
+		return false;
+
 	return a | match
 	{
 		[&](BuiltinType const &ta)
 		{
-			if(BuiltinType const *tb = std::get_if<BuiltinType>(&b))
-				return ta == *tb;
-
-			return false;
+			BuiltinType const &tb = std::get<BuiltinType>(b);
+			return ta == tb;
 		},
 		[&](VarType const &ta)
 		{
@@ -4355,7 +4409,6 @@ bool equiv(Type const &a, Type const &b)
 		[&](UnresolvedPath const&) -> bool { assert(!"equiv: UnresolvedPath"); },
 		[&](UnappliedStructType const&) -> bool { assert(!"equiv: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> bool { assert(!"equiv: UnappliedProcType"); },
-		[&](UnappliedUnionType const&) -> bool { assert(!"equiv: UnappliedUnionType"); },
 	};
 }
 
@@ -4431,7 +4484,6 @@ bool operator < (Type const &a, Type const &b)
 		[&](UnresolvedPath const&) -> bool { assert(!"operator < (Type, Type): UnresolvedPath"); },
 		[&](UnappliedStructType const&) -> bool { assert(!"operator < (Type, Type): UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> bool { assert(!"operator < (Type, Type): UnappliedProcType"); },
-		[&](UnappliedUnionType const&) -> bool { assert(!"operator < (Type, Type): UnappliedUnionType"); },
 	};
 }
 
@@ -4469,10 +4521,10 @@ bool is_type_assignable(Type const &dest, Type const &src, SemaContext &ctx, Exp
 	}
 }
 
-bool is_type_assignable(Type const &dest, Type const &src, SemaContext &ctx, TypeEnv &subst)
+bool is_type_assignable(Type const &dest, Type const &src, SemaContext &ctx, TypeEnv &subst, Expr *src_expr = nullptr)
 {
 	try {
-		unify(dest, src, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, nullptr);
+		unify(dest, src, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, src_expr);
 		return true;
 	} catch (ParseError const&) {
 		return false;
@@ -4493,9 +4545,15 @@ bool is_expr_assignable(Type const &dest, Expr &src, SemaContext &ctx)
 }
 
 
-MemoryLayout compute_own_layout(StructDefInstance *struct_, unordered_set<StructDefInstance*> &seen);
+MemoryLayout compute_union_layout(UnionTypeDef const *union_, Module &mod, unordered_set<TypeDefInstance> &seen);
+MemoryLayout compute_own_layout(StructDefInstance *struct_, Module &mod, unordered_set<TypeDefInstance> &seen);
 
-MemoryLayout compute_layout(Type const &type, unordered_set<StructDefInstance*> &seen)
+MemoryLayout compute_layout(
+	Type const &type,
+	Module &mod,
+	unordered_set<TypeDefInstance> *parent_type_deps,
+	unordered_set<TypeDefInstance> &seen
+)
 {
 	return type | match
 	{
@@ -4514,36 +4572,51 @@ MemoryLayout compute_layout(Type const &type, unordered_set<StructDefInstance*> 
 		},
 		[&](StructType const &t)
 		{
+			if(parent_type_deps)
+				parent_type_deps->insert(t.inst);
+
 			StructDefInstance *inst = t.inst;
 			while(inst->outer_struct)
 				inst = inst->outer_struct;
 
-			return compute_own_layout(inst, seen);
+			return compute_own_layout(inst, mod, seen);
 		},
 		[&](ProcType const&) -> MemoryLayout { assert(!"compute_layout: ProcType"); },
 		[&](UnionType const &t) -> MemoryLayout
 		{
-			UnionTypeDef const *union_ = t.canonical_def;
-			BuiltinType discr_type = smallest_int_type_for(XInt64(union_->alternatives.size()));
+			if(parent_type_deps)
+				parent_type_deps->insert(t.canonical_def);
 
-			MemoryLayout layout;
-			layout.extend(get_layout(discr_type));
-
-			MemoryLayout alt_layouts;
-			for(Type const &alt: union_->alternatives)
-				alt_layouts.extend(compute_layout(alt, seen));
-
-			layout.extend(alt_layouts);
-			return layout;
+			return compute_union_layout(t.canonical_def, mod, seen);
 		},
 		[&](UnresolvedPath const&) -> MemoryLayout { assert(!"compute_layout: UnresolvedPath"); },
 		[&](UnappliedStructType const&) -> MemoryLayout { assert(!"compute_layout: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> MemoryLayout { assert(!"compute_layout: UnappliedProcType"); },
-		[&](UnappliedUnionType const&) -> MemoryLayout { assert(!"compute_layout: UnappliedUnionType"); },
 	};
 }
 
-MemoryLayout compute_own_layout(StructDefInstance *struct_, unordered_set<StructDefInstance*> &seen)
+MemoryLayout compute_union_layout(UnionTypeDef const *union_, Module &mod, unordered_set<TypeDefInstance> &seen)
+{
+	if(UnionTypeInfo *info = mod.try_get_union_info(union_))
+		return info->layout;
+
+	if(!seen.insert(union_).second)
+		throw ParseError("Cyclic type definition");
+
+	BuiltinType discr_type = smallest_int_type_for(XInt64(union_->alternatives.size()));
+
+	UnionTypeInfo info;
+	info.layout.extend(get_layout(discr_type));
+
+	MemoryLayout alt_layouts;
+	for(Type const &alt: union_->alternatives)
+		alt_layouts.extend(compute_layout(alt, mod, &info.type_deps, seen));
+
+	info.layout.extend(alt_layouts);
+	return mod.set_union_info(union_, std::move(info))->layout;
+}
+
+MemoryLayout compute_own_layout(StructDefInstance *struct_, Module &mod, unordered_set<TypeDefInstance> &seen)
 {
 	if(struct_->sema_done)
 		return *struct_->own_layout;
@@ -4569,7 +4642,7 @@ MemoryLayout compute_own_layout(StructDefInstance *struct_, unordered_set<Struct
 		InstanceMember &member = struct_->members[member_idx];
 		if(Parameter *var_member = std::get_if<Parameter>(&member))
 		{
-			MemoryLayout var_layout = compute_layout(var_member->type, seen);
+			MemoryLayout var_layout = compute_layout(var_member->type, mod, &struct_->type_deps, seen);
 			struct_->own_layout->extend(var_layout);
 		}
 		else
@@ -4587,7 +4660,7 @@ MemoryLayout compute_own_layout(StructDefInstance *struct_, unordered_set<Struct
 			InstanceMember &member = struct_->members[member_idx];
 			if(StructDefInstance **case_member = std::get_if<StructDefInstance*>(&member))
 			{
-				MemoryLayout case_layout = compute_own_layout(*case_member, seen);
+				MemoryLayout case_layout = compute_own_layout(*case_member, mod, seen);
 
 				case_members_layout.size = std::max(case_members_layout.size, case_layout.size);
 				case_members_layout.alignment = std::max(case_members_layout.alignment, case_layout.alignment);
@@ -4606,7 +4679,7 @@ MemoryLayout compute_own_layout(StructDefInstance *struct_, unordered_set<Struct
 		InstanceMember &member = struct_->members[member_idx];
 		if(Parameter *var_member = std::get_if<Parameter>(&member))
 		{
-			MemoryLayout var_layout = compute_layout(var_member->type, seen);
+			MemoryLayout var_layout = compute_layout(var_member->type, mod, &struct_->type_deps, seen);
 			struct_->own_layout->extend(var_layout);
 		}
 		else {
@@ -4619,10 +4692,10 @@ MemoryLayout compute_own_layout(StructDefInstance *struct_, unordered_set<Struct
 }
 
 
-MemoryLayout compute_layout(Type const &type)
+MemoryLayout compute_layout(Type const &type, Module &mod)
 {
-	unordered_set<StructDefInstance*> seen;
-	return compute_layout(type, seen);
+	unordered_set<TypeDefInstance> seen;
+	return compute_layout(type, mod, nullptr, seen);
 }
 
 void compute_type_layouts(Scope *scope)
@@ -4636,8 +4709,8 @@ void compute_type_layouts(Scope *scope)
 				if(not instance.is_concrete())
 					continue;
 
-				unordered_set<StructDefInstance*> seen;
-				compute_own_layout(&instance, seen);
+				unordered_set<TypeDefInstance> seen;
+				compute_own_layout(&instance, *scope->mod(), seen);
 			}
 		}
 	}
@@ -4646,6 +4719,12 @@ void compute_type_layouts(Scope *scope)
 void compute_type_layouts(Module &mod)
 {
 	compute_type_layouts(mod.global());
+
+	for(UnionTypeDef const &union_: mod.union_types())
+	{
+		unordered_set<TypeDefInstance> seen;
+		compute_union_layout(&union_, mod, seen);
+	}
 }
 
 
@@ -4700,12 +4779,6 @@ void type_substitute(Type &type, TypeEnv const &type_env)
 			}
 		},
 		[&](UnappliedProcType &t)
-		{
-			for(Type &arg: t.type_args)
-				type_substitute(arg, type_env);
-
-		},
-		[&](UnappliedUnionType &t)
 		{
 			for(Type &arg: t.type_args)
 				type_substitute(arg, type_env);
@@ -4819,7 +4892,14 @@ Expr resolve_path_to_expr(UnresolvedPath &&path, SemaContext &ctx)
 	{
 		[&](Type &type) -> Expr
 		{
-			return Expr(UnappliedConstructorExpr(std::move(type)), {});
+			Expr expr(UnappliedConstructorExpr(std::move(type)), {});
+			if(UnappliedStructType *struct_type = std::get_if<UnappliedStructType>(&type))
+			{
+				if(struct_type->struct_->ctor_without_parens)
+					expr = Expr(CallExpr(std::move(expr), {}), {});
+			}
+
+			return expr;
 		},
 		[&](Expr &expr)
 		{
@@ -4876,7 +4956,6 @@ void resolve_types(Type &type, SemaContext &ctx)
 		},
 		[&](UnappliedStructType&) {},
 		[&](UnappliedProcType&) {},
-		[&](UnappliedUnionType&) {},
 	};
 }
 
@@ -5186,7 +5265,6 @@ bool is_concrete(Type &type)
 		[&](UnresolvedPath const&) -> bool { assert(!"is_concrete: UnresolvedPath"); },
 		[&](UnappliedStructType const&) -> bool { assert(!"is_concrete: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> bool { assert(!"is_concrete: UnappliedProcType"); },
-		[&](UnappliedUnionType const&) -> bool { assert(!"is_concrete: UnappliedUnionType"); },
 	};
 }
 
@@ -5252,16 +5330,6 @@ bool is_fully_instantiated(Type const &type)
 			return true;
 		},
 		[&](UnappliedProcType const &t)
-		{
-			for(Type const &arg: t.type_args)
-			{
-				if(not is_fully_instantiated(arg))
-					return false;
-			}
-
-			return true;
-		},
-		[&](UnappliedUnionType const &t)
 		{
 			for(Type const &arg: t.type_args)
 			{
@@ -5540,10 +5608,6 @@ void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx)
 		{
 			type = instantiate_proc_type(*t.type, type_env, ctx);
 		},
-		[&](UnappliedUnionType &t)
-		{
-			type = instantiate_union_type(*t.type, type_env, ctx);
-		},
 		[&](UnresolvedPath&) { assert(!"instantiate_type: Type: UnresolvedPath"); },
 	};
 }
@@ -5747,16 +5811,6 @@ bool type_var_occurs_in(TypeDeductionVar var, Type const &type)
 			return false;
 		},
 		[&](UnappliedProcType const &t)
-		{
-			for(Type const &arg: t.type_args)
-			{
-				if(type_var_occurs_in(var, arg))
-					return true;
-			}
-
-			return false;
-		},
-		[&](UnappliedUnionType const &t)
 		{
 			for(Type const &arg: t.type_args)
 			{
@@ -6088,7 +6142,6 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 
 						unify(*left_t.target_type, *right_t->target_type, subst, ctx, UnificationMode::POINTER_ASSIGNMENT);
 					}
-					else if(equiv(right, Type(BuiltinType::NULL_)) and mode == UnificationMode::VALUE_ASSIGNMENT) {}
 					else
 						throw ParseError("Unification failed: expected pointer type");
 				} break;
@@ -6127,7 +6180,6 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 
 						unify(*left_t.element_type, *right_t->element_type, subst, ctx, UnificationMode::POINTER_ASSIGNMENT);
 					}
-					else if(equiv(right, Type(BuiltinType::NULL_)) and mode == UnificationMode::VALUE_ASSIGNMENT) {}
 					else
 						throw ParseError("Unification failed: expected many pointer type");
 				} break;
@@ -6175,8 +6227,7 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 			assert(mode == UnificationMode::VALUE_ASSIGNMENT);
 
 			vector<Type> const &alts = left_t.canonical_def->alternatives;
-			optional<size_t> exact_match_idx;
-			optional<size_t> similar_match_idx;
+			optional<size_t> match_idx;
 			TypeEnv alt_subst;
 			for(size_t i = 0; i < alts.size(); ++i)
 			{
@@ -6187,11 +6238,11 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 					BuiltinType alt_int_type = std::get<BuiltinType>(alt);
 					if(integer_assignable_to(alt_int_type, right_known_int->first) and integer_assignable_to(alt_int_type, right_known_int->second))
 					{
-						if(exact_match_idx or similar_match_idx)
+						if(match_idx)
 							throw ParseError("Assignment of integer value to union type is ambiguous");
 
 						subst.add_unique(std::get<VarType>(right), clone(alt));
-						similar_match_idx = i;
+						match_idx = i;
 					}
 					else
 						throw ParseError("Assignment to union failed: no alternative found for type " + str(right));
@@ -6199,38 +6250,27 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 				else
 				{
 					TypeEnv alt_subst_tmp;
-					if(equiv(alt, right))
+					if(is_type_assignable(alt, right, ctx, alt_subst_tmp, right_expr))
 					{
-						if(exact_match_idx)
+						if(match_idx)
 							throw ParseError("Assignment to union type is ambiguous");
 
-						exact_match_idx = i;
-					}
-					else if(is_type_assignable(alt, right, ctx, alt_subst_tmp))
-					{
-						if(similar_match_idx)
-							throw ParseError("Assignment to union type is ambiguous");
-
-						similar_match_idx = i;
+						match_idx = i;
 						alt_subst = std::move(alt_subst_tmp);
 					}
 				}
 			}
 
-			if(not exact_match_idx and not similar_match_idx)
+			if(not match_idx)
 				throw ParseError("Assignment to union failed: no alternative found for type " + str(right));
 
 			subst.take(std::move(alt_subst));
 			if(right_expr)
 			{
-				*right_expr = Expr(UnionInitExpr(
-					exact_match_idx ? *exact_match_idx : *similar_match_idx,
-					std::move(*right_expr)
-				), {});
+				*right_expr = Expr(UnionInitExpr(*match_idx, std::move(*right_expr)), {});
 				right_expr->type = clone(left);
 			}
 		},
-		[&](UnappliedUnionType const&) { assert(!"unify: UnappliedUnionType: TODO"); },
 
 		// Already handled above
 		[&](StructType const&) { UNREACHABLE; },
@@ -6326,7 +6366,6 @@ bool is_cast_ok(Type const &dest_type, Type const &src_type, SemaContext &ctx)
 		[&](UnionType const&) -> bool { assert(!"is_cast_ok: UnionType: TODO"); },
 		[&](UnappliedStructType const&) -> bool { assert(!"is_cast_ok: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> bool { assert(!"is_cast_ok: UnappliedProcType"); },
-		[&](UnappliedUnionType const&) -> bool { assert(!"is_cast_ok: UnappliedUnionType"); },
 		[&](UnresolvedPath const&) -> bool { assert(!"is_cast_ok: UnresolvedPath"); },
 	};
 }
@@ -7132,6 +7171,7 @@ public:
 		*this << "#include <stdbool.h>" << LineEnd;
 		*this << "#include <limits.h>" << LineEnd;
 		*this << "#include <assert.h>" << LineEnd;
+		*this << "#include <errno.h>" << LineEnd;
 		*this << LineEnd;
 
 		// In Myca, `c_char` is defined to be an alias for `i8`.
@@ -7170,6 +7210,10 @@ public:
 
 		*this << LineEnd;
 		*this << "typedef struct Never { char _; } Never;" << LineEnd;
+		*this << LineEnd;
+
+		*this << LineEnd;
+		*this << "int get_errno() { return errno; }" << LineEnd;
 		*this << LineEnd;
 	}
 
@@ -7323,7 +7367,6 @@ string mangle_type_segment(Type const &type)
 
 		[&](UnappliedStructType const&) -> string { assert(!"mangle_type_segment: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> string { assert(!"mangle_type_segment: UnappliedProcType"); },
-		[&](UnappliedUnionType const&) -> string { assert(!"mangle_type_segment: UnappliedUnionType"); },
 		[&](UnresolvedPath const&) -> string { assert(!"mangle_type_segment: UnresolvedPath"); },
 	};
 }
@@ -7400,9 +7443,9 @@ struct CStruct
 		name(name),
 		constructor_name(constructor_name) {}
 
-	size_t add(CMember &&m)
+	size_t add(CMember &&m, Module &mod)
 	{
-		cur_layout.extend(compute_layout(m.type));
+		cur_layout.extend(compute_layout(m.type, mod));
 		members.push_back(std::move(m));
 		return members.size() - 1;
 	}
@@ -7426,6 +7469,9 @@ void generate_c_struct_def(CStruct const &cstruct, CBackend &backend)
 		};
 		backend << ";" << LineEnd;
 	}
+
+	if(cstruct.members.empty())
+		backend << "char dummy;" << LineEnd;
 
 	backend.decrease_indent();
 	backend << "};" << LineEnd;
@@ -7488,7 +7534,6 @@ string generate_c_to_str(Type const &type)
 
 		[&](UnappliedStructType const&) -> string { assert(!"generate_c_to_str: UnappliedStructType"); },
 		[&](UnappliedProcType const&) -> string { assert(!"generate_c_to_str: UnappliedProcType"); },
-		[&](UnappliedUnionType const&) -> string { assert(!"generate_c_to_str: UnappliedUnionType"); },
 		[&](UnresolvedPath const&) -> string { assert(!"generate_c_to_str: UnresolvedPath"); },
 	};
 }
@@ -7839,28 +7884,30 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 // case member
 void create_c_struct_initial_vars(StructDefInstance const *struct_inst, optional<size_t> child_case_idx, CStruct *result)
 {
+	Module &mod = *struct_inst->def->scope->mod();
 	if(struct_inst->outer_struct)
 		create_c_struct_initial_vars(struct_inst->outer_struct, struct_inst->def->get_case_idx(), result);
 
 	if(struct_inst->discriminator_type)
 		// REVISIT: When the struct contains multiple nested case members then the name is not
 		// unique anymore
-		result->add(CMember("__myca__discr", child_case_idx, Type(*struct_inst->discriminator_type)));
+		result->add(CMember("__myca__discr", child_case_idx, Type(*struct_inst->discriminator_type)), mod);
 
 	for(InstanceMember const &member: struct_inst->initial_var_members())
 	{
 		Parameter const &param = std::get<Parameter>(member);
-		result->add(CMember(param.name, clone(param.type)));
+		result->add(CMember(param.name, clone(param.type)), mod);
 	}
 }
 
 // Generate C struct fields for all the variable members of `struct_inst` that come after its case members
 void create_c_struct_trailing_vars(StructDefInstance const *struct_inst, CStruct *result)
 {
+	Module &mod = *struct_inst->def->scope->mod();
 	for(InstanceMember const &member: struct_inst->trailing_var_members())
 	{
 		Parameter const &param = std::get<Parameter>(member);
-		result->add(CMember(param.name, clone(param.type)));
+		result->add(CMember(param.name, clone(param.type)), mod);
 	}
 
 	if(struct_inst->outer_struct)
@@ -7869,7 +7916,7 @@ void create_c_struct_trailing_vars(StructDefInstance const *struct_inst, CStruct
 		if(additional_padding)
 		{
 			for(size_t i = 0; i < additional_padding; ++i)
-				result->add(CMember(BuiltinType::U8));
+				result->add(CMember(BuiltinType::U8), mod);
 		}
 
 		create_c_struct_trailing_vars(struct_inst->outer_struct, result);
@@ -7878,6 +7925,7 @@ void create_c_struct_trailing_vars(StructDefInstance const *struct_inst, CStruct
 
 CStruct create_c_struct(StructDefInstance *struct_inst)
 {
+	Module &mod = *struct_inst->def->scope->mod();
 	CStruct result{
 		mangle_type(StructType(struct_inst)),
 		mangle_constructor(StructType(struct_inst))
@@ -7888,7 +7936,7 @@ CStruct create_c_struct(StructDefInstance *struct_inst)
 	if(struct_inst->cases_layout)
 	{
 		for(size_t i = 0; i < struct_inst->cases_layout->size; ++i)
-			result.add(CMember(BuiltinType::U8));
+			result.add(CMember(BuiltinType::U8), mod);
 	}
 
 	create_c_struct_trailing_vars(struct_inst, &result);
@@ -7995,120 +8043,49 @@ void generate_c_proc_sig(ProcDefInstance const *proc, CBackend &backend)
 
 
 //--------------------------------------------------------------------
-// Dependency computation for structs
+// Whole module
 //--------------------------------------------------------------------
-using StructDepMap = unordered_map<StructDefInstance*, unordered_set<StructDefInstance*>>;
-
-void compute_struct_deps(Type const &type, StructDefInstance *cur_struct, StructDepMap &deps_by_struct)
-{
-	type | match
-	{
-		[&](BuiltinType const&) {},
-		[&](VarType const&) {},
-		[&](PointerType const&) {},
-		[&](ManyPointerType const&) {},
-		[&](StructType const &t)
-		{
-			for(InstanceMember const &member: t.inst->members)
-			{
-				member | match
-				{
-					[&](Parameter const &var_member)
-					{
-						compute_struct_deps(var_member.type, cur_struct, deps_by_struct);
-					},
-					[&](StructDefInstance *case_member)
-					{
-						compute_struct_deps(StructType(case_member), case_member, deps_by_struct);
-					},
-				};
-			}
-
-			if(t.inst != cur_struct)
-				deps_by_struct[cur_struct].insert(t.inst);
-		},
-		[&](ProcType const &t)
-		{
-			for(Parameter const &p: t.def->params)
-				compute_struct_deps(p.type, cur_struct, deps_by_struct);
-
-			compute_struct_deps(t.def->ret, cur_struct, deps_by_struct);
-		},
-		[&](UnionType const &t)
-		{
-			for(Type const &alt: t.def->alternatives)
-				compute_struct_deps(alt, cur_struct, deps_by_struct);
-		},
-		[&](UnappliedStructType const&) { assert(!"compute_struct_deps: UnappliedStructType"); },
-		[&](UnappliedProcType const&) { assert(!"compute_struct_deps: UnappliedProcType"); },
-		[&](UnappliedUnionType const&) { assert(!"compute_struct_deps: UnionType"); },
-		[&](UnresolvedPath const&) { assert(!"compute_struct_deps: UnresolvedPath"); },
-	};
-}
-
-StructDepMap compute_struct_deps_mapping(vector<StructDefInstance*> const &structs)
-{
-	StructDepMap deps_by_struct;
-	for(StructDefInstance *struct_: structs)
-		compute_struct_deps(StructType(struct_), struct_, deps_by_struct);
-
-	return deps_by_struct;
-}
-
-void struct_deps_to_dot(StructDepMap const &deps_by_struct, std::ostream &&out)
-{
-	out << "digraph {\n";
-	for(auto &[inst, deps]: deps_by_struct)
-	{
-		for(StructDefInstance *dep: deps)
-			out << "  " << mangle_type(StructType(inst)) << " -> " << mangle_type(StructType(dep)) << ";\n";
-
-		out << "  " << mangle_type(StructType(inst)) << " [label=\"" << Type(StructType(inst)) << "\"];\n";
-	}
-	out << "}\n";
-}
-
-void _sort_structs_by_deps(
-	StructDefInstance *struct_,
-	StructDepMap const &deps_by_struct,
-	vector<StructDefInstance*> &result,
-	unordered_set<StructDefInstance*> &visited
+void _sort_types_by_deps(
+	TypeDefInstance type,
+	vector<TypeDefInstance> &result,
+	unordered_set<TypeDefInstance> &visited,
+	Module &mod
 )
 {
 	// We assume the semantic analysis would already have detected any dependency cycles
-	auto res = visited.insert(struct_);
+	auto res = visited.insert(type);
 	if(!res.second)
 		return;
 
-	auto deps = deps_by_struct.find(struct_);
-	if(deps != deps_by_struct.end())
+	unordered_set<TypeDefInstance> const &deps = type | match
 	{
-		for(StructDefInstance *dep: deps->second)
-			_sort_structs_by_deps(dep, deps_by_struct, result, visited);
-	}
+		[&](StructDefInstance const *inst) -> unordered_set<TypeDefInstance> const&
+		{
+			return inst->type_deps;
+		},
+		[&](UnionTypeDef const *union_) -> unordered_set<TypeDefInstance> const&
+		{
+			return mod.try_get_union_info(union_)->type_deps;
+		},
+	};
 
-	result.push_back(struct_);
+	for(TypeDefInstance dep: deps)
+		_sort_types_by_deps(dep, result, visited, mod);
+
+	result.push_back(type);
 }
 
-vector<StructDefInstance*> sort_structs_by_deps(vector<StructDefInstance*> const &structs)
+vector<TypeDefInstance> sort_types_by_deps(vector<TypeDefInstance> const &types, Module &mod)
 {
-	StructDepMap deps_by_struct = compute_struct_deps_mapping(structs);
-
-	struct_deps_to_dot(deps_by_struct, std::ofstream("struct_deps.dot"));
-
-	vector<StructDefInstance*> result;
-	unordered_set<StructDefInstance*> visited;
-	for(StructDefInstance *struct_: structs)
-		_sort_structs_by_deps(struct_, deps_by_struct, result, visited);
+	vector<TypeDefInstance> result;
+	unordered_set<TypeDefInstance> visited;
+	for(TypeDefInstance type: types)
+		_sort_types_by_deps(type, result, visited, mod);
 
 	return result;
 }
 
-
-//--------------------------------------------------------------------
-// Whole module
-//--------------------------------------------------------------------
-void gather_concrete_instances(StructDef *struct_, vector<StructDefInstance*> &result)
+void gather_concrete_instances(StructDef *struct_, vector<TypeDefInstance> &result)
 {
 	for(auto &[_, inst]: struct_->instances)
 	{
@@ -8130,12 +8107,18 @@ struct NewInstanceListener : ModuleListener
 		structs.push_back(inst);
 	}
 
+	virtual void new_union_inst(UnionTypeDef const *def) override
+	{
+		unions.push_back(def);
+	}
+
 	virtual void new_proc_inst(ProcDefInstance *inst) override
 	{
 		procs.push_back(inst);
 	}
 
 	vector<StructDefInstance*> structs;
+	vector<UnionTypeDef const*> unions;
 	vector<ProcDefInstance*> procs;
 };
 
@@ -8163,7 +8146,7 @@ void generate_c(Module &mod, CBackend &backend)
 
 	SemaContext ctx(mod);
 
-	vector<StructDefInstance*> structs;
+	vector<TypeDefInstance> types;
 	vector<ConcreteProcInstance> procs;
 	for(TopLevelItem item: mod.items())
 	{
@@ -8181,20 +8164,27 @@ void generate_c(Module &mod, CBackend &backend)
 						procs.push_back(ConcreteProcInstance(&inst, ctx));
 				}
 			},
-			[&](StructDef *def) { gather_concrete_instances(def, structs); },
+			[&](StructDef *def) { gather_concrete_instances(def, types); },
 			[&](AliasDef*) {},
 		};
 	}
+
+	for(UnionTypeDef const &union_: mod.union_types())
+		types.push_back(&union_);
 
 	while(listener.structs.size() || listener.procs.size())
 	{
 		vector<StructDefInstance*> new_structs = std::move(listener.structs);
 		vector<ProcDefInstance*> new_procs = std::move(listener.procs);
 		listener.structs = {};
+		listener.unions = {};
 		listener.procs = {};
 
 		for(StructDefInstance *new_struct: listener.structs)
-			structs.push_back(new_struct);
+			types.push_back(new_struct);
+
+		for(UnionTypeDef const *new_union: listener.unions)
+			types.push_back(new_union);
 
 		for(ProcDefInstance *new_proc: listener.procs)
 		{
@@ -8205,28 +8195,40 @@ void generate_c(Module &mod, CBackend &backend)
 
 	mod.remove_listener(&listener);
 
-	// Structures
-	vector<StructDefInstance*> sorted_structs = sort_structs_by_deps(structs);
+	// Type definitions
+	vector<TypeDefInstance> sorted_types = sort_types_by_deps(types, mod);
 	unordered_map<StructDefInstance*, CStruct> cstructs;
-	for(StructDefInstance *inst: sorted_structs)
+	for(TypeDefInstance type: sorted_types)
 	{
-		CStruct cstruct = create_c_struct(inst);
-		generate_c_struct_def(cstruct, backend);
-		backend << LineEnd;
+		type | match
+		{
+			[&](StructDefInstance *inst)
+			{
+				CStruct cstruct = create_c_struct(inst);
+				generate_c_struct_def(cstruct, backend);
+				backend << LineEnd;
 
-		cstructs.emplace(inst, std::move(cstruct));
+				cstructs.emplace(inst, std::move(cstruct));
+			},
+			[&](UnionTypeDef const *union_)
+			{
+				generate_c_union_type(*union_, backend);
+			},
+		};
 	}
 
-	for(StructDefInstance *inst: sorted_structs)
+	// Type method definitions
+	for(TypeDefInstance type: sorted_types)
 	{
-		generate_c_struct_methods(cstructs.at(inst), backend);
-		backend << LineEnd;
-	}
-
-	// Union types
-	for(UnionTypeDef const &union_: mod.union_types())
-	{
-		generate_c_union_type(union_, backend);
+		type | match
+		{
+			[&](StructDefInstance *inst)
+			{
+				generate_c_struct_methods(cstructs.at(inst), backend);
+				backend << LineEnd;
+			},
+			[&](UnionTypeDef const*) {},
+		};
 	}
 
 	// Procedures

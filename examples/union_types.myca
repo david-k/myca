@@ -13,6 +13,7 @@ proc lookup(idx: i32) -> IntOrBool
 struct ArithError
 {
 	case DivisionByZero{},
+	case Overflow{},
 }
 
 proc safe_divide(a: i32, b: i32) -> i32|ArithError
@@ -47,17 +48,28 @@ proc foo(v: Option'i32|ArithError) -> i32
 }
 
 
+
+struct FileNotFound {_:i8 = 0}
+struct NoPermission {_:i8 = 0}
+
+typealias IOError = FileNotFound
+                  | NoPermission;
+
+proc read() -> i32 | IOError
+{
+	return FileNotFound(); // Nested union type
+}
+
+
 proc main() -> i32
 {
-	return foo(Option.Some(3));
-
 	let x = lookup(99);
 	let y: IntOrBool = false;
 
 	match safe_divide(23, 4)
 	{
 		case i32 -> v {
-			return v;
+			return v + foo(Option.Some(3)); // 8
 		}
 		case ArithError {
 			return -1;

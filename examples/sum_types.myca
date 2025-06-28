@@ -67,6 +67,18 @@ proc increase_jint(json: ^mut Json)
 		}
 		case Json.Array {}
 	}
+
+	/*if json^
+		is Json.Null {}
+		is Json.Bool {}
+		is Json.Int -> v &mut { v^.value := v^.value + 1; }
+		is Json.Array {}
+
+	if json^ is Json.Null {
+
+	} else {
+
+	}*/
 }
 
 
