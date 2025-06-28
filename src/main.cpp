@@ -295,6 +295,7 @@ enum class Lexeme
 	PROC,
 	STRUCT,
 	CASE,
+	IMPLICIT,
 
 	IF,
 	ELSE,
@@ -361,6 +362,7 @@ string_view str(Lexeme tok)
 		case Lexeme::PROC: return "PROC";
 		case Lexeme::STRUCT: return "STRUCT";
 		case Lexeme::CASE: return "CASE";
+		case Lexeme::IMPLICIT: return "IMPLICIT";
 
 		case Lexeme::IF: return "IF";
 		case Lexeme::ELSE: return "ELSE";
@@ -470,6 +472,7 @@ unordered_map<string_view, Lexeme> const KEYWORDS = {
 	{"proc", Lexeme::PROC},
 	{"struct", Lexeme::STRUCT},
 	{"case", Lexeme::CASE},
+	{"implicit", Lexeme::IMPLICIT},
 	{"if", Lexeme::IF},
 	{"else", Lexeme::ELSE},
 	{"while", Lexeme::WHILE},
@@ -2092,6 +2095,7 @@ struct StructDef
 	Scope *scope; // Contains the struct's type and member variables
 	optional<vector<Parameter>> constructor_params; // Available iff the struct does not contain any `case`s
 	bool ctor_without_parens = false;
+	StructDef *implicit_ctor = nullptr;
 
 	ParentRelation parent{};
 
@@ -3832,9 +3836,18 @@ StructDef* parse_struct(Parser &parser, Module &mod, ParentRelation parent = NoP
 		{
 			if(try_consume(parser, Lexeme::CASE))
 			{
+				bool implicit_ctor = (bool)try_consume(parser, Lexeme::IMPLICIT);
 				StructDef *case_member = parse_struct(parser, mod, CaseMemberOf(struct_, struct_->num_cases));
 				struct_->members.push_back(case_member);
 				struct_->num_cases += 1;
+
+				if(implicit_ctor)
+				{
+					if(struct_->implicit_ctor)
+						throw ParseError("Only one case member can be marked implicit");
+
+					struct_->implicit_ctor = case_member;
+				}
 			}
 			else
 			{
@@ -3863,6 +3876,12 @@ StructDef* parse_struct(Parser &parser, Module &mod, ParentRelation parent = NoP
 	mod.close_scope();
 	if(is<NoParent>(parent))
 		init_constructor_params(struct_);
+
+	if(struct_->implicit_ctor)
+	{
+		if(not struct_->implicit_ctor->constructor_params or struct_->implicit_ctor->constructor_params->size() != 1)
+			throw ParseError("Only one case members with exactly one element can be marked implicit");
+	}
 
 	return struct_;
 }
@@ -6039,60 +6058,154 @@ bool try_unify_integer_types(Type const &left, Type const &right, TypeEnv &subst
 
 // Unify struct types
 //------------------------------------------------
+template<typename T>
+vector<T> singleton_vec(T &&t)
+{
+	vector<T> vec;
+	vec.push_back(std::move(t));
+	return vec;
+}
+
+bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint);
 
 // Handle unification for both StructType and UnappliedStructPath
-bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaContext &ctx, UnificationMode mode)
+bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaContext &ctx, UnificationMode mode, Expr *right_expr)
 {
 	std::unique_ptr<StructTypeParentClimber> dest_struct_climber = mk_parent_climber(dest);
 	if(not dest_struct_climber)
 		return false;
 
+	pair<StructDef const*, TypeArgList const*> dest_struct = *dest_struct_climber->next();
+
 	// TODO(performance): Fast-path if both `src` and `dest` are StructTypes
 
 	std::unique_ptr<StructTypeParentClimber> src_struct_climber = mk_parent_climber(src);
-	if(not src_struct_climber)
-		throw ParseError("Unification failed: Cannot assign "s + str(src) + " to " + str(dest));
-
-	optional<pair<StructDef const*, TypeArgList const*>> dest_spec = dest_struct_climber->next();
-	optional<pair<StructDef const*, TypeArgList const*>> src_spec = src_struct_climber->next();
-
-	if(src_spec->first != dest_spec->first)
+	if(src_struct_climber)
 	{
-		if(mode == UnificationMode::COMMON_TYPE)
-			throw ParseError("Unification failed: Expected "s + str(dest) + ", got " + str(src));
+		optional<pair<StructDef const*, TypeArgList const*>> dest_spec = dest_struct;
+		optional<pair<StructDef const*, TypeArgList const*>> src_spec = src_struct_climber->next();
 
-		while(true)
+		if(src_spec->first != dest_spec->first)
 		{
-			if(src_spec->first->is_case_member_of(dest_spec->first))
+			if(mode == UnificationMode::COMMON_TYPE)
+				throw ParseError("Unification failed: Expected "s + str(dest) + ", got " + str(src));
+
+			while(true)
 			{
+				if(src_spec->first->is_case_member_of(dest_spec->first))
+				{
+					src_spec = src_struct_climber->next();
+					break;
+				}
+
 				src_spec = src_struct_climber->next();
-				break;
+				if(not src_spec)
+					throw ParseError("Unification failed: Cannot assign "s + str(src) + " to " + str(dest));
+			}
+		}
+		assert(dest_spec->first == src_spec->first);
+
+		while(dest_spec && src_spec)
+		{
+			assert(dest_spec->second->size() == src_spec->second->size());
+
+			for(size_t i = 0; i < dest_spec->second->size(); ++i)
+			{
+				Type const &dest_arg = dest_spec->second->args[i];
+				Type const &src_arg = src_spec->second->args[i];
+				unify(dest_arg, src_arg, subst, ctx, UnificationMode::EQUAL);
 			}
 
+			dest_spec = dest_struct_climber->next();
 			src_spec = src_struct_climber->next();
-			if(not src_spec)
-				throw ParseError("Unification failed: Cannot assign "s + str(src) + " to " + str(dest));
 		}
-	}
-	assert(dest_spec->first == src_spec->first);
+		assert(not dest_spec && not src_spec);
 
-	while(dest_spec && src_spec)
+		return true;
+	}
+
+	if(mode == UnificationMode::VALUE_ASSIGNMENT && dest_struct.first->implicit_ctor)
 	{
-		assert(dest_spec->second->size() == src_spec->second->size());
-
-		for(size_t i = 0; i < dest_spec->second->size(); ++i)
+		if(StructType const *st = std::get_if<StructType>(&dest))
 		{
-			Type const &dest_arg = dest_spec->second->args[i];
-			Type const &src_arg = src_spec->second->args[i];
-			unify(dest_arg, src_arg, subst, ctx, UnificationMode::EQUAL);
+			size_t ctor_case_idx = dest_struct.first->implicit_ctor->get_case_idx();
+			StructDefInstance *ctor_inst = std::get<StructDefInstance*>(st->inst->case_members()[ctor_case_idx]);
+
+			unify(ctor_inst->constructor_params->at(0).type, src, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, right_expr);
+
+			if(right_expr)
+			{
+				assert(ctor_inst->def->type_params.empty() && "TODO");
+
+				Type ctor_struct_type{StructType(ctor_inst)};
+				vector<Argument> ctor_args; ctor_args.push_back(Argument{
+					.expr = std::make_unique<Expr>(std::move(*right_expr)),
+					.name = {},
+					.param_idx = 0
+				});
+
+				Expr ctor_expr(ConstructorExpr(ctor_inst), {});
+				ProcTypeDef ctor_type_def{
+					.type_params = {},
+					.params = singleton_vec(clone(ctor_inst->constructor_params->at(0))),
+					.ret = clone(ctor_struct_type),
+				};
+				ProcType ctor_type{
+					.def = ctx.mod().add_proc_type(clone(ctor_type_def)),
+					.canonical_def = ctx.mod().get_canonical(ctor_type_def),
+				};
+				ctor_expr.type = Type(ctor_type);
+
+				Expr call_expr(CallExpr(std::move(ctor_expr), std::move(ctor_args)), {});
+				call_expr.type = clone(ctor_struct_type);
+
+				*right_expr = Expr(AsExpr(std::move(call_expr), clone(dest)), {});
+				right_expr->type = clone(dest);
+			}
+
+			return true;
 		}
+		else if(UnappliedStructType const *st = std::get_if<UnappliedStructType>(&dest))
+		{
+			Parameter param = clone(st->struct_->implicit_ctor->constructor_params->at(0));
+			TypeEnv ctor_env;
+			for(size_t i = 0; i < st->struct_->type_params.size(); ++i)
+				ctor_env.add_unique(TypeParameterVar(st->struct_->type_params[i]), clone(st->type_args.args[i]));
 
-		dest_spec = dest_struct_climber->next();
-		src_spec = src_struct_climber->next();
+			type_substitute(param.type, ctor_env);
+			unify(param.type, src, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, right_expr);
+
+			if(right_expr)
+			{
+				assert(st->struct_->implicit_ctor->type_params.empty() && "TODO");
+
+				Type ctor_struct_type(UnappliedStructType(st->struct_->implicit_ctor, {}, std::make_unique<UnappliedStructType>(clone(*st))));
+				vector<Argument> ctor_args; ctor_args.push_back(Argument{
+					.expr = std::make_unique<Expr>(std::move(*right_expr)),
+					.name = {},
+					.param_idx = 0
+				});
+
+				Expr ctor_expr(UnappliedConstructorExpr(clone(ctor_struct_type)), {});
+				ProcTypeDef ctor_type{
+					.type_params = {},
+					.params = singleton_vec(std::move(param)),
+					.ret = clone(ctor_struct_type),
+				};
+				ctor_expr.type = Type(UnappliedProcType(std::move(ctor_type), {}));
+
+				Expr call_expr(CallExpr(std::move(ctor_expr), std::move(ctor_args)), {});
+				call_expr.type = clone(ctor_struct_type);
+
+				*right_expr = Expr(AsExpr(std::move(call_expr), clone(dest)), {});
+				right_expr->type = clone(dest);
+			}
+
+			return true;
+		}
 	}
-	assert(not dest_spec && not src_spec);
 
-	return true;
+	throw ParseError("Unification failed: Cannot assign "s + str(src) + " to " + str(dest));
 }
 
 
@@ -6110,7 +6223,7 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 	if(try_unify_integer_types(left, right, subst, ctx, mode))
 		return;
 
-	if(try_unify_structs(left, right, subst, ctx, mode))
+	if(try_unify_structs(left, right, subst, ctx, mode, right_expr))
 		return;
 
 	// Handle everything else
@@ -7085,8 +7198,6 @@ void typecheck(TopLevelItem item, SemaContext &ctx)
 
 			for(Parameter &param: def->type.params)
 			{
-				instantiate_type(param.type, {}, ctx);
-
 				if(!param.default_value)
 					continue;
 
@@ -7094,8 +7205,6 @@ void typecheck(TopLevelItem item, SemaContext &ctx)
 				if(!is_expr_assignable(param.type, *param.default_value, ctx))
 					throw ParseError("Parameter default value has incorrect type");
 			}
-
-			instantiate_type(def->type.ret, {}, ctx);
 
 			if(def->body)
 				typecheck(*def->body, def, ctx);
@@ -7169,6 +7278,8 @@ public:
 		*this << "#include <stdint.h>" << LineEnd;
 		*this << "#include <stddef.h>" << LineEnd;
 		*this << "#include <stdbool.h>" << LineEnd;
+		*this << "#include <stdlib.h>" << LineEnd;
+		*this << "#include <stdio.h>" << LineEnd;
 		*this << "#include <limits.h>" << LineEnd;
 		*this << "#include <assert.h>" << LineEnd;
 		*this << "#include <errno.h>" << LineEnd;
@@ -7214,6 +7325,10 @@ public:
 
 		*this << LineEnd;
 		*this << "int get_errno() { return errno; }" << LineEnd;
+		*this << LineEnd;
+
+		*this << LineEnd;
+		*this << "__attribute__((noreturn)) void fatal(int8_t const *msg) { fprintf(stderr, (char const*)msg); exit(1); }" << LineEnd;
 		*this << LineEnd;
 	}
 

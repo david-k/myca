@@ -1,0 +1,44 @@
+typealias c_char = i8;
+extern proc fatal(msg: [^]c_char);
+
+
+struct Option'T
+{
+	case implicit Some{value: T},
+	case None,
+}
+
+typealias Some'T = Option'T.Some;
+typealias None'T = Option'T.None;
+
+
+proc safe_div(a: i32, b: i32) -> ?i32
+{
+	if b == 0 {
+		return None;
+	}
+
+	return a / b;
+}
+
+proc unwrap'T(opt: ?T) -> T
+{
+	match opt
+	{
+		case Some -> v { return v.value; }
+		case None { fatal(c"empty option"); }
+	}
+}
+
+
+proc main() -> i32
+{
+	//let p: ?^i32 = None;
+	let idx: ?i32 = 3;
+
+	match idx
+	{
+		case Some -> v { return v.value + unwrap(safe_div(13, 2)) + unwrap(1); }
+		case None { return 0; }
+	}
+}

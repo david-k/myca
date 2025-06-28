@@ -1,5 +1,6 @@
 #pragma once
 
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <sstream>
@@ -203,8 +204,13 @@ private:
 template<typename It>
 struct Range
 {
+	using reference = typename std::iterator_traits<It>::reference;
+
 	It first;
 	It last;
+
+	reference operator [] (size_t idx) { return *(first + idx); }
+	reference const operator [] (size_t idx) const { return *(first + idx); }
 };
 
 template<typename It>
