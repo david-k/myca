@@ -1,4 +1,4 @@
-typealias c_char = i8;
+struct c_char { _: i8 }
 extern proc fatal(msg: [^]c_char);
 
 
@@ -33,12 +33,22 @@ proc unwrap'T(opt: ?T) -> T
 
 proc main() -> i32
 {
-	//let p: ?^i32 = None;
+	let o: ?i8 = 23 + 1 + 2;
+
+	let p: ?^i32 = None;
 	let idx: ?i32 = 3;
+
+	let u = unwrap(5);
+
+	let mut oo: ??i8 = None;
+	oo := Some(None);
+	oo := Some(Some(74));
+	oo := 89 - 11;
+	oo := Some(99);
 
 	match idx
 	{
-		case Some -> v { return v.value + unwrap(safe_div(13, 2)) + unwrap(1); }
+		case Some -> v { return v.value + unwrap(safe_div(13, 2)) + unwrap(1) + unwrap(unwrap(oo)); } // 109
 		case None { return 0; }
 	}
 }

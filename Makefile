@@ -16,5 +16,5 @@ build/examples/%: examples/%.myca RUN_ALWAYS
 	./build/myca $< -o $@.c
 	gcc -Wall -Wextra -Wpedantic $@.c -o $@
 
-run: build/examples/option_result
+run: build/examples/option
 	./$<

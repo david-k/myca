@@ -3009,7 +3009,13 @@ void print(TopLevelItem const &item, std::ostream &os, int indent, PrintListener
 					{
 						[&](Parameter const &var_member)
 						{
-							os << string((indent+1)*INDENT_WIDTH, ' ') << var_member.name << ": " << var_member.type << ",";
+							os << string((indent+1)*INDENT_WIDTH, ' ') << var_member.name << ": " << var_member.type;
+							if(var_member.default_value)
+							{
+								os << " = ";
+								print(os, *var_member.default_value);
+							}
+							os << ",";
 						},
 						[&](StructDef *case_member)
 						{
@@ -5361,6 +5367,7 @@ bool is_fully_instantiated(Type const &type)
 	};
 }
 
+bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint);
 
 StructDefInstance* instantiate_struct(
 	StructDef *struct_,
@@ -5403,12 +5410,19 @@ StructDefInstance* instantiate_struct(
 		for(Parameter const &p: *struct_->constructor_params)
 		{
 			Parameter inst_param = clone(p);
-			instantiate_type(inst_param.type, inst->type_env, ctx);
 
 			// Make sure to compute the type of the default value expression
 			if(inst_param.default_value)
-				typecheck(*inst_param.default_value, ctx);
+			{
+				TypeEnv subst = clone(inst->type_env);;
+				bool fully_instantiated = typecheck_partial(*inst_param.default_value, ctx, TypingHint(&inst_param.type, &subst));
+				unify(inst_param.type, *inst_param.default_value->type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, inst_param.default_value.get());
 
+				if(not fully_instantiated)
+					instantiate_types(*inst_param.default_value, subst, ctx);
+			}
+
+			instantiate_type(inst_param.type, inst->type_env, ctx);
 			inst->constructor_params->push_back(std::move(inst_param));
 		}
 	}
@@ -5655,7 +5669,21 @@ void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx)
 		{
 			instantiate_type(e.struct_, type_env, ctx);
 			if(StructType *st = std::get_if<StructType>(&e.struct_))
+			{
 				expr = expr.clone_as(ConstructorExpr(st->inst));
+
+				// We need to update expr.type. Reason:
+				// - the Parameters in expr.type are expected to be typechecked, in particular,
+				//   Parameter.default_value.type must have been computed
+				// - this is not the case for UnappliedConstructorExpr
+				ProcTypeDef ctor_type;
+				ctor_type.params = clone(*st->inst->constructor_params);
+				ctor_type.ret = StructType(st->inst);
+				expr.type = ProcType{
+					.def = ctx.mod().add_proc_type(clone(ctor_type)),
+					.canonical_def = ctx.mod().get_canonical(ctor_type)
+				};
+			}
 			else
 				throw ParseError("Only structs can be used as constructors");
 		},
@@ -5740,6 +5768,22 @@ void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx)
 void instantiate_types(Pattern &pattern, TypeEnv const &type_env, SemaContext &ctx)
 {
 	instantiate_type(*pattern.type, type_env, ctx);
+	pattern | match
+	{
+		[&](VarPattern &p)
+		{
+			if(p.var->type)
+				instantiate_type(*p.var->type, type_env, ctx);
+		},
+		[&](DerefPattern &p)
+		{
+			instantiate_types(*p.sub, type_env, ctx);
+		},
+		[&](AddressOfPattern const &p)
+		{
+			instantiate_types(*p.sub, type_env, ctx);
+		},
+	};
 }
 
 void instantiate_types(Stmt &stmt, TypeEnv const &type_env, SemaContext &ctx)
@@ -5913,7 +5957,7 @@ optional<TypeDeductionVar> try_get_type_deduction_var(Type const &type)
 	return nullopt;
 }
 
-bool try_unify_type_deduction_variables(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx, UnificationMode mode)
+bool try_unify_type_deduction_variables(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx, UnificationMode mode, Expr *right_expr)
 {
 	optional<TypeDeductionVar> left_var = try_get_type_deduction_var(left);
 	optional<TypeDeductionVar> right_var = try_get_type_deduction_var(right);
@@ -5922,7 +5966,7 @@ bool try_unify_type_deduction_variables(Type const &left, Type const &right, Typ
 		if(*left_var != *right_var)
 		{
 			if(Type const *existing_type = subst.try_lookup(*left_var))
-				unify(*existing_type, right, subst, ctx, mode);
+				unify(*existing_type, right, subst, ctx, mode, right_expr);
 			else
 				subst.add_unique(*left_var, clone(right));
 
@@ -5959,9 +6003,9 @@ bool try_unify_type_deduction_variables(Type const &left, Type const &right, Typ
 			else
 			{
 				if(args_swapped)
-					unify(*type, *existing_type, subst, ctx, mode);
+					unify(*type, *existing_type, subst, ctx, mode, right_expr);
 				else
-					unify(*existing_type, *type, subst, ctx, mode);
+					unify(*existing_type, *type, subst, ctx, mode, right_expr);
 			}
 		}
 		else
@@ -6217,7 +6261,7 @@ bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaCo
 
 void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx, UnificationMode mode, Expr *right_expr)
 {
-	if(try_unify_type_deduction_variables(left, right, subst, ctx, mode))
+	if(try_unify_type_deduction_variables(left, right, subst, ctx, mode, right_expr))
 		return;
 
 	if(try_unify_integer_types(left, right, subst, ctx, mode))
@@ -6307,7 +6351,7 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 						unify(*left_t.element_type, *right_t->element_type, subst, ctx, UnificationMode::EQUAL);
 					}
 					else
-						throw ParseError("Unification failed: expected pointer type");
+						throw ParseError("Unification failed: expected many pointer type");
 				} break;
 
 				case UnificationMode::COMMON_TYPE:
@@ -6548,7 +6592,7 @@ ProcTypeDef get_callee_proc_type(Type const &callee_type)
 		},
 		[&](auto const&) -> ProcTypeDef
 		{
-			throw ParseError("Expression is not callable");
+			throw ParseError("Type is not callable: " + str(callee_type));
 		}
 	};
 }
@@ -6593,8 +6637,9 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 				case StringLiteralType::C:
 				{
 					ItemDef *c_char_item = ctx.mod().global()->lookup_item("c_char");
-					AliasDef &c_char = std::get<AliasDef>(*c_char_item);
-					expr.type = ManyPointerType(clone(c_char.aliased_type), IsMutable::NO);
+					StructDef &c_char = std::get<StructDef>(*c_char_item);
+					StructDefInstance *c_char_inst = instantiate_struct(&c_char, {}, nullptr, ctx);
+					expr.type = ManyPointerType(StructType(c_char_inst), IsMutable::NO);
 				} break;
 			}
 
@@ -6832,17 +6877,16 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 		},
 		[&](AssignmentExpr &e)
 		{
-			typecheck(*e.lhs, ctx);
-			typecheck(*e.rhs, ctx, &*e.lhs->type);
-			if(!is_expr_assignable(*e.lhs->type, *e.rhs, ctx))
-				throw ParseError("LHS and RHS have incompatible types in assignment");
+			bool lhs_fully_instantiated = typecheck_partial(*e.lhs, ctx, TypingHint(hint.subst));
+			bool rhs_fully_instantiated = typecheck_partial(*e.rhs, ctx, hint.with_type(&*e.lhs->type));
+			unify(*e.lhs->type, *e.rhs->type, *hint.subst, ctx, UnificationMode::VALUE_ASSIGNMENT, e.rhs.get());
 
 			if(is_lvalue_expr(*e.lhs) == IsMutable::YES)
 				expr.type = clone(*e.lhs->type);
 			else
 				throw ParseError("LHS does not denote a mutable lvalue in assignment");
 
-			return true;
+			return lhs_fully_instantiated and rhs_fully_instantiated;
 		},
 		[&](AsExpr &e)
 		{
@@ -6987,7 +7031,14 @@ void add_size_to_alloc_call(Expr &addr, Expr &&size_expr)
 	}
 }
 
-void typecheck_pattern(Pattern &lhs_pattern, Type const &rhs_type, optional<IsMutable> rhs_is_lvalue, SemaContext &ctx, Expr *rhs_expr)
+void typecheck_pattern(
+	Pattern &lhs_pattern,
+	Type const &rhs_type,
+	optional<IsMutable> rhs_is_lvalue,
+	SemaContext &ctx,
+	TypeEnv &subst,
+	Expr *rhs_expr
+)
 {
 	lhs_pattern | match
 	{
@@ -6995,7 +7046,6 @@ void typecheck_pattern(Pattern &lhs_pattern, Type const &rhs_type, optional<IsMu
 		{
 			if(p.var->type)
 			{
-				TypeEnv subst;
 				try {
 					unify(*p.var->type, rhs_type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, rhs_expr);
 				} catch (ParseError const &e) {
@@ -7013,7 +7063,7 @@ void typecheck_pattern(Pattern &lhs_pattern, Type const &rhs_type, optional<IsMu
 			if(PointerType const *pointer = std::get_if<PointerType>(&rhs_type))
 			{
 				lhs_pattern.type = clone(*pointer->target_type);
-				typecheck_pattern(*p.sub, *lhs_pattern.type, rhs_is_lvalue, ctx, nullptr);
+				typecheck_pattern(*p.sub, *lhs_pattern.type, rhs_is_lvalue, ctx, subst, nullptr);
 			}
 			else
 				throw ParseError("Invalid pattern op: target type not a pointer");
@@ -7025,7 +7075,7 @@ void typecheck_pattern(Pattern &lhs_pattern, Type const &rhs_type, optional<IsMu
 				if(*rhs_is_lvalue == IsMutable::YES || p.mutability == IsMutable::NO)
 				{
 					lhs_pattern.type = PointerType(clone(rhs_type), p.mutability);
-					typecheck_pattern(*p.sub, *lhs_pattern.type, rhs_is_lvalue, ctx, nullptr);
+					typecheck_pattern(*p.sub, *lhs_pattern.type, rhs_is_lvalue, ctx, subst, nullptr);
 				}
 				else
 					throw ParseError("Cannot make mutable reference to const object");
@@ -7063,8 +7113,15 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 	{
 		[&](LetStmt &s)
 		{
-			typecheck(s.init_expr, ctx, try_get_explicit_type(s.lhs));
-			typecheck_pattern(s.lhs, *s.init_expr.type, is_lvalue_expr(s.init_expr), ctx, &s.init_expr);
+			TypeEnv subst;
+			bool fully_instantiated = typecheck_partial(s.init_expr, ctx, TypingHint(try_get_explicit_type(s.lhs), &subst));
+			typecheck_pattern(s.lhs, *s.init_expr.type, is_lvalue_expr(s.init_expr), ctx, subst, &s.init_expr);
+
+			if(not fully_instantiated)
+			{
+				instantiate_types(s.init_expr, subst, ctx);
+				instantiate_types(s.lhs, subst, ctx);
+			}
 		},
 		[&](ExprStmt &s)
 		{
@@ -7143,7 +7200,7 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 						};
 
 						if(arm.capture)
-							typecheck_pattern(*arm.capture, arm.type, is_lvalue_expr(s.expr), ctx, nullptr);
+							typecheck_pattern(*arm.capture, arm.type, is_lvalue_expr(s.expr), ctx, subst, nullptr);
 
 						typecheck(*arm.stmt, proc, ctx);
 					}
@@ -7169,7 +7226,7 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 							throw ParseError("Duplicate case value");
 
 						if(arm.capture)
-							typecheck_pattern(*arm.capture, arm.type, is_lvalue_expr(s.expr), ctx, nullptr);
+							typecheck_pattern(*arm.capture, arm.type, is_lvalue_expr(s.expr), ctx, subst, nullptr);
 
 						typecheck(*arm.stmt, proc, ctx);
 					}
@@ -7201,9 +7258,17 @@ void typecheck(TopLevelItem item, SemaContext &ctx)
 				if(!param.default_value)
 					continue;
 
-				typecheck(*param.default_value, ctx);
-				if(!is_expr_assignable(param.type, *param.default_value, ctx))
-					throw ParseError("Parameter default value has incorrect type");
+				TypeEnv subst;
+				bool fully_instantiated = typecheck_partial(*param.default_value, ctx, TypingHint(&subst));
+				try {
+					unify(param.type, *param.default_value->type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, &*param.default_value);
+				}
+				catch(ParseError const &e) {
+					throw ParseError("Parameter default value has incorrect type: "s + e.what());
+				}
+
+				if(not fully_instantiated)
+					instantiate_types(*param.default_value, subst, ctx);
 			}
 
 			if(def->body)
@@ -7328,7 +7393,7 @@ public:
 		*this << LineEnd;
 
 		*this << LineEnd;
-		*this << "__attribute__((noreturn)) void fatal(int8_t const *msg) { fprintf(stderr, (char const*)msg); exit(1); }" << LineEnd;
+		*this << "__attribute__((noreturn)) void fatal(char const *msg) { fputs((char const*)msg, stderr); exit(1); }" << LineEnd;
 		*this << LineEnd;
 	}
 
@@ -7642,6 +7707,9 @@ string generate_c_to_str(Type const &type)
 			if(t.inst->def->name == "c_void")
 				return "void"s;
 
+			if(t.inst->def->name == "c_char")
+				return "char"s;
+
 			return "struct " + mangle_type(type);
 		},
 		[&](ProcType const&) -> string { assert(!"generate_c_to_str: ProcType: TODO"); },
@@ -7727,6 +7795,9 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](ConstructorExpr const &e)
 		{
+			if(e.inst->def->name == "c_char")
+				return "(char)"s;
+
 			return mangle_constructor(StructType(e.inst));
 		},
 		[&](ProcExpr const &e)
@@ -7818,7 +7889,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 				if(arg_vals[i].empty())
 				{
 					assert(params[i].default_value);
-					arg_vals[i] = generate_c(*params[i].default_value, backend);
+					arg_vals[i] = generate_c_cast(params[i].type, *params[i].default_value, backend);
 				}
 			}
 

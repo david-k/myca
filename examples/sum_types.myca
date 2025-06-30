@@ -1,4 +1,4 @@
-typealias c_char = i8;
+struct c_char { _: i8 }
 
 struct Json
 {

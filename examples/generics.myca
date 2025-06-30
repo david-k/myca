@@ -1,11 +1,31 @@
 // Lib C
 //==============================================================================
 struct c_void { _: Never }
-typealias c_char = i8;
+struct c_char { _: i8 }
 
 extern proc malloc(size: usize) -> ^mut c_void;
 extern proc free(ptr: ^mut c_void);
 extern proc puts(str: [^]c_char) -> i32;
+extern proc fatal(msg: [^]c_char);
+
+
+struct Option'T
+{
+	case implicit Some{value: T},
+	case None,
+}
+
+typealias Some'T = Option'T.Some;
+typealias None'T = Option'T.None;
+
+proc unwrap'T(opt: ?T) -> T
+{
+	match opt
+	{
+		case Some -> v { return v.value; }
+		case None { fatal(c"empty option"); }
+	}
+}
 
 
 // Main
@@ -18,10 +38,10 @@ proc main() -> i32
 
 	puts(c"Hello?");
 
-	let opt = Option'i32.None();
+	let opt = Option'i32.None;
 	let d = get_default(opt, ._default=42);
 
-	return id(foo()) + arr.buf[0] + (length(&arr) as i32) + d; // 155
+	return id(foo()) + unwrap(arr.buf)[0] + (length(&arr) as i32) + d; // 155
 }
 
 
@@ -29,7 +49,7 @@ proc main() -> i32
 //==============================================================================
 struct Array'T
 {
-	buf: [^]mut T = null,
+	buf: ?[^]mut T = None,
 	length: usize = 0,
 	capacity: usize = 0,
 }
@@ -47,7 +67,7 @@ proc add'T (arr: ^mut Array'T, val: T)
 		grow_capacity(arr, new_cap);
 	}
 
-	arr^.buf[arr^.length] := val;
+	unwrap(arr^.buf)[arr^.length] := val;
 	arr^.length := arr^.length + 1;
 }
 
@@ -58,7 +78,7 @@ proc grow_capacity'T (arr: ^mut Array'T, target_cap: usize)
 	let new_buf = malloc(target_cap * size_of(T)) as [^]mut T;
 	let mut i: usize = 0;
 	while i < arr^.length {
-		new_buf[i] := arr^.buf[i];
+		new_buf[i] := unwrap(arr^.buf)[i];
 		i := i + 1;
 	}
 
@@ -111,13 +131,6 @@ proc id'T (v: T) -> T
 }
 
 
-struct Option'T
-{
-	case Some{value: T},
-	case None{},
-}
-
-
 proc bar() -> i32
 {
 	let opt = IntOpt.Some(3);
@@ -128,7 +141,6 @@ proc bar() -> i32
 
 typealias IntOpt = Option'i32;
 typealias Int = i32;
-typealias Some'T = Option'(T).Some;
 
 
 proc foo() -> i32

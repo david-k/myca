@@ -11,8 +11,7 @@
 
 //==============================================================================
 struct c_void { _: Never }
-
-typealias c_char = i8;
+struct c_char { _: i8 }
 
 extern proc malloc(size: usize) -> ^mut c_void;
 extern proc free(ptr: ^mut c_void);
@@ -70,15 +69,15 @@ proc main() -> i32
 proc test_hallo()
 {
 	let data = malloc(6) as [^]mut c_char;
-	data[0] := 72;
-	data[1] := 97;
-	data[2] := 108;
-	data[3] := 108;
-	data[4] := 111;
-	data[5] := 0;
+	data[0] := c_char(72);
+	data[1] := c_char(97);
+	data[2] := c_char(108);
+	data[3] := c_char(108);
+	data[4] := c_char(111);
+	data[5] := c_char(0);
 
 	let ptr = &mut data[3];
-	ptr^ := 65;
+	ptr^ := c_char(65);
 
 	puts(data);
 }
