@@ -264,6 +264,7 @@ enum class Lexeme
 	CIRCUMFLEX,
 	AMPERSAND,
 	QUESTIONMARK,
+	BANG,
 	SINGLE_QUOTE,
 	AT,
 	BAR,
@@ -331,6 +332,7 @@ string_view str(Lexeme tok)
 		case Lexeme::CIRCUMFLEX: return "CIRCUMFLEX";
 		case Lexeme::AMPERSAND: return "AMPERSAND";
 		case Lexeme::QUESTIONMARK: return "QUESTIONMARK";
+		case Lexeme::BANG: return "BANG";
 		case Lexeme::SINGLE_QUOTE: return "SINGLE_QUOTE";
 		case Lexeme::AT: return "AT";
 		case Lexeme::BAR: return "BAR";
@@ -412,6 +414,7 @@ optional<Lexeme> try_read_punctuation(Lexer &lex)
 		case '^': lex.advance(); return Lexeme::CIRCUMFLEX;
 		case '&': lex.advance(); return Lexeme::AMPERSAND;
 		case '?': lex.advance(); return Lexeme::QUESTIONMARK;
+		case '!': lex.advance(); return Lexeme::BANG;
 		case '\'': lex.advance(); return Lexeme::SINGLE_QUOTE;
 		case '@': lex.advance(); return Lexeme::AT;
 		case '|': lex.advance(); return Lexeme::BAR;
@@ -595,6 +598,7 @@ struct TypeArgList
 {
 	TypeArgList() = default;
 	explicit TypeArgList(Type &&type);
+	TypeArgList(Type &&t1, Type &&t2);
 
 	vector<Type> args;
 
@@ -1058,6 +1062,12 @@ void TypeArgList::append(TypeArgList const &other)
 TypeArgList::TypeArgList(Type &&type)
 {
 	args.push_back(std::move(type));
+}
+
+TypeArgList::TypeArgList(Type &&t1, Type &&t2)
+{
+	args.push_back(std::move(t1));
+	args.push_back(std::move(t2));
 }
 
 
@@ -3256,12 +3266,24 @@ Type parse_prefix_type(Parser &parser, Module &mod)
 	}
 }
 
+Type parse_result_type(Parser &parser, Module &mod)
+{
+	Type type = parse_prefix_type(parser, mod);
+	if(try_consume(parser, Lexeme::BANG))
+	{
+		Type err_type = parse_prefix_type(parser, mod);
+		type = UnresolvedPath("Result", TypeArgList(std::move(type), std::move(err_type)), mod.global());
+	}
+
+	return type;
+}
+
 Type parse_union_type(Parser &parser, Module &mod)
 {
 	vector<Type> alternatives;
-	alternatives.push_back(parse_prefix_type(parser, mod));
+	alternatives.push_back(parse_result_type(parser, mod));
 	while(try_consume(parser, Lexeme::BAR))
-		alternatives.push_back(parse_prefix_type(parser, mod));
+		alternatives.push_back(parse_result_type(parser, mod));
 
 	if(alternatives.size() == 1)
 		return std::move(alternatives.back());

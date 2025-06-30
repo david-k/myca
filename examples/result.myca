@@ -1,0 +1,50 @@
+struct c_char { _: i8 }
+extern proc fatal(msg: [^]c_char);
+
+
+struct Result'(TOk, TError)
+{
+	case implicit Ok{value: TOk},
+	case Error{value: TError},
+}
+
+
+typealias ok'(TOk, TError) = Result'(TOk, TError).Ok;
+typealias error'(TOk, TError) = Result'(TOk, TError).Error;
+
+
+struct DivisionByZero {}
+struct Overflow {}
+
+typealias Error = DivisionByZero
+                | Overflow;
+
+proc safe_div(a: i32, b: i32) -> i32!Error
+{
+	if b == 0 {
+		return error(DivisionByZero());
+	}
+
+	return a / b;
+}
+
+proc unwrap'(TOk, TError)(r: TOk!TError) -> TOk
+{
+	match r
+	{
+		case ok -> v { return v.value; }
+		case error { fatal(c"empty result"); }
+	}
+}
+
+
+proc main() -> i32
+{
+	let d = safe_div(23, 3);
+
+	match d
+	{
+		case ok -> v { return v.value + unwrap(ok'(i8,Error)(3)); } // 10
+		case error { fatal(c"division failed"); }
+	}
+}
