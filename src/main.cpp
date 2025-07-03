@@ -253,7 +253,6 @@ enum class Lexeme
 	IDENTIFIER,
 	INT_LITERAL,
 	C_STRING_LITERAL,
-	NULL_LITERAL,
 	TRUE,
 	FALSE,
 
@@ -321,7 +320,6 @@ string_view str(Lexeme tok)
 		case Lexeme::IDENTIFIER: return "IDENTIFIER";
 		case Lexeme::INT_LITERAL: return "INT_LITERAL";
 		case Lexeme::C_STRING_LITERAL: return "C_STRING_LITERAL";
-		case Lexeme::NULL_LITERAL: return "NULL_LITERAL";
 		case Lexeme::TRUE: return "TRUE";
 		case Lexeme::FALSE: return "FALSE";
 
@@ -470,7 +468,6 @@ optional<Lexeme> try_read_punctuation(Lexer &lex)
 unordered_map<string_view, Lexeme> const KEYWORDS = {
 	{"true", Lexeme::TRUE},
 	{"false", Lexeme::FALSE},
-	{"null", Lexeme::NULL_LITERAL},
 	{"let", Lexeme::LET},
 	{"proc", Lexeme::PROC},
 	{"struct", Lexeme::STRUCT},
@@ -631,7 +628,6 @@ struct UnresolvedPath
 enum BuiltinType
 {
 	NEVER,
-	NULL_,
 	UNIT,
 	BOOL,
 	I8,
@@ -1105,8 +1101,6 @@ struct IntLiteralExpr { XInt64 value; };
 
 struct BoolLiteralExpr { bool value; };
 
-struct NullLiteralExpr {};
-
 enum class StringLiteralType
 {
 	C
@@ -1297,7 +1291,6 @@ class Expr : public variant
 <
 	IntLiteralExpr,
 	BoolLiteralExpr,
-	NullLiteralExpr,
 	StringLiteralExpr,
 	VarExpr,
 	ConstructorExpr,
@@ -1365,10 +1358,6 @@ Expr clone(Expr const &expr)
 			return expr.clone_as(e);
 		},
 		[&](BoolLiteralExpr const &e)
-		{
-			return expr.clone_as(e);
-		},
-		[&](NullLiteralExpr const &e)
 		{
 			return expr.clone_as(e);
 		},
@@ -2106,6 +2095,7 @@ struct StructDef
 	optional<vector<Parameter>> constructor_params; // Available iff the struct does not contain any `case`s
 	bool ctor_without_parens = false;
 	StructDef *implicit_ctor = nullptr;
+	bool is_extern = false;
 
 	ParentRelation parent{};
 
@@ -2159,10 +2149,11 @@ Range<InstanceMember const*> StructDefInstance::trailing_var_members() const { r
 
 bool StructDefInstance::is_concrete() const
 {
+	bool parent_concrete = true;
 	if(outer_struct)
-		return own_args_concrete && outer_struct->is_concrete();
+		parent_concrete = outer_struct->is_concrete();
 
-	return own_args_concrete;
+	return own_args_concrete and not def->is_extern and parent_concrete;
 }
 
 
@@ -2539,7 +2530,6 @@ std::ostream& operator << (std::ostream &os, SourceLocation loc)
 }
 
 constexpr string_view TYPE_NEVER_NAME = "Never";
-constexpr string_view TYPE_NULL_NAME = "Null";
 constexpr string_view TYPE_UNIT_NAME = "Unit";
 constexpr string_view TYPE_ISIZE_NAME = "isize";
 constexpr string_view TYPE_USIZE_NAME = "usize";
@@ -2549,7 +2539,6 @@ string_view str(BuiltinType t)
 	switch(t)
 	{
 		case BuiltinType::NEVER: return TYPE_NEVER_NAME;
-		case BuiltinType::NULL_: return TYPE_NULL_NAME;
 		case BuiltinType::UNIT: return TYPE_UNIT_NAME;
 		case BuiltinType::BOOL: return "bool";
 		case BuiltinType::I8: return "i8";
@@ -2709,10 +2698,6 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 		[&](BoolLiteralExpr const &e)
 		{
 			os << (e.value ? "true" : "false");
-		},
-		[&](NullLiteralExpr const&)
-		{
-			os << "null";
 		},
 		[&](StringLiteralExpr const &e)
 		{
@@ -3215,8 +3200,6 @@ Type parse_prefix_type(Parser &parser, Module &mod)
 		{
 			if(tok.text == TYPE_NEVER_NAME)
 				return BuiltinType::NEVER;
-			else if(tok.text == TYPE_NULL_NAME)
-				return BuiltinType::NULL_;
 			else if(tok.text == TYPE_UNIT_NAME)
 				return BuiltinType::UNIT;
 			else if(tok.text == "bool")
@@ -3460,9 +3443,6 @@ Expr parse_prefix_expr(Parser &parser, Module &mod)
 
 		case Lexeme::FALSE:
 			return with_location(BoolLiteralExpr(false));
-
-		case Lexeme::NULL_LITERAL:
-			return with_location(NullLiteralExpr());
 
 		case Lexeme::C_STRING_LITERAL:
 			return with_location(StringLiteralExpr(StringLiteralType::C, tok.text));
@@ -3959,12 +3939,25 @@ void parse_top_level_item(Parser &parser, Module &mod)
 
 		case Lexeme::EXTERN:
 		{
-			consume(parser, Lexeme::PROC);
-			ProcDef *proc = parse_proc(parser, mod);
-			if(proc->body)
-				throw ParseError("Extern procedures must not have a body");
+			if(try_consume(parser, Lexeme::PROC))
+			{
+				ProcDef *proc = parse_proc(parser, mod);
+				if(proc->body)
+					throw ParseError("Extern procedures must not have a body");
 
-			mod.add_item(proc);
+				mod.add_item(proc);
+			}
+			else if(try_consume(parser, Lexeme::STRUCT))
+			{
+				StructDef *struct_ = parse_struct(parser, mod);
+				if(not struct_->ctor_without_parens)
+					throw ParseError("Extern structs must not have any members");
+
+				struct_->is_extern = true;
+				mod.add_item(struct_);
+			}
+			else
+				throw ParseError("Expected proc or struct declaration after extern");
 		} break;
 
 		default: throw ParseError("Invalid token while parsing top-level item: "s + str(tok.kind));
@@ -4151,7 +4144,6 @@ bool integer_assignable_to(BuiltinType type, XInt64 val)
 	switch(type)
 	{
 		case BuiltinType::NEVER: assert(!"integer_assignable_to: NEVER");
-		case BuiltinType::NULL_: assert(!"integer_assignable_to: NULL");
 		case BuiltinType::UNIT:  assert(!"integer_assignable_to: UNIT");
 		case BuiltinType::BOOL:  assert(!"integer_assignable_to: BOOL");
 		case BuiltinType::I8:    return XInt64(int64_t(-128)) <= val && val <= XInt64(uint64_t(127));
@@ -4169,7 +4161,6 @@ bool is_builtin_int_type(BuiltinType type)
 	switch(type)
 	{
 		case BuiltinType::NEVER: return false;
-		case BuiltinType::NULL_: return false;
 		case BuiltinType::UNIT:  return false;
 		case BuiltinType::BOOL:  return false;
 		case BuiltinType::I8:   return true;
@@ -4190,7 +4181,6 @@ bool is_signed(BuiltinType type)
 	switch(type)
 	{
 		case BuiltinType::NEVER: assert(!"is_signed: NEVER");
-		case BuiltinType::NULL_: assert(!"is_signed: NULL");
 		case BuiltinType::UNIT:  assert(!"is_signed: UNIT");
 		case BuiltinType::BOOL:  assert(!"is_signed: BOOL");
 		case BuiltinType::I8:  return true;
@@ -4222,7 +4212,6 @@ MemoryLayout get_layout(BuiltinType type)
 		case BuiltinType::U32:   return {.size = 4, .alignment = 4};
 		case BuiltinType::ISIZE: return {.size = 8, .alignment = 8};
 		case BuiltinType::USIZE: return {.size = 8, .alignment = 8};
-		case BuiltinType::NULL_: return {.size = 8, .alignment = 8};
 	}
 
 	UNREACHABLE;
@@ -4612,6 +4601,22 @@ bool is_expr_assignable(Type const &dest, Expr &src, SemaContext &ctx)
 MemoryLayout compute_union_layout(UnionTypeDef const *union_, Module &mod, unordered_set<TypeDefInstance> &seen);
 MemoryLayout compute_own_layout(StructDefInstance *struct_, Module &mod, unordered_set<TypeDefInstance> &seen);
 
+Type const* is_optional_ptr(StructDefInstance const *inst)
+{
+	if(inst->def->name == "Option" and (is<PointerType>(inst->type_args.args[0]) or is<ManyPointerType>(inst->type_args.args[0])))
+		return &inst->type_args.args[0];
+
+	return nullptr;
+}
+
+Type const* is_optional_ptr(Type const &type)
+{
+	if(StructType const *st = std::get_if<StructType>(&type))
+		return is_optional_ptr(st->inst);
+
+	return nullptr;
+}
+
 MemoryLayout compute_layout(
 	Type const &type,
 	Module &mod,
@@ -4642,6 +4647,9 @@ MemoryLayout compute_layout(
 			StructDefInstance *inst = t.inst;
 			while(inst->outer_struct)
 				inst = inst->outer_struct;
+
+			if(is_optional_ptr(inst))
+				return MemoryLayout{.size = 8, .alignment = 8};
 
 			return compute_own_layout(inst, mod, seen);
 		},
@@ -5029,7 +5037,6 @@ void resolve_identifiers(Expr &expr, SemaContext &ctx)
 	{
 		[&](IntLiteralExpr&) {},
 		[&](BoolLiteralExpr&) {},
-		[&](NullLiteralExpr&) {},
 		[&](StringLiteralExpr&) {},
 		[&](UnresolvedPath &p)
 		{
@@ -5690,7 +5697,6 @@ void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx)
 	{
 		[&](IntLiteralExpr&) {},
 		[&](BoolLiteralExpr&) {},
-		[&](NullLiteralExpr&) {},
 		[&](StringLiteralExpr&) {},
 		[&](UnresolvedPath const&) { assert(!"instantiate_types: Expr: UnresolvedPath"); },
 		[&](UnappliedProcExpr &e)
@@ -6662,11 +6668,6 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 			expr.type = BuiltinType::BOOL;
 			return true;
 		},
-		[&](NullLiteralExpr&)
-		{
-			expr.type = BuiltinType::NULL_;
-			return true;
-		},
 		[&](StringLiteralExpr &e)
 		{
 			switch(e.type)
@@ -7536,7 +7537,6 @@ string mangle_type_segment(Type const &type)
 			switch(t)
 			{
 				case BuiltinType::NEVER: return "5Never";
-				case BuiltinType::NULL_: return "4Null";
 				case BuiltinType::UNIT: return "4Unit";
 				case BuiltinType::BOOL: return "4bool";
 				case BuiltinType::I8: return "2i8";
@@ -7703,7 +7703,6 @@ string generate_c_to_str(BuiltinType const &type)
 	switch(type)
 	{
 		case BuiltinType::NEVER: return "Never";
-		case BuiltinType::NULL_: return "void*";
 		case BuiltinType::UNIT: TODO("generate_c(Type): UNIT");
 		case BuiltinType::BOOL: return "bool";
 		case BuiltinType::I8: return "int8_t";
@@ -7746,6 +7745,12 @@ string generate_c_to_str(Type const &type)
 
 			if(t.inst->def->name == "c_char")
 				return "char"s;
+
+			if(Type const *pointee = is_optional_ptr(t.inst))
+				return generate_c_to_str(*pointee);
+
+			if(t.inst->def->is_extern)
+				return t.inst->def->name;
 
 			return "struct " + mangle_type(type);
 		},
@@ -7804,10 +7809,6 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		[&](BoolLiteralExpr const &e)
 		{
 			return string(e.value ? "true" : "false");
-		},
-		[&](NullLiteralExpr const&)
-		{
-			return string("NULL");
 		},
 		[&](StringLiteralExpr const &e)
 		{
@@ -8004,6 +8005,34 @@ void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type
 	};
 }
 
+MatchArm const* get_optional_some(MatchStmt const &stmt)
+{
+	for(MatchArm const &arm: stmt.arms)
+	{
+		if(StructType const *st = std::get_if<StructType>(&arm.type))
+		{
+			if(st->inst->def->name == "Some")
+				return &arm;
+		}
+	}
+
+	return nullptr;
+}
+
+MatchArm const* get_optional_none(MatchStmt const &stmt)
+{
+	for(MatchArm const &arm: stmt.arms)
+	{
+		if(StructType const *st = std::get_if<StructType>(&arm.type))
+		{
+			if(st->inst->def->name == "None")
+				return &arm;
+		}
+	}
+
+	return nullptr;
+}
+
 void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend)
 {
 	stmt | match
@@ -8063,37 +8092,68 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 		},
 		[&](MatchStmt const &s)
 		{
-			string subject_str = generate_c(s.expr, backend);
-			backend << "switch(" << subject_str << ".__myca__discr)" << LineEnd;
-			backend << "{" << LineEnd;
-			backend.increase_indent();
-				for(MatchArm const &arm: s.arms)
-				{
-					backend << "case " << *arm.discr << ":" << LineEnd;
-					backend << "{" << LineEnd;
-					backend.increase_indent();
-
-					if(arm.capture)
+			if(is_optional_ptr(*s.expr.type))
+			{
+				string subject_str = generate_c(s.expr, backend);
+				backend << "if(" << subject_str << ")" << LineEnd;
+				backend << "{" << LineEnd;
+				backend.increase_indent();
+					if(MatchArm const *some_arm = get_optional_some(s))
 					{
-						if(is<UnionType>(*s.expr.type))
-						{
-							string arm_expr = subject_str + ".__myca_alt" + std::to_string(*arm.discr);
-							generate_c_pattern(*arm.capture, arm_expr, arm.type, backend);
-						}
-						else
-							generate_c_pattern(*arm.capture, subject_str, *s.expr.type, backend);
+						if(some_arm->capture)
+							generate_c_pattern(*some_arm->capture, subject_str, *s.expr.type, backend);
+
+						generate_c(*some_arm->stmt, proc, backend);
 					}
+				backend.decrease_indent();
+				backend << "}" << LineEnd;
+				backend << "else" << LineEnd;
+				backend << "{" << LineEnd;
+				backend.increase_indent();
+					if(MatchArm const *none_arm = get_optional_none(s))
+					{
+						if(none_arm->capture)
+							generate_c_pattern(*none_arm->capture, subject_str, *s.expr.type, backend);
 
-					generate_c(*arm.stmt, proc, backend);
+						generate_c(*none_arm->stmt, proc, backend);
+					}
+				backend.decrease_indent();
+				backend << "}" << LineEnd;
+			}
+			else
+			{
+				string subject_str = generate_c(s.expr, backend);
+				backend << "switch(" << subject_str << ".__myca__discr)" << LineEnd;
+				backend << "{" << LineEnd;
+				backend.increase_indent();
+					for(MatchArm const &arm: s.arms)
+					{
+						backend << "case " << *arm.discr << ":" << LineEnd;
+						backend << "{" << LineEnd;
+						backend.increase_indent();
 
-					backend.decrease_indent();
-					backend << "}" << LineEnd;
+						if(arm.capture)
+						{
+							if(is<UnionType>(*s.expr.type))
+							{
+								string arm_expr = subject_str + ".__myca_alt" + std::to_string(*arm.discr);
+								generate_c_pattern(*arm.capture, arm_expr, arm.type, backend);
+							}
+							else
+								generate_c_pattern(*arm.capture, subject_str, *s.expr.type, backend);
+						}
 
-					backend << "break;" << LineEnd;
-				}
-				backend << "default: assert(0);" << LineEnd;
-			backend.decrease_indent();
-			backend << "}" << LineEnd;
+						generate_c(*arm.stmt, proc, backend);
+
+						backend.decrease_indent();
+						backend << "}" << LineEnd;
+
+						backend << "break;" << LineEnd;
+					}
+					backend << "default: assert(0);" << LineEnd;
+				backend.decrease_indent();
+				backend << "}" << LineEnd;
+			}
 		},
 	};
 }
