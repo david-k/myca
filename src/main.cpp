@@ -4629,6 +4629,9 @@ MemoryLayout compute_own_layout(StructDefInstance *struct_, Module &mod, unorder
 
 Type const* is_optional_ptr(StructDefInstance const *inst)
 {
+	while(inst->outer_struct)
+		inst = inst->outer_struct;
+
 	if(inst->def->name == "Option" and (is<PointerType>(inst->type_args.args[0]) or is<ManyPointerType>(inst->type_args.args[0])))
 		return &inst->type_args.args[0];
 
@@ -7802,7 +7805,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result = true);
 
 string generate_c_cast(Type const &target_type, string const &expr, Type const &expr_type)
 {
-	if(equiv(target_type, expr_type))
+	if(equiv(target_type, expr_type) || expr == "NULL")
 		return expr;
 
 	string type_val = generate_c_to_str(target_type);
@@ -7917,8 +7920,13 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](MemberAccessExpr const &e)
 		{
-			string object_val = generate_c(*e.object, backend);
-			return object_val + "." + e.member;
+			if(is_optional_ptr(*e.object->type) && e.member == "value")
+				return generate_c(*e.object, backend);
+			else
+			{
+				string object_val = generate_c(*e.object, backend);
+				return object_val + "." + e.member;
+			}
 		},
 		[&](AssignmentExpr const &e)
 		{
@@ -7932,12 +7940,20 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](CallExpr const &e)
 		{
-			vector<Parameter> const &params = *e.callable->type | match
+			if(ConstructorExpr const *ctor_expr = std::get_if<ConstructorExpr>(e.callable.get()))
 			{
-				[](ProcType const &t) -> vector<Parameter> const& { return t.def->params; },
-				[](StructType const &t) -> vector<Parameter> const& { return *t.inst->constructor_params; },
-				[](auto const &) -> vector<Parameter> const& { UNREACHABLE; },
-			};
+				if(Type const *pointee_type = is_optional_ptr(ctor_expr->inst))
+				{
+					if(ctor_expr->inst->def->name == "None")
+						return "NULL"s;
+
+					// Optional.Some
+					return generate_c_cast(*pointee_type, *e.args[0].expr, backend);
+				}
+			}
+
+
+			vector<Parameter> const &params = std::get<ProcType>(*e.callable->type).def->params;
 
 			// Evaluate arguments in the order they were provided
 			vector<string> arg_vals(params.size());
