@@ -5,12 +5,12 @@ extern proc fatal(msg: [^]c_char);
 struct Result'(TOk, TError)
 {
 	case implicit Ok{value: TOk},
-	case Error{value: TError},
+	case Err{value: TError},
 }
 
 
-typealias ok'(TOk, TError) = Result'(TOk, TError).Ok;
-typealias error'(TOk, TError) = Result'(TOk, TError).Error;
+typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
+typealias Err'(TOk, TError) = Result'(TOk, TError).Err;
 
 
 
@@ -28,7 +28,7 @@ typealias Error = ArithError | IOError;
 proc safe_div(a: i32, b: i32) -> i32!Error
 {
 	if b == 0 {
-		return error(DivisionByZero);
+		return Err(DivisionByZero);
 	}
 
 	return a / b;
@@ -38,8 +38,8 @@ proc unwrap'(TOk, TError)(r: TOk!TError) -> TOk
 {
 	match r
 	{
-		case ok -> v { return v.value; }
-		case error { fatal(c"empty result"); }
+		case v: Ok { return v.value; }
+		case _: Err { fatal(c"empty result"); }
 	}
 }
 
@@ -47,10 +47,10 @@ proc panic(err: Error) -> Never
 {
 	match err
 	{
-		case DivisionByZero { fatal(c"division by zero\n"); }
-		case Overflow { fatal(c"overflow\n"); }
-		case FileNotFound { fatal(c"file not found\n"); }
-		case NoPermission { fatal(c"no permission\n"); }
+		case _: DivisionByZero { fatal(c"division by zero\n"); }
+		case _: Overflow       { fatal(c"overflow\n"); }
+		case _: FileNotFound   { fatal(c"file not found\n"); }
+		case _: NoPermission   { fatal(c"no permission\n"); }
 	}
 }
 
@@ -61,7 +61,7 @@ proc main() -> i32
 
 	match d
 	{
-		case ok -> v { return v.value + unwrap(ok'(i8,Error)(3)); } // 10
-		case error -> e { panic(e.value); }
+		case v: Ok { return v.value + unwrap(Ok'(i8,Error)(3)); } // 10
+		case e: Err { panic(e.value); }
 	}
 }

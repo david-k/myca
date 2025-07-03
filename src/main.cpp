@@ -1482,9 +1482,12 @@ struct Pattern : variant
 >
 {
 	template<typename T>
-	Pattern(T &&t, optional<Type> &&type = nullopt) :
+	Pattern(T &&t, optional<Type> &&provided_type, optional<Type> &&type = nullopt) :
 		variant(std::forward<T>(t)),
+		provided_type(std::move(provided_type)),
 		type(std::move(type)) {}
+
+	optional<Type> provided_type;
 
 	// Available after semantic analysis
 	optional<Type> type;
@@ -1496,12 +1499,13 @@ Pattern clone(Pattern const &pattern)
 	{
 		[&](VarPattern const &p)
 		{
-			return Pattern(p, clone(pattern.type));
+			return Pattern(p, clone(pattern.provided_type), clone(pattern.type));
 		},
 		[&](DerefPattern const &p)
 		{
 			return Pattern(
 				DerefPattern(std::make_unique<Pattern>(clone(*p.sub))),
+				clone(pattern.provided_type),
 				clone(pattern.type)
 			);
 		},
@@ -1509,6 +1513,7 @@ Pattern clone(Pattern const &pattern)
 		{
 			return Pattern(
 				AddressOfPattern(std::make_unique<Pattern>(clone(*p.sub)), p.mutability),
+				clone(pattern.provided_type),
 				clone(pattern.type)
 			);
 		},
@@ -1573,14 +1578,12 @@ struct WhileStmt
 
 struct MatchArm
 {
-	Type type;
+	Pattern capture;
 	OwnPtr<Stmt> stmt;
-	optional<Pattern> capture;
 
-	MatchArm(Type &&type, Stmt &&stmt, optional<Pattern> &&capture, optional<size_t> discr = nullopt) :
-		type(std::move(type)),
-		stmt(std::make_unique<Stmt>(std::move(stmt))),
+	MatchArm(Pattern &&capture, Stmt &&stmt, optional<size_t> discr = nullopt) :
 		capture(std::move(capture)),
+		stmt(std::make_unique<Stmt>(std::move(stmt))),
 		discr(discr) {}
 
 	// Available after semantic analysis
@@ -1649,9 +1652,8 @@ Stmt clone(Stmt const &stmt)
 			for(MatchArm const &arm: s.arms)
 			{
 				arms.push_back(MatchArm(
-					clone(arm.type),
-					clone(*arm.stmt),
 					clone(arm.capture),
+					clone(*arm.stmt),
 					arm.discr
 				));
 			}
@@ -2228,6 +2230,9 @@ public:
 
 	VarDef* declare_var(string name, IsMutable mutability, VarKind kind)
 	{
+		if(try_lookup_item(name))
+			throw ParseError("A type/procedure with this name has already been declared: " + name);
+
 		if(m_vars.contains(name))
 			throw ParseError("Variable already declared: " + name);
 
@@ -2944,7 +2949,9 @@ void print(std::ostream &os, Stmt const &stmt, int indent = 0, PrintListener *li
 			os << string(indent*INDENT_WIDTH, ' ') << "{\n";
 			for(MatchArm const &arm: s.arms)
 			{
-				os << string((indent+1)*INDENT_WIDTH, ' ') << "case " << arm.type << "\n";
+				os << string((indent+1)*INDENT_WIDTH, ' ') << "case ";
+				print(os, arm.capture);
+				os << "\n";
 				print(os, *arm.stmt, indent+1, listener);
 				os << "\n";
 			}
@@ -3609,10 +3616,7 @@ Pattern parse_primary_pattern(Parser &parser, Module &mod)
 			string_view ident = consume(parser, Lexeme::IDENTIFIER).text;
 			VarDef *var = mod.scope()->declare_var(string(ident), mutability, VarKind::LOCAL);
 
-			if(try_consume(parser, Lexeme::COLON))
-				var->type = parse_type(parser, mod);
-
-			return Pattern(VarPattern(var));
+			return Pattern(VarPattern(var), nullopt);
 		}
 
 		default:
@@ -3623,17 +3627,25 @@ Pattern parse_primary_pattern(Parser &parser, Module &mod)
 Pattern parse_pattern(Parser &parser, Module &mod)
 {
 	Pattern p = parse_primary_pattern(parser, mod);
-
-	if(try_consume(parser, Lexeme::CIRCUMFLEX))
-		p = Pattern(DerefPattern(std::make_unique<Pattern>(std::move(p))));
-
-	if(try_consume(parser, Lexeme::AMPERSAND))
+	while(not parser.done())
 	{
-		IsMutable mutability = IsMutable::NO;
-		if(try_consume(parser, Lexeme::MUT))
-			mutability = IsMutable::YES;
+		if(try_consume(parser, Lexeme::CIRCUMFLEX))
+			p = Pattern(DerefPattern(std::make_unique<Pattern>(std::move(p))), nullopt);
+	
+		else if(try_consume(parser, Lexeme::AMPERSAND))
+		{
+			IsMutable mutability = IsMutable::NO;
+			if(try_consume(parser, Lexeme::MUT))
+				mutability = IsMutable::YES;
 
-		p = Pattern(AddressOfPattern(std::make_unique<Pattern>(std::move(p)), mutability));
+			p = Pattern(AddressOfPattern(std::make_unique<Pattern>(std::move(p)), mutability), nullopt);
+		}
+
+		else if(try_consume(parser, Lexeme::COLON))
+			p.provided_type = parse_type(parser, mod);
+
+		else
+			break;
 	}
 
 	return p;
@@ -3710,15 +3722,12 @@ Stmt parse_stmt(Parser &parser, Module &mod)
 			while(parser.peek() != Lexeme::RIGHT_BRACE)
 			{
 				consume(parser, Lexeme::CASE);
-				Type type = parse_type(parser, mod);
 
 				mod.open_scope();
-				optional<Pattern> capture;
-				if(try_consume(parser, Lexeme::THIN_ARROW))
-					capture = parse_pattern(parser, mod);
-
+				Pattern capture = parse_pattern(parser, mod);
 				Stmt body = parse_block_stmt(parser, mod, ScopePolicy::REUSE_SCOPE);
-				arms.emplace_back(std::move(type), std::move(body), std::move(capture));
+
+				arms.emplace_back(std::move(capture), std::move(body));
 				mod.close_scope();
 			}
 			consume(parser, Lexeme::RIGHT_BRACE);
@@ -5136,21 +5145,14 @@ void resolve_identifiers(Expr &expr, SemaContext &ctx)
 
 void resolve_identifiers(Pattern &pattern, SemaContext &ctx)
 {
+	if(pattern.provided_type)
+		resolve_types(*pattern.provided_type, ctx);
+
 	pattern | match
 	{
-		[&](VarPattern const &p)
-		{
-			if(p.var->type)
-				resolve_types(*p.var->type, ctx);
-		},
-		[&](DerefPattern const &p)
-		{
-			resolve_identifiers(*p.sub, ctx);
-		},
-		[&](AddressOfPattern const &p)
-		{
-			resolve_identifiers(*p.sub, ctx);
-		},
+		[&](VarPattern const&) {},
+		[&](DerefPattern const &p) { resolve_identifiers(*p.sub, ctx); },
+		[&](AddressOfPattern const &p) { resolve_identifiers(*p.sub, ctx); },
 	};
 }
 
@@ -5194,7 +5196,7 @@ void resolve_identifiers(Stmt &stmt, SemaContext &ctx)
 			resolve_identifiers(s.expr, ctx);
 			for(MatchArm &arm: s.arms)
 			{
-				resolve_types(arm.type, ctx);
+				resolve_identifiers(arm.capture, ctx);
 				resolve_identifiers(*arm.stmt, ctx);
 			}
 		},
@@ -5899,10 +5901,8 @@ void instantiate_types(Stmt &stmt, TypeEnv const &type_env, SemaContext &ctx)
 			instantiate_types(s.expr, type_env, ctx);
 			for(MatchArm &arm: s.arms)
 			{
-				instantiate_type(arm.type, type_env, ctx);
+				instantiate_types(arm.capture, type_env, ctx);
 				instantiate_types(*arm.stmt, type_env, ctx);
-				if(arm.capture)
-					instantiate_types(*arm.capture, type_env, ctx);
 			}
 		},
 	};
@@ -7104,34 +7104,37 @@ void typecheck_pattern(
 	optional<IsMutable> rhs_is_lvalue,
 	SemaContext &ctx,
 	TypeEnv &subst,
+	bool always_matching,
 	Expr *rhs_expr
 )
 {
+	if(lhs_pattern.provided_type)
+	{
+		try {
+			if(always_matching)
+				unify(*lhs_pattern.provided_type, rhs_type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, rhs_expr);
+			else
+				unify(rhs_type, *lhs_pattern.provided_type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, rhs_expr);
+		} catch (ParseError const &e) {
+			throw ParseError("Inferred type does not match specified type in let statement: "s + e.what());
+		}
+		instantiate_type(*lhs_pattern.provided_type, subst, ctx);
+		lhs_pattern.type = clone(*lhs_pattern.provided_type);
+	}
+	else
+		lhs_pattern.type = clone(rhs_type);
+
+
 	lhs_pattern | match
 	{
 		[&](VarPattern &p)
 		{
-			if(p.var->type)
-			{
-				try {
-					unify(*p.var->type, rhs_type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, rhs_expr);
-				} catch (ParseError const &e) {
-					throw ParseError("Inferred type does not match specified type in let statement: "s + e.what());
-				}
-				instantiate_type(*p.var->type, subst, ctx);
-			}
-			else
-				p.var->type = clone(rhs_type);
-
-			lhs_pattern.type = clone(*p.var->type);
+			p.var->type = clone(lhs_pattern.type);
 		},
 		[&](DerefPattern &p)
 		{
-			if(PointerType const *pointer = std::get_if<PointerType>(&rhs_type))
-			{
-				lhs_pattern.type = clone(*pointer->target_type);
-				typecheck_pattern(*p.sub, *lhs_pattern.type, rhs_is_lvalue, ctx, subst, nullptr);
-			}
+			if(PointerType const *pointer = std::get_if<PointerType>(&*lhs_pattern.type))
+				typecheck_pattern(*p.sub, *pointer->target_type, rhs_is_lvalue, ctx, subst, always_matching, nullptr);
 			else
 				throw ParseError("Invalid pattern op: target type not a pointer");
 		},
@@ -7141,8 +7144,8 @@ void typecheck_pattern(
 			{
 				if(*rhs_is_lvalue == IsMutable::YES || p.mutability == IsMutable::NO)
 				{
-					lhs_pattern.type = PointerType(clone(rhs_type), p.mutability);
-					typecheck_pattern(*p.sub, *lhs_pattern.type, rhs_is_lvalue, ctx, subst, nullptr);
+					Type pt(PointerType(clone(*lhs_pattern.type), p.mutability));
+					typecheck_pattern(*p.sub, pt, rhs_is_lvalue, ctx, subst, always_matching, nullptr);
 				}
 				else
 					throw ParseError("Cannot make mutable reference to const object");
@@ -7182,7 +7185,7 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 		{
 			TypeEnv subst;
 			bool fully_instantiated = typecheck_partial(s.init_expr, ctx, TypingHint(try_get_explicit_type(s.lhs), &subst));
-			typecheck_pattern(s.lhs, *s.init_expr.type, is_lvalue_expr(s.init_expr), ctx, subst, &s.init_expr);
+			typecheck_pattern(s.lhs, *s.init_expr.type, is_lvalue_expr(s.init_expr), ctx, subst, true, &s.init_expr);
 
 			if(not fully_instantiated)
 			{
@@ -7249,10 +7252,10 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 					for(MatchArm &arm: s.arms)
 					{
 						TypeEnv subst;
-						unify(*s.expr.type, arm.type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT);
-						instantiate_type(arm.type, subst, ctx);
+						typecheck_pattern(arm.capture, *s.expr.type, is_lvalue_expr(s.expr), ctx, subst, false, nullptr);
+						instantiate_type(*arm.capture.type, subst, ctx);
 
-						arm.type | match
+						*arm.capture.type | match
 						{
 							[&](StructType const &t)
 							{
@@ -7266,9 +7269,6 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 							[&](auto const &) { throw ParseError("Match case statements only work on structs"); },
 						};
 
-						if(arm.capture)
-							typecheck_pattern(*arm.capture, arm.type, is_lvalue_expr(s.expr), ctx, subst, nullptr);
-
 						typecheck(*arm.stmt, proc, ctx);
 					}
 
@@ -7281,19 +7281,16 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 					for(MatchArm &arm: s.arms)
 					{
 						TypeEnv subst;
-						unify(*s.expr.type, arm.type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT);
-						instantiate_type(arm.type, subst, ctx);
+						typecheck_pattern(arm.capture, *s.expr.type, is_lvalue_expr(s.expr), ctx, subst, false, nullptr);
+						instantiate_type(*arm.capture.type, subst, ctx);
 
-						if(optional<size_t> discr = t.canonical_def->contains(arm.type))
+						if(optional<size_t> discr = t.canonical_def->contains(*arm.capture.type))
 							arm.discr = *discr;
 						else
-							throw ParseError("Case statements must match against the alternatives of the match subject, got " + str(arm.type));
+							throw ParseError("Case statements must match against the alternatives of the match subject, got " + str(*arm.capture.type));
 
-						if(!matched_cases.insert(clone(arm.type)).second)
+						if(!matched_cases.insert(clone(*arm.capture.type)).second)
 							throw ParseError("Duplicate case value");
-
-						if(arm.capture)
-							typecheck_pattern(*arm.capture, arm.type, is_lvalue_expr(s.expr), ctx, subst, nullptr);
 
 						typecheck(*arm.stmt, proc, ctx);
 					}
@@ -8036,12 +8033,12 @@ void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type
 		},
 		[&](DerefPattern const &p)
 		{
-			string deref_expr = generate_c_cast(*lhs_pattern.type, "*(" + rhs_expr + ")", *std::get<PointerType>(rhs_type).target_type);
+			string deref_expr = generate_c_cast(*std::get<PointerType>(rhs_type).target_type, "*(" + rhs_expr + ")", *lhs_pattern.type);
 			generate_c_pattern(*p.sub, deref_expr, *lhs_pattern.type, backend);
 		},
 		[&](AddressOfPattern const &p)
 		{
-			string addr_expr = generate_c_cast(*lhs_pattern.type, "&(" + rhs_expr + ")", PointerType(clone(rhs_type), p.mutability));
+			string addr_expr = generate_c_cast(PointerType(clone(rhs_type), p.mutability), "&(" + rhs_expr + ")", *lhs_pattern.type);
 			generate_c_pattern(*p.sub, addr_expr, *lhs_pattern.type, backend);
 		},
 	};
@@ -8051,7 +8048,7 @@ MatchArm const* get_optional_some(MatchStmt const &stmt)
 {
 	for(MatchArm const &arm: stmt.arms)
 	{
-		if(StructType const *st = std::get_if<StructType>(&arm.type))
+		if(StructType const *st = std::get_if<StructType>(&*arm.capture.type))
 		{
 			if(st->inst->def->name == "Some")
 				return &arm;
@@ -8065,7 +8062,7 @@ MatchArm const* get_optional_none(MatchStmt const &stmt)
 {
 	for(MatchArm const &arm: stmt.arms)
 	{
-		if(StructType const *st = std::get_if<StructType>(&arm.type))
+		if(StructType const *st = std::get_if<StructType>(&*arm.capture.type))
 		{
 			if(st->inst->def->name == "None")
 				return &arm;
@@ -8142,9 +8139,7 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 				backend.increase_indent();
 					if(MatchArm const *some_arm = get_optional_some(s))
 					{
-						if(some_arm->capture)
-							generate_c_pattern(*some_arm->capture, subject_str, *s.expr.type, backend);
-
+						generate_c_pattern(some_arm->capture, subject_str, *s.expr.type, backend);
 						generate_c(*some_arm->stmt, proc, backend);
 					}
 				backend.decrease_indent();
@@ -8154,9 +8149,7 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 				backend.increase_indent();
 					if(MatchArm const *none_arm = get_optional_none(s))
 					{
-						if(none_arm->capture)
-							generate_c_pattern(*none_arm->capture, subject_str, *s.expr.type, backend);
-
+						generate_c_pattern(none_arm->capture, subject_str, *s.expr.type, backend);
 						generate_c(*none_arm->stmt, proc, backend);
 					}
 				backend.decrease_indent();
@@ -8174,16 +8167,13 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 						backend << "{" << LineEnd;
 						backend.increase_indent();
 
-						if(arm.capture)
+						if(is<UnionType>(*s.expr.type))
 						{
-							if(is<UnionType>(*s.expr.type))
-							{
-								string arm_expr = subject_str + ".__myca_alt" + std::to_string(*arm.discr);
-								generate_c_pattern(*arm.capture, arm_expr, arm.type, backend);
-							}
-							else
-								generate_c_pattern(*arm.capture, subject_str, *s.expr.type, backend);
+							string arm_expr = subject_str + ".__myca_alt" + std::to_string(*arm.discr);
+							generate_c_pattern(arm.capture, arm_expr, *arm.capture.type, backend);
 						}
+						else
+							generate_c_pattern(arm.capture, subject_str, *s.expr.type, backend);
 
 						generate_c(*arm.stmt, proc, backend);
 

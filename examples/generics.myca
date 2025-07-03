@@ -22,8 +22,8 @@ proc unwrap'T(opt: ?T) -> T
 {
 	match opt
 	{
-		case Some -> v { return v.value; }
-		case None { fatal(c"empty option"); }
+		case v: Some { return v.value; }
+		case _: None { fatal(c"empty option"); }
 	}
 }
 
@@ -202,7 +202,7 @@ proc get_default'T(opt: Option'T, _default: T) -> T
 {
 	match opt
 	{
-		case Option.Some -> v { return v.value; }
-		case Option.None { return _default; }
+		case v: Option.Some { return v.value; }
+		case _: Option.None { return _default; }
 	}
 }

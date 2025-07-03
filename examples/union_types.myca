@@ -35,13 +35,13 @@ proc foo(v: Option'i32|ArithError) -> i32
 {
 	match v
 	{
-		case ArithError { return 23; }
-		case Option -> opt
+		case _: ArithError { return 23; }
+		case opt: Option
 		{
 			match opt
 			{
-				case Option.Some -> v { return v.value; }
-				case Option.None { return -1; }
+				case v: Option.Some { return v.value; }
+				case _: Option.None { return -1; }
 			}
 		}
 	}
@@ -68,10 +68,10 @@ proc main() -> i32
 
 	match safe_divide(23, 4)
 	{
-		case i32 -> v {
+		case v: i32 {
 			return v + foo(Option.Some(3)); // 8
 		}
-		case ArithError {
+		case _: ArithError {
 			return -1;
 		}
 	}

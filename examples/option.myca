@@ -25,8 +25,8 @@ proc unwrap'T(opt: ?T) -> T
 {
 	match opt
 	{
-		case Some -> v { return v.value; }
-		case None { fatal(c"empty option"); }
+		case v:Some { return v.value; }
+		case _:None { fatal(c"empty option"); }
 	}
 }
 
@@ -48,7 +48,7 @@ proc main() -> i32
 
 	match idx
 	{
-		case Some -> v { return v.value + unwrap(safe_div(13, 2)) + unwrap(1) + unwrap(unwrap(oo)); } // 109
-		case None { return 0; }
+		case v:Some { return v.value + unwrap(safe_div(13, 2)) + unwrap(1) + unwrap(unwrap(oo)); } // 109
+		case _:None { return 0; }
 	}
 }
