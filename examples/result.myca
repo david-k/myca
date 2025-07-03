@@ -14,17 +14,12 @@ typealias error'(TOk, TError) = Result'(TOk, TError).Error;
 
 
 
-struct DivisionByZero {}
-struct Overflow {}
+typealias ArithError = struct DivisionByZero
+                     | struct Overflow;
 
-typealias ArithError = DivisionByZero
-                     | Overflow;
 
-struct FileNotFound {}
-struct NoPermission
-
-typealias IOError = FileNotFound
-                  | NoPermission;
+typealias IOError = struct FileNotFound
+                  | struct NoPermission;
 
 typealias Error = ArithError | IOError;
 
@@ -33,7 +28,7 @@ typealias Error = ArithError | IOError;
 proc safe_div(a: i32, b: i32) -> i32!Error
 {
 	if b == 0 {
-		return error(DivisionByZero());
+		return error(DivisionByZero);
 	}
 
 	return a / b;

@@ -2189,13 +2189,14 @@ using ItemDef = variant<ProcDef, StructDef, AliasDef>;
 class Scope
 {
 public:
-	explicit Scope(Module *mod, Scope *parent = nullptr) :
+	explicit Scope(Module *mod, bool accept_item_decls, Scope *parent = nullptr) :
 		m_mod(mod),
-		m_parent(parent) {}
+		m_parent(parent),
+		m_accept_item_decls(accept_item_decls) {}
 
-	Scope* new_child()
+	Scope* new_child(bool accept_item_decls)
 	{
-		m_children.push_back(std::make_unique<Scope>(m_mod, this));
+		m_children.push_back(std::make_unique<Scope>(m_mod, accept_item_decls, this));
 		return m_children.back().get();
 	}
 
@@ -2262,6 +2263,9 @@ public:
 
 	ProcDef* add_proc(string const &name, Scope *scope)
 	{
+		if(not m_accept_item_decls)
+			return m_parent->add_proc(name, scope);
+
 		if(m_defs.contains(name))
 			throw ParseError("There already exists a definition with this name: " + name);
 
@@ -2274,6 +2278,9 @@ public:
 
 	StructDef* add_struct(string const &name, Scope *scope)
 	{
+		if(not m_accept_item_decls)
+			return m_parent->add_struct(name, scope);
+
 		if(m_defs.contains(name))
 			throw ParseError("There already exists a definition with this name: " + name);
 
@@ -2292,6 +2299,9 @@ public:
 
 	AliasDef* add_alias(string const &name, Type &&type)
 	{
+		if(not m_accept_item_decls)
+			return m_parent->add_alias(name, std::move(type));
+
 		if(m_defs.contains(name))
 			throw ParseError("There already exists a definition with this name: " + name);
 
@@ -2343,6 +2353,7 @@ private:
 	Module *m_mod;
 	vector<OwnPtr<Scope>> m_children;
 	Scope *m_parent;
+	bool m_accept_item_decls;
 
 	unordered_map<string, TypeVarDef> m_type_vars;
 	unordered_map<string, VarDef> m_vars;
@@ -2379,15 +2390,15 @@ class Module
 {
 public:
 	Module() :
-		m_global_scope(std::make_unique<Scope>(this)),
+		m_global_scope(std::make_unique<Scope>(this, true)),
 		m_cur_scope(m_global_scope.get()) {}
 
 	Scope* scope() { return m_cur_scope; }
 	Scope* global() { return m_global_scope.get(); }
 
-	Scope* open_scope()
+	Scope* open_scope(bool accept_item_decls = true)
 	{
-		return m_cur_scope = m_cur_scope->new_child();
+		return m_cur_scope = m_cur_scope->new_child(accept_item_decls);
 	}
 
 	void close_scope()
@@ -3151,6 +3162,8 @@ inline optional<Token> try_consume(Parser &parser, Lexeme kind)
 Type parse_prefix_type(Parser &parser, Module &mod);
 Type parse_type(Parser &parser, Module &mod);
 
+StructDef* parse_struct(Parser &parser, Module &mod, bool top_level, ParentRelation parent = NoParent());
+
 TypeArgList parse_type_arg_list(Parser &parser, Module &mod)
 {
 	TypeArgList arg_list;
@@ -3260,6 +3273,15 @@ Type parse_prefix_type(Parser &parser, Module &mod)
 			proc_type.ret = parse_type(parser, mod);
 
 			return ProcType(mod.add_proc_type(std::move(proc_type)));
+		}
+
+		case Lexeme::STRUCT:
+		{
+			StructDef* struct_ = parse_struct(parser, mod, false);
+			if(struct_->type_params.size())
+				throw ParseError("Inline struct definition cannot have type parameters");
+
+			return UnresolvedPath(struct_->name, {}, mod.scope());
 		}
 
 		default: throw ParseError("Invalid token while parsing type: "s + str(tok.kind));
@@ -3847,7 +3869,7 @@ void init_constructor_params(StructDef *struct_)
 	}
 }
 
-StructDef* parse_struct(Parser &parser, Module &mod, ParentRelation parent = NoParent())
+StructDef* parse_struct(Parser &parser, Module &mod, bool top_level, ParentRelation parent)
 {
 	string_view name = consume(parser, Lexeme::IDENTIFIER).text;
 	StructDef *struct_ = mod.scope()->add_struct(string(name), mod.open_scope());
@@ -3862,7 +3884,7 @@ StructDef* parse_struct(Parser &parser, Module &mod, ParentRelation parent = NoP
 			if(try_consume(parser, Lexeme::CASE))
 			{
 				bool implicit_ctor = (bool)try_consume(parser, Lexeme::IMPLICIT);
-				StructDef *case_member = parse_struct(parser, mod, CaseMemberOf(struct_, struct_->num_cases));
+				StructDef *case_member = parse_struct(parser, mod, false, CaseMemberOf(struct_, struct_->num_cases));
 				struct_->members.push_back(case_member);
 				struct_->num_cases += 1;
 
@@ -3896,7 +3918,11 @@ StructDef* parse_struct(Parser &parser, Module &mod, ParentRelation parent = NoP
 		consume(parser, Lexeme::RIGHT_BRACE);
 	}
 	else
+	{
 		struct_->ctor_without_parens = true;
+		if(top_level)
+			consume(parser, Lexeme::SEMICOLON);
+	}
 
 	mod.close_scope();
 	if(is<NoParent>(parent))
@@ -3919,13 +3945,13 @@ void parse_top_level_item(Parser &parser, Module &mod)
 	switch(tok.kind)
 	{
 		case Lexeme::PROC: mod.add_item(parse_proc(parser, mod)); break;
-		case Lexeme::STRUCT: mod.add_item(parse_struct(parser, mod)); break;
+		case Lexeme::STRUCT: mod.add_item(parse_struct(parser, mod, true)); break;
 
 		case Lexeme::TYPEALIAS:
 		{
 			string_view alias_name = consume(parser, Lexeme::IDENTIFIER).text;
 
-			mod.open_scope();
+			mod.open_scope(false);
 			vector<TypeVarDef*> type_params = parse_type_param_list(parser, mod);
 			consume(parser, Lexeme::EQ);
 			Type type = parse_type(parser, mod);
@@ -3949,7 +3975,7 @@ void parse_top_level_item(Parser &parser, Module &mod)
 			}
 			else if(try_consume(parser, Lexeme::STRUCT))
 			{
-				StructDef *struct_ = parse_struct(parser, mod);
+				StructDef *struct_ = parse_struct(parser, mod, true);
 				if(not struct_->ctor_without_parens)
 					throw ParseError("Extern structs must not have any members");
 

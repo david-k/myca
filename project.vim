@@ -9,7 +9,7 @@ let g:vimspector_configurations = {
   \     'configuration': {
   \       'request': 'launch',
   \       'program': '${cwd}/build/myca',
-  \       'args': ["examples/option.myca", "-o", "build/examples/option.c"],
+  \       'args': ["examples/result.myca", "-o", "build/examples/result.c"],
   \       'stopAtEntry': v:false,
   \       'cwd': '${cwd}',
   \       'environment': [],
