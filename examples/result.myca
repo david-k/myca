@@ -13,11 +13,22 @@ typealias ok'(TOk, TError) = Result'(TOk, TError).Ok;
 typealias error'(TOk, TError) = Result'(TOk, TError).Error;
 
 
+
 struct DivisionByZero {}
 struct Overflow {}
 
-typealias Error = DivisionByZero
-                | Overflow;
+typealias ArithError = DivisionByZero
+                     | Overflow;
+
+struct FileNotFound {}
+struct NoPermission
+
+typealias IOError = FileNotFound
+                  | NoPermission;
+
+typealias Error = ArithError | IOError;
+
+
 
 proc safe_div(a: i32, b: i32) -> i32!Error
 {
@@ -37,6 +48,17 @@ proc unwrap'(TOk, TError)(r: TOk!TError) -> TOk
 	}
 }
 
+proc panic(err: Error) -> Never
+{
+	match err
+	{
+		case DivisionByZero { fatal(c"division by zero\n"); }
+		case Overflow { fatal(c"overflow\n"); }
+		case FileNotFound { fatal(c"file not found\n"); }
+		case NoPermission { fatal(c"no permission\n"); }
+	}
+}
+
 
 proc main() -> i32
 {
@@ -45,6 +67,6 @@ proc main() -> i32
 	match d
 	{
 		case ok -> v { return v.value + unwrap(ok'(i8,Error)(3)); } // 10
-		case error { fatal(c"division failed"); }
+		case error -> e { panic(e.value); }
 	}
 }

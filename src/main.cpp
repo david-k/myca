@@ -2371,6 +2371,19 @@ struct UnionTypeInfo
 	unordered_set<TypeDefInstance> type_deps;
 };
 
+bool operator < (Type const &a, Type const &b);
+
+void flatten_union(vector<Type> const &alternatives, vector<Type> &result)
+{
+	for(Type const &alt: alternatives)
+	{
+		if(UnionType const *child_union = std::get_if<UnionType>(&alt))
+			flatten_union(child_union->def->alternatives, result);
+		else
+			result.push_back(clone(alt));
+	}
+}
+
 class Module
 {
 public:
@@ -2421,13 +2434,17 @@ public:
 
 	UnionTypeDef const* get_canonical(UnionTypeDef const &union_)
 	{
-		auto it = m_canonical_union_types.find(union_);
+		UnionTypeDef canonical;
+		flatten_union(union_.alternatives, canonical.alternatives);
+		std::sort(canonical.alternatives.begin(), canonical.alternatives.end());
+
+		auto it = m_canonical_union_types.find(canonical);
 		if(it != m_canonical_union_types.end())
 			return &*it;
 
 		// TODO Make sure each alternative has a unique type
 
-		auto res = m_canonical_union_types.insert(clone(union_));
+		auto res = m_canonical_union_types.insert(clone(canonical));
 		UnionTypeDef const *def = &*res.first;
 
 		for(ModuleListener *l: m_listeners)
@@ -4993,7 +5010,6 @@ void resolve_types(Type &type, SemaContext &ctx)
 					instantiate_type(alt, {}, ctx);
 				}
 
-				std::sort(t.def->alternatives.begin(), t.def->alternatives.end());
 				t.canonical_def = ctx.mod().get_canonical(*t.def);
 			}
 		},
@@ -5590,7 +5606,6 @@ UnionType instantiate_union_type(UnionTypeDef const &union_, TypeEnv const &type
 		instantiate_type(new_alt, type_env, ctx);
 		new_type.alternatives.push_back(std::move(new_alt));
 	}
-	std::sort(new_type.alternatives.begin(), new_type.alternatives.end());
 
 	UnionType ut;
 	ut.def = ctx.mod().add_union_type(std::move(new_type));
