@@ -38,8 +38,8 @@ proc unwrap'(TOk, TError)(r: TOk!TError) -> TOk
 {
 	match r
 	{
-		case v: Ok { return v.value; }
-		case _: Err { fatal(c"empty result"); }
+		case Ok(let value) { return value; }
+		case Err { fatal(c"empty result"); }
 	}
 }
 
@@ -47,10 +47,10 @@ proc panic(err: Error) -> Never
 {
 	match err
 	{
-		case _: DivisionByZero { fatal(c"division by zero\n"); }
-		case _: Overflow       { fatal(c"overflow\n"); }
-		case _: FileNotFound   { fatal(c"file not found\n"); }
-		case _: NoPermission   { fatal(c"no permission\n"); }
+		case DivisionByZero { fatal(c"division by zero\n"); }
+		case Overflow       { fatal(c"overflow\n"); }
+		case FileNotFound   { fatal(c"file not found\n"); }
+		case NoPermission   { fatal(c"no permission\n"); }
 	}
 }
 
@@ -61,7 +61,7 @@ proc main() -> i32
 
 	match d
 	{
-		case v: Ok { return v.value + unwrap(Ok'(i8,Error)(3)); } // 10
-		case e: Err { panic(e.value); }
+		case Ok(let value) { return value + unwrap(Ok'(i8,Error)(3)); } // 10
+		case Err(let err) { panic(err); }
 	}
 }

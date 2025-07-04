@@ -1474,11 +1474,29 @@ struct VarPattern
 };
 
 
+struct PatternArgument
+{
+	OwnPtr<Pattern> pattern;
+	optional<string> param_name;
+
+	// Available after type checking
+	optional<size_t> param_idx = nullopt;
+};
+
+struct ConstructorPattern
+{
+	Type ctor;
+	vector<PatternArgument> args;
+	bool has_parens;
+};
+
+
 struct Pattern : variant
 <
-	struct VarPattern,
-	struct DerefPattern,
-	struct AddressOfPattern
+	VarPattern,
+	DerefPattern,
+	AddressOfPattern,
+	ConstructorPattern
 >
 {
 	template<typename T>
@@ -1492,6 +1510,9 @@ struct Pattern : variant
 	// Available after semantic analysis
 	optional<Type> type;
 };
+
+
+PatternArgument clone(PatternArgument const &arg);
 
 Pattern clone(Pattern const &pattern)
 {
@@ -1517,6 +1538,27 @@ Pattern clone(Pattern const &pattern)
 				clone(pattern.type)
 			);
 		},
+		[&](ConstructorPattern const &p)
+		{
+			vector<PatternArgument> args;
+			for(PatternArgument const &arg: p.args)
+				args.push_back(clone(arg));
+
+			return Pattern(
+				ConstructorPattern(clone(p.ctor), std::move(args), p.has_parens),
+				clone(pattern.provided_type),
+				clone(pattern.type)
+			);
+		}
+	};
+}
+
+PatternArgument clone(PatternArgument const &arg)
+{
+	return PatternArgument{
+		.pattern = std::make_unique<Pattern>(clone(*arg.pattern)),
+		.param_name = arg.param_name,
+		.param_idx = arg.param_idx,
 	};
 }
 
@@ -2881,6 +2923,14 @@ std::ostream& print(std::ostream &os, Pattern const &pattern)
 			if(p.mutability == IsMutable::YES)
 				os << "mut";
 		},
+		[&](ConstructorPattern const &p)
+		{
+			os << p.ctor << "(" << RangeFmt(p.args, ", ", [&](PatternArgument const &arg)
+			{
+				print(os, *arg.pattern);
+			}) << ")";
+
+		}
 	};
 
 	return os;
@@ -3601,14 +3651,16 @@ Expr parse_infix_expr(Parser &parser, Module &mod, Expr &&left)
 //--------------------------------------------------------------------
 // Patterns
 //--------------------------------------------------------------------
+Pattern parse_pattern(Parser &parser, Module &mod);
+
 Pattern parse_primary_pattern(Parser &parser, Module &mod)
 {
 	require_not_done(parser, "pattern");
 	switch(parser.tok().kind)
 	{
-		case Lexeme::MUT:
-		case Lexeme::IDENTIFIER:
+		case Lexeme::LET:
 		{
+			parser.next();
 			IsMutable mutability = IsMutable::NO;
 			if(try_consume(parser, Lexeme::MUT))
 				mutability = IsMutable::YES;
@@ -3617,6 +3669,31 @@ Pattern parse_primary_pattern(Parser &parser, Module &mod)
 			VarDef *var = mod.scope()->declare_var(string(ident), mutability, VarKind::LOCAL);
 
 			return Pattern(VarPattern(var), nullopt);
+		}
+
+		case Lexeme::IDENTIFIER:
+		{
+			Type ctor = parse_type(parser, mod);
+
+			bool has_parens = false;
+			vector<PatternArgument> args;
+			if(try_consume(parser, Lexeme::LEFT_PAREN))
+			{
+				has_parens = true;
+				while(parser.peek() != Lexeme::RIGHT_PAREN)
+				{
+					args.push_back(PatternArgument{
+						.pattern = std::make_unique<Pattern>(parse_pattern(parser, mod)),
+						.param_name = nullopt,
+						.param_idx = nullopt,
+					});
+					if(parser.peek() != Lexeme::RIGHT_PAREN)
+						consume(parser, Lexeme::COMMA);
+				}
+				consume(parser, Lexeme::RIGHT_PAREN);
+			}
+
+			return Pattern(ConstructorPattern(std::move(ctor), std::move(args), has_parens), nullopt);
 		}
 
 		default:
@@ -3670,7 +3747,6 @@ Stmt parse_stmt(Parser &parser, Module &mod)
 	{
 		case Lexeme::LET:
 		{
-			parser.next();
 			Pattern lhs = parse_pattern(parser, mod);
 			consume(parser, Lexeme::EQ);
 			Expr init_expr = parse_expr(parser, mod);
@@ -5150,9 +5226,15 @@ void resolve_identifiers(Pattern &pattern, SemaContext &ctx)
 
 	pattern | match
 	{
-		[&](VarPattern const&) {},
-		[&](DerefPattern const &p) { resolve_identifiers(*p.sub, ctx); },
-		[&](AddressOfPattern const &p) { resolve_identifiers(*p.sub, ctx); },
+		[&](VarPattern&) {},
+		[&](DerefPattern &p) { resolve_identifiers(*p.sub, ctx); },
+		[&](AddressOfPattern &p) { resolve_identifiers(*p.sub, ctx); },
+		[&](ConstructorPattern &p)
+		{
+			resolve_types(p.ctor, ctx);
+			for(PatternArgument &arg: p.args)
+				resolve_identifiers(*arg.pattern, ctx);
+		},
 	};
 }
 
@@ -5856,6 +5938,12 @@ void instantiate_types(Pattern &pattern, TypeEnv const &type_env, SemaContext &c
 		[&](AddressOfPattern const &p)
 		{
 			instantiate_types(*p.sub, type_env, ctx);
+		},
+		[&](ConstructorPattern &p)
+		{
+			instantiate_type(p.ctor, type_env, ctx);
+			for(PatternArgument &arg: p.args)
+				instantiate_types(*arg.pattern, type_env, ctx);
 		},
 	};
 }
@@ -7104,14 +7192,15 @@ void typecheck_pattern(
 	optional<IsMutable> rhs_is_lvalue,
 	SemaContext &ctx,
 	TypeEnv &subst,
-	bool always_matching,
+	bool infallible_pattern_required,
 	Expr *rhs_expr
 )
 {
+	Type const *expected_type = &rhs_type;
 	if(lhs_pattern.provided_type)
 	{
 		try {
-			if(always_matching)
+			if(infallible_pattern_required)
 				unify(*lhs_pattern.provided_type, rhs_type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, rhs_expr);
 			else
 				unify(rhs_type, *lhs_pattern.provided_type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, rhs_expr);
@@ -7119,33 +7208,36 @@ void typecheck_pattern(
 			throw ParseError("Inferred type does not match specified type in let statement: "s + e.what());
 		}
 		instantiate_type(*lhs_pattern.provided_type, subst, ctx);
-		lhs_pattern.type = clone(*lhs_pattern.provided_type);
+		expected_type = &*lhs_pattern.provided_type;
 	}
-	else
-		lhs_pattern.type = clone(rhs_type);
 
 
 	lhs_pattern | match
 	{
 		[&](VarPattern &p)
 		{
-			p.var->type = clone(lhs_pattern.type);
+			p.var->type = clone(*expected_type);
+			lhs_pattern.type = clone(*expected_type);
 		},
 		[&](DerefPattern &p)
 		{
-			if(PointerType const *pointer = std::get_if<PointerType>(&*lhs_pattern.type))
-				typecheck_pattern(*p.sub, *pointer->target_type, rhs_is_lvalue, ctx, subst, always_matching, nullptr);
+			if(PointerType const *pointer = std::get_if<PointerType>(expected_type))
+			{
+				typecheck_pattern(*p.sub, *pointer->target_type, rhs_is_lvalue, ctx, subst, infallible_pattern_required, nullptr);
+				lhs_pattern.type = clone(*p.sub->type);
+			}
 			else
 				throw ParseError("Invalid pattern op: target type not a pointer");
 		},
-		[&](AddressOfPattern const &p)
+		[&](AddressOfPattern &p)
 		{
 			if(rhs_is_lvalue)
 			{
 				if(*rhs_is_lvalue == IsMutable::YES || p.mutability == IsMutable::NO)
 				{
-					Type pt(PointerType(clone(*lhs_pattern.type), p.mutability));
-					typecheck_pattern(*p.sub, pt, rhs_is_lvalue, ctx, subst, always_matching, nullptr);
+					Type pt(PointerType(clone(*expected_type), p.mutability));
+					typecheck_pattern(*p.sub, pt, rhs_is_lvalue, ctx, subst, infallible_pattern_required, nullptr);
+					lhs_pattern.type = clone(*p.sub->type);
 				}
 				else
 					throw ParseError("Cannot make mutable reference to const object");
@@ -7153,6 +7245,74 @@ void typecheck_pattern(
 			else
 				throw ParseError("Can only take address of lvalue expression");
 		},
+		[&](ConstructorPattern &p)
+		{
+			unify(*expected_type, p.ctor, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, nullptr);
+			instantiate_type(p.ctor, subst, ctx);
+
+			// Validate constructor
+			StructType const *ctor = std::get_if<StructType>(&p.ctor);
+			if(ctor)
+			{
+				if(p.has_parens and (ctor->inst->def->ctor_without_parens or not ctor->inst->constructor_params))
+					throw ParseError("Invalid parentheses after type in pattern");
+
+				// If no parens are given then we only match on the type
+				if(p.has_parens and ctor->inst->constructor_params)
+				{
+					if(p.args.size() > ctor->inst->constructor_params->size())
+						throw ParseError("Too many arguments provided for constructor in pattern");
+
+					if(p.args.size() < ctor->inst->constructor_params->size())
+						throw ParseError("TODO: Support default arguments in patterns");
+
+					for(size_t i = 0; i < p.args.size(); ++i)
+					{
+						PatternArgument &arg = p.args[i];
+						Parameter const &param = ctor->inst->constructor_params->at(i);
+
+						if(arg.param_name)
+							throw ParseError("TODO: Support named arguments in constructor pattern");
+
+						typecheck_pattern(*arg.pattern, param.type, rhs_is_lvalue, ctx, subst, infallible_pattern_required, nullptr);
+						arg.param_idx = i;
+					}
+				}
+			}
+
+			// Check whether the constructor can actually match against the RHS
+			if(StructType const *rhs_struct_type = std::get_if<StructType>(expected_type))
+			{
+				if(not ctor)
+					throw ParseError("Constructor in pattern must refer to a struct type");
+
+				if(not ctor->inst->constructor_params)
+					throw ParseError("Struct in pattern does not have a constructor");
+
+				StructDefInstance const *rhs_inst = rhs_struct_type->inst;
+
+				if(ctor->inst->outer_struct == rhs_inst)
+				{
+					if(infallible_pattern_required && rhs_inst->case_members().size() > 1)
+						throw ParseError("Constructor pattern must be infallible but is not");
+				}
+				else if(ctor->inst == rhs_inst) {
+					// Always succeeds
+				}
+				else
+					throw ParseError("Constructor in pattern must match against a compatible struct type");
+			}
+			else if(UnionType const *rhs_union_type = std::get_if<UnionType>(expected_type))
+			{
+				UnionTypeDef const *union_ = rhs_union_type->canonical_def;
+				if(not union_->contains(p.ctor))
+					throw ParseError("Constructor in pattern must match against a member of the union type");
+			}
+			else
+				throw ParseError("Constructor in pattern must match against a compatible struct or union type");
+
+			lhs_pattern.type = clone(p.ctor);
+		}
 	};
 }
 
@@ -7255,21 +7415,14 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 						typecheck_pattern(arm.capture, *s.expr.type, is_lvalue_expr(s.expr), ctx, subst, false, nullptr);
 						instantiate_type(*arm.capture.type, subst, ctx);
 
-						*arm.capture.type | match
-						{
-							[&](StructType const &t)
-							{
-								if(t.inst->outer_struct != subject)
-									throw ParseError("Case statements must match against the case members of the match subject");
-
-								arm.discr = t.inst->def->get_case_idx();
-								if(!matched_cases.insert(t.inst).second)
-									throw ParseError("Duplicate case value");
-							},
-							[&](auto const &) { throw ParseError("Match case statements only work on structs"); },
-						};
-
 						typecheck(*arm.stmt, proc, ctx);
+
+						StructDefInstance const *arm_inst = std::get<StructType>(*arm.capture.type).inst;
+						assert(arm_inst->outer_struct == subject);
+						if(!matched_cases.insert(arm_inst).second)
+							throw ParseError("Duplicate case value");
+
+						arm.discr = arm_inst->def->get_case_idx();
 					}
 
 					if(matched_cases.size() != subject->def->num_cases)
@@ -7284,15 +7437,11 @@ void typecheck(Stmt &stmt, ProcDef const *proc, SemaContext &ctx)
 						typecheck_pattern(arm.capture, *s.expr.type, is_lvalue_expr(s.expr), ctx, subst, false, nullptr);
 						instantiate_type(*arm.capture.type, subst, ctx);
 
-						if(optional<size_t> discr = t.canonical_def->contains(*arm.capture.type))
-							arm.discr = *discr;
-						else
-							throw ParseError("Case statements must match against the alternatives of the match subject, got " + str(*arm.capture.type));
-
 						if(!matched_cases.insert(clone(*arm.capture.type)).second)
 							throw ParseError("Duplicate case value");
 
 						typecheck(*arm.stmt, proc, ctx);
+						arm.discr = *t.canonical_def->contains(*arm.capture.type);
 					}
 
 					if(matched_cases.size() != t.canonical_def->alternatives.size())
@@ -7346,6 +7495,9 @@ void typecheck(TopLevelItem item, SemaContext &ctx)
 				CASE_MEMBERS,
 				TRAILING_VAR_MEMBERS,
 			};
+
+			if(def->ctor_without_parens and def->constructor_params and def->constructor_params->size())
+				throw ParseError("Struct must have braces because it inherits members from parent");
 
 			MemberListState state = INITIAL_VAR_MEMBERS;
 			for(Member &member: def->members)
@@ -7810,11 +7962,11 @@ string generate_c_cast(Type const &target_type, string const &expr, Type const &
 	{
 		[&](StructType const&)
 		{
-			return "*(" + type_val + "*)&(" + expr + ")";
+			return "(*(" + type_val + "*)&(" + expr + "))";
 		},
 		[&](auto const&)
 		{
-			return "(" + type_val + ")(" + expr + ")";
+			return "((" + type_val + ")(" + expr + "))";
 		},
 	};
 }
@@ -8041,6 +8193,24 @@ void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type
 			string addr_expr = generate_c_cast(PointerType(clone(rhs_type), p.mutability), "&(" + rhs_expr + ")", *lhs_pattern.type);
 			generate_c_pattern(*p.sub, addr_expr, *lhs_pattern.type, backend);
 		},
+		[&](ConstructorPattern const &p)
+		{
+			StructType const *ctor = std::get_if<StructType>(&p.ctor);
+			if(p.has_parens and ctor and ctor->inst->constructor_params)
+			{
+				assert(p.args.size() == ctor->inst->constructor_params->size());
+				for(PatternArgument const &arg: p.args)
+				{
+					string object_str = generate_c_cast(p.ctor, rhs_expr, rhs_type);
+					Parameter const &param = ctor->inst->constructor_params->at(*arg.param_idx);
+
+					if(is_optional_ptr(p.ctor) && param.name == "value")
+						generate_c_pattern(*arg.pattern, object_str, param.type, backend);
+					else
+						generate_c_pattern(*arg.pattern, object_str + "." + param.name, param.type, backend);
+				}
+			}
+		}
 	};
 }
 

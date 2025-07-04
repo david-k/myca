@@ -42,17 +42,17 @@ proc mk_int(value: i32) -> Json
 proc get_prime_factor_2(json: Json) -> i32
 {
 	match json {
-		case _: Json.Null {
+		case Json.Null {
 			return 2;
 		}
-		case _: Json.Bool {
+		case Json.Bool {
 			return 3;
 		}
-		case v: Json.Int {
-			return 5 * v.value;
+		case Json.Int(let id, let value, let name) {
+			return 5 * value;
 		}
-		case v: Json.Array {
-			return 7 * v.count;
+		case let arr: Json.Array {
+			return 7 * arr.count;
 		}
 	}
 }
@@ -60,12 +60,12 @@ proc get_prime_factor_2(json: Json) -> i32
 proc increase_jint(json: ^mut Json)
 {
 	match json^ {
-		case _: Json.Null {}
-		case _: Json.Bool {}
-		case v &mut: Json.Int {
-			v^.value := v^.value + 1;
+		case Json.Null {}
+		case Json.Bool {}
+		case Json.Int(let id, let value &mut, let name) {
+			value^ := value^ + 1;
 		}
-		case _: Json.Array {}
+		case Json.Array {}
 	}
 
 	/*if json^

@@ -211,6 +211,8 @@ struct Range
 
 	reference operator [] (size_t idx) { return *(first + idx); }
 	reference const operator [] (size_t idx) const { return *(first + idx); }
+
+	size_t size() const { return last - first; }
 };
 
 template<typename It>

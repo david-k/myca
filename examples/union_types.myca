@@ -12,14 +12,14 @@ proc lookup(idx: i32) -> IntOrBool
 
 struct ArithError
 {
-	case DivisionByZero{},
-	case Overflow{},
+	case DivisionByZero,
+	case Overflow,
 }
 
 proc safe_divide(a: i32, b: i32) -> i32|ArithError
 {
 	if b == 0 {
-		return ArithError.DivisionByZero();
+		return ArithError.DivisionByZero;
 	}
 
 	return a / b;
@@ -28,20 +28,20 @@ proc safe_divide(a: i32, b: i32) -> i32|ArithError
 struct Option'T
 {
 	case Some{value: T},
-	case None{},
+	case None,
 }
 
 proc foo(v: Option'i32|ArithError) -> i32
 {
 	match v
 	{
-		case _: ArithError { return 23; }
-		case opt: Option
+		case ArithError { return 23; }
+		case let opt: Option
 		{
 			match opt
 			{
-				case v: Option.Some { return v.value; }
-				case _: Option.None { return -1; }
+				case Option.Some(let value) { return value; }
+				case Option.None { return -1; }
 			}
 		}
 	}
@@ -49,15 +49,12 @@ proc foo(v: Option'i32|ArithError) -> i32
 
 
 
-struct FileNotFound {_:i8 = 0}
-struct NoPermission {_:i8 = 0}
-
-typealias IOError = FileNotFound
-                  | NoPermission;
+typealias IOError = struct FileNotFound
+                  | struct NoPermission;
 
 proc read() -> i32 | IOError
 {
-	return FileNotFound(); // Nested union type
+	return FileNotFound; // Nested union type
 }
 
 
@@ -68,11 +65,11 @@ proc main() -> i32
 
 	match safe_divide(23, 4)
 	{
-		case v: i32 {
+		case let v: i32 {
 			return v + foo(Option.Some(3)); // 8
 		}
-		case _: ArithError {
-			return -1;
+		case ArithError {
+			return 254;
 		}
 	}
 }
