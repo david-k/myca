@@ -6270,8 +6270,6 @@ vector<T> singleton_vec(T &&t)
 	return vec;
 }
 
-bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint);
-
 // Handle unification for both StructType and UnappliedStructPath
 bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaContext &ctx, UnificationMode mode, Expr *right_expr)
 {
@@ -6291,7 +6289,7 @@ bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaCo
 
 		if(src_spec->first != dest_spec->first)
 		{
-			if(mode == UnificationMode::COMMON_TYPE)
+			if(mode == UnificationMode::COMMON_TYPE || mode == UnificationMode::EQUAL)
 				throw ParseError("Unification failed: Expected "s + str(dest) + ", got " + str(src));
 
 			while(true)
@@ -6304,7 +6302,11 @@ bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaCo
 
 				src_spec = src_struct_climber->next();
 				if(not src_spec)
-					throw ParseError("Unification failed: Cannot assign "s + str(src) + " to " + str(dest));
+				{
+					// Trying to unify both sides without a potential implicit ctor failed, so now
+					// try unification with the implicit ctor
+					goto TRY_UNIFY_WITH_IMPLICIT_CTOR;
+				}
 			}
 		}
 		assert(dest_spec->first == src_spec->first);
@@ -6317,7 +6319,11 @@ bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaCo
 			{
 				Type const &dest_arg = dest_spec->second->args[i];
 				Type const &src_arg = src_spec->second->args[i];
-				unify(dest_arg, src_arg, subst, ctx, UnificationMode::EQUAL);
+				try {
+					unify(dest_arg, src_arg, subst, ctx, UnificationMode::EQUAL);
+				} catch(ParseError const&) {
+					goto TRY_UNIFY_WITH_IMPLICIT_CTOR;
+				}
 			}
 
 			dest_spec = dest_struct_climber->next();
@@ -6327,6 +6333,8 @@ bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaCo
 
 		return true;
 	}
+
+TRY_UNIFY_WITH_IMPLICIT_CTOR:
 
 	if(mode == UnificationMode::VALUE_ASSIGNMENT && dest_struct.first->implicit_ctor)
 	{
