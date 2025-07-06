@@ -1,5 +1,6 @@
 struct c_char { _: i8 }
 extern proc fatal(msg: [^]c_char);
+extern proc puts(msg: [^]c_char) -> i32;
 
 
 struct Result'(TOk, TError)
@@ -57,6 +58,7 @@ proc panic(err: Error) -> Never
 
 proc main() -> i32
 {
+	get_and_print_color();
 	let d = safe_div(23, 3);
 
 	match d
@@ -65,3 +67,45 @@ proc main() -> i32
 		case Err(let err) { panic(err); }
 	}
 }
+
+
+typealias Color = struct RED | struct GREEN | struct BLUE;
+
+proc get_color() -> Color!Error
+{
+	return BLUE;
+}
+
+proc get_and_print_color()
+{
+	match get_color()
+	{
+		case Ok(let c)
+		{
+			match c
+			{
+				case RED { puts(c"RED\n"); }
+				case GREEN { puts(c"GREEN\n"); }
+				case BLUE { puts(c"BLUE\n"); }
+			}
+		}
+		case Err(let err) {
+			puts(c"failed to get color");
+			panic(err);
+		}
+	}
+}
+
+/*proc get_and_print_color()
+{
+	match get_color()
+	{
+		case Ok(RED) { puts(c"RED\n"); }
+		case Ok(GREEN) { puts(c"GREEN\n"); }
+		case Ok(BLUE) { puts(c"BLUE\n"); }
+		case Err(let err) {
+			puts(c"failed to get color");
+			panic(err);
+		}
+	}
+}*/
