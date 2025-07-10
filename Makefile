@@ -16,5 +16,5 @@ build/examples/%: examples/%.myca RUN_ALWAYS
 	./build/myca $< -o $@.c
 	gcc -Wall -Wextra -Wpedantic $@.c -o $@
 
-run: build/examples/result
+run: build/examples/try
 	./$<

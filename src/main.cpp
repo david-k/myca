@@ -1315,11 +1315,23 @@ struct UnappliedProcExpr
 
 struct TryExpr
 {
-	TryExpr(Expr &&subject, optional<Stmt> &&on_failure, optional<Pattern> &&error_capture);
+	TryExpr(
+		Expr &&subject,
+		optional<Stmt> &&on_failure,
+		optional<Pattern> &&error_capture,
+		NullableOwnPtr<Stmt> match_stmt = nullptr,
+		NullableOwnPtr<Expr> result_expr = nullptr
+	);
 
 	OwnPtr<Expr> subject;
+
+	// These are only used for constructing the `match_stmt`, i.e., they are not typechecked etc
 	NullableOwnPtr<Stmt> on_failure;
 	NullableOwnPtr<Pattern> error_capture;
+
+	// Available after semantic analysis
+	NullableOwnPtr<Stmt> match_stmt;
+	NullableOwnPtr<Expr> result_expr;
 };
 
 
@@ -1409,6 +1421,8 @@ struct VarPattern
 	VarDef *var;
 };
 
+struct WildcardPattern {};
+
 
 struct PatternArgument
 {
@@ -1432,7 +1446,8 @@ struct Pattern : variant
 	VarPattern,
 	DerefPattern,
 	AddressOfPattern,
-	ConstructorPattern
+	ConstructorPattern,
+	WildcardPattern
 >
 {
 	template<typename T>
@@ -1485,6 +1500,10 @@ Pattern clone(Pattern const &pattern)
 				clone(pattern.provided_type),
 				clone(pattern.type)
 			);
+		},
+		[&](WildcardPattern const&)
+		{
+			return Pattern(WildcardPattern(), clone(pattern.provided_type), clone(pattern.type));
 		}
 	};
 }
@@ -1505,7 +1524,7 @@ PatternArgument clone(PatternArgument const &arg)
 struct LetStmt
 {
 	Pattern lhs;
-	Expr init_expr;
+	optional<Expr> init_expr;
 };
 
 struct ExprStmt
@@ -1631,10 +1650,18 @@ Stmt clone(Stmt const &stmt)
 	};
 }
 
-TryExpr::TryExpr(Expr &&subject, optional<Stmt> &&on_failure, optional<Pattern> &&error_capture) :
+TryExpr::TryExpr(
+	Expr &&subject,
+	optional<Stmt> &&on_failure,
+	optional<Pattern> &&error_capture,
+	NullableOwnPtr<Stmt> match_stmt,
+	NullableOwnPtr<Expr> result_expr
+) :
 	subject(std::make_unique<Expr>(std::move(subject))),
 	on_failure(on_failure ? std::make_unique<Stmt>(std::move(*on_failure)) : nullptr),
-	error_capture(error_capture ? std::make_unique<Pattern>(std::move(*error_capture)) : nullptr) {}
+	error_capture(error_capture ? std::make_unique<Pattern>(std::move(*error_capture)) : nullptr),
+	match_stmt(std::move(match_stmt)),
+	result_expr(std::move(result_expr)) {}
 
 Expr clone(Expr const &expr)
 {
@@ -1733,7 +1760,7 @@ Expr clone(Expr const &expr)
 			if(e.error_capture)
 				error_capture = clone(*e.error_capture);
 
-			return expr.clone_as(TryExpr(clone(*e.subject), std::move(on_failure), std::move(error_capture)));
+			return expr.clone_as(TryExpr(clone(*e.subject), std::move(on_failure), std::move(error_capture), clone(e.match_stmt), clone(e.result_expr)));
 		},
 		[&](UnresolvedPath const &p)
 		{
@@ -2260,6 +2287,8 @@ StructType::StructType(StructType &&rhs) :
 
 StructType& StructType::operator = (StructType &&rhs)
 {
+	assert(this != &rhs);
+
 	m_def = rhs.m_def;
 	m_inst = rhs.m_inst;
 	m_type_args = std::move(rhs.m_type_args);
@@ -2389,6 +2418,12 @@ public:
 			return m_parent->try_lookup_type_var(name);
 
 		return nullptr;
+	}
+
+	VarDef* declare_temp_var(IsMutable mutability = IsMutable::NO)
+	{
+		string name = "__myca__temp_" + std::to_string(m_temp_var_counter++);
+		return declare_var(name, mutability, VarKind::LOCAL);
 	}
 
 	VarDef* declare_var(string name, IsMutable mutability, VarKind kind)
@@ -2522,6 +2557,7 @@ private:
 	vector<OwnPtr<Scope>> m_children;
 	Scope *m_parent;
 	bool m_accept_item_decls;
+	int m_temp_var_counter = 0;
 
 	unordered_map<string, TypeVarDef> m_type_vars;
 	unordered_map<string, VarDef> m_vars;
@@ -2695,6 +2731,114 @@ vector<Parameter> clone(vector<Parameter> const &params)
 		cloned.push_back(clone(p));
 
 	return cloned;
+}
+
+
+//==============================================================================
+// AST builder
+//==============================================================================
+Pattern pattern_Ctor(Type &&ctor, vector<Pattern> &&args, bool has_parens = true)
+{
+	vector<PatternArgument> pat_args;
+	for(Pattern &arg: args)
+	{
+		pat_args.push_back(PatternArgument{
+			.pattern = std::make_unique<Pattern>(std::move(arg)),
+			.param_name = nullopt,
+			.param_idx = nullopt,
+		});
+	}
+
+	return Pattern(ConstructorPattern{
+		.ctor = std::move(ctor),
+		.args = std::move(pat_args),
+		.has_parens = has_parens,
+	}, nullopt);
+}
+
+Pattern pattern_Var(VarDef *var, optional<Type> &&provided_type = nullopt)
+{
+	return Pattern(VarPattern(var), std::move(provided_type));
+}
+
+struct Segment
+{
+	string name;
+	TypeArgList type_args{};
+};
+
+UnresolvedPath mk_path(Segment &&seg, Scope *scope)
+{
+	return UnresolvedPath(std::move(seg.name), std::move(seg.type_args), scope);
+}
+
+UnresolvedPath mk_path(Segment &&seg1, Segment &&seg2, Scope *scope)
+{
+	return UnresolvedPath(
+		std::move(seg2.name),
+		std::move(seg2.type_args),
+		mk_path(std::move(seg1), scope)
+	);
+}
+
+
+Expr expr_Assignment(Expr &&lhs, Expr &&rhs)
+{
+	return Expr(AssignmentExpr(std::move(lhs), std::move(rhs)), {});
+}
+
+Expr expr_Var(VarDef *var)
+{
+	return Expr(VarExpr(var), {});
+}
+
+Expr expr_Call(Expr &&callable, vector<Expr> &&args)
+{
+	vector<Argument> call_args;
+	for(Expr &arg: args)
+	{
+		call_args.push_back(Argument{
+			.expr = std::make_unique<Expr>(std::move(arg)),
+			.name = nullopt,
+		});
+	}
+
+	return Expr(CallExpr(std::move(callable), std::move(call_args)), {});
+}
+
+Expr expr_Ctor(Type &&ctor)
+{
+	return Expr(ConstructorExpr(std::move(ctor)), {});
+}
+
+
+Stmt stmt_Assignment(Expr &&lhs, Expr &&rhs)
+{
+	return ExprStmt(expr_Assignment(std::move(lhs), std::move(rhs)));
+}
+
+Stmt stmt_Ret(Expr &&expr)
+{
+	return ReturnStmt(std::move(expr));
+}
+
+Stmt stmt_Block(vector<Stmt> &&stmts)
+{
+	vector<OwnPtr<Stmt>> stmt_ptrs;
+	for(Stmt &stmt: stmts)
+		stmt_ptrs.push_back(std::make_unique<Stmt>(std::move(stmt)));
+
+	return BlockStmt(nullptr, std::move(stmt_ptrs));
+}
+
+Stmt stmt_Let(Pattern &&lhs, optional<Expr> &&rhs = nullopt)
+{
+	return LetStmt(std::move(lhs), std::move(rhs));
+}
+
+Stmt stmt_Match(Expr &&subject, vector<MatchArm> &&arms)
+{
+	return MatchStmt(std::move(subject), std::move(arms));
 }
 
 
@@ -3042,6 +3186,10 @@ std::ostream& print(std::ostream &os, Pattern const &pattern)
 				print(os, *arg.pattern);
 			}) << ")";
 
+		},
+		[&](WildcardPattern const&)
+		{
+			os << "_";
 		}
 	};
 
@@ -3058,8 +3206,13 @@ void print(std::ostream &os, Stmt const &stmt, int indent, PrintListener *listen
 			os << string(indent*INDENT_WIDTH, ' ');
 			os << "let ";
 			print(os, s.lhs);
-			os << " = ";
-			print(os, s.init_expr, listener) << ";";
+			if(s.init_expr)
+			{
+				os << " = ";
+				print(os, *s.init_expr, listener);
+			}
+
+			os << ";";
 		},
 		[&](ExprStmt const &s)
 		{
@@ -3702,16 +3855,25 @@ BlockStmt parse_block_stmt(Parser &parser, Module &mod, ScopePolicy policy);
 Pattern parse_pattern(Parser &parser, Module &mod);
 
 template<typename T>
-vector<T> singleton_vec(T &&t)
+vector<T> mk_vec(T &&t)
 {
 	vector<T> vec;
 	vec.push_back(std::move(t));
 	return vec;
 }
 
+template<typename T>
+vector<T> mk_vec(T &&a, T &&b)
+{
+	vector<T> vec;
+	vec.push_back(std::move(a));
+	vec.push_back(std::move(b));
+	return vec;
+}
+
 Expr parse_infix_expr(Parser &parser, Module &mod, Expr &&left)
 {
-	Token const &tok = parser.next();
+	Token tok = parser.next();
 	switch(tok.kind)
 	{
 		case Lexeme::DOT:
@@ -3788,29 +3950,18 @@ Expr parse_infix_expr(Parser &parser, Module &mod, Expr &&left)
 				if(parser.peek() != Lexeme::LEFT_BRACE)
 				{
 					Pattern error_pat = parse_pattern(parser, mod);
-
-					Type error_ctor = UnresolvedPath(
-						"Error",
-						{},
-						UnresolvedPath("Result", {}, mod.global())
+					error_capture = pattern_Ctor(
+						mk_path({"Result"}, {"Err"}, mod.global()),
+						mk_vec(std::move(error_pat))
 					);
-
-					error_capture = Pattern(ConstructorPattern{
-						.ctor = std::move(error_ctor),
-						.args = singleton_vec(PatternArgument{
-							.pattern = std::make_unique<Pattern>(std::move(error_pat)),
-							.param_name = nullopt,
-							.param_idx = nullopt,
-						}),
-						.has_parens = true
-					}, nullopt);
 				}
 
 				on_failure = parse_block_stmt(parser, mod, ScopePolicy::NEW_SCOPE);
 				parser.insert(Lexeme::SEMICOLON);
 			}
 
-			return with_location(TryExpr(std::move(left), std::move(on_failure), std::move(error_capture)));
+			Expr expr = with_location(TryExpr(std::move(left), std::move(on_failure), std::move(error_capture)));
+			return expr;
 		}
 
 		default: UNREACHABLE;
@@ -3843,6 +3994,12 @@ Pattern parse_primary_pattern(Parser &parser, Module &mod)
 
 		case Lexeme::IDENTIFIER:
 		{
+			if(parser.tok().text == "_")
+			{
+				parser.next();
+				return Pattern(WildcardPattern(), nullopt);
+			}
+
 			Type ctor = parse_type(parser, mod);
 
 			bool has_parens = false;
@@ -5186,6 +5343,7 @@ variant<Type, Expr> resolve_path(UnresolvedPath &&path, SemaContext &ctx)
 			while(num_missing_args--)
 				remaining_args.args.push_back(ctx.new_type_deduction_var());
 
+			assert(remaining_args.size() == struct_.type_params.size());
 			return StructType(&struct_, std::move(remaining_args), std::move(resolved_parent));
 		},
 		[&](ProcDef &proc) -> variant<Type, Expr>
@@ -5329,7 +5487,10 @@ void resolve_identifiers(Expr &expr, SemaContext &ctx)
 		},
 		[&](UnappliedProcExpr&) {},
 		[&](VarExpr&) {},
-		[&](ConstructorExpr&) {},
+		[&](ConstructorExpr &t)
+		{
+			resolve_types(t.ctor, ctx);
+		},
 		[&](ProcExpr&) {},
 		[&](UnaryExpr &e)
 		{
@@ -5389,8 +5550,8 @@ void resolve_identifiers(Expr &expr, SemaContext &ctx)
 		[&](TryExpr &e)
 		{
 			resolve_identifiers(*e.subject, ctx);
-			if(e.on_failure) resolve_identifiers(*e.on_failure, ctx);
-			if(e.error_capture) resolve_identifiers(*e.error_capture, ctx);
+			if(e.match_stmt) resolve_identifiers(*e.match_stmt, ctx);
+			if(e.result_expr) resolve_identifiers(*e.result_expr, ctx);
 		},
 	};
 }
@@ -5411,6 +5572,7 @@ void resolve_identifiers(Pattern &pattern, SemaContext &ctx)
 			for(PatternArgument &arg: p.args)
 				resolve_identifiers(*arg.pattern, ctx);
 		},
+		[&](WildcardPattern&) {},
 	};
 }
 
@@ -5421,7 +5583,7 @@ void resolve_identifiers(Stmt &stmt, SemaContext &ctx)
 		[&](LetStmt &s)
 		{
 			resolve_identifiers(s.lhs, ctx);
-			resolve_identifiers(s.init_expr, ctx);
+			if(s.init_expr) resolve_identifiers(*s.init_expr, ctx);
 		},
 		[&](ExprStmt &s)
 		{
@@ -5800,6 +5962,8 @@ void StructType::instantiate(TypeEnv const &type_env, SemaContext &ctx)
 	}
 	else
 	{
+		assert(m_def->name != "Option" or m_type_args.size() == 1);
+
 		if(m_parent)
 			m_parent->instantiate(type_env, ctx);
 
@@ -6078,8 +6242,8 @@ void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx)
 		[&](TryExpr &e)
 		{
 			instantiate_types(*e.subject, type_env, ctx);
-			if(e.on_failure) instantiate_types(*e.on_failure, type_env, ctx);
-			if(e.error_capture) instantiate_types(*e.error_capture, type_env, ctx);
+			if(e.match_stmt) instantiate_types(*e.match_stmt, type_env, ctx);
+			if(e.result_expr) instantiate_types(*e.result_expr, type_env, ctx);
 		},
 	};
 }
@@ -6087,6 +6251,9 @@ void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx)
 void instantiate_types(Pattern &pattern, TypeEnv const &type_env, SemaContext &ctx)
 {
 	instantiate_type(*pattern.type, type_env, ctx);
+	if(pattern.provided_type)
+		instantiate_type(*pattern.provided_type, type_env, ctx);
+
 	pattern | match
 	{
 		[&](VarPattern &p)
@@ -6108,6 +6275,7 @@ void instantiate_types(Pattern &pattern, TypeEnv const &type_env, SemaContext &c
 			for(PatternArgument &arg: p.args)
 				instantiate_types(*arg.pattern, type_env, ctx);
 		},
+		[&](WildcardPattern&) {}
 	};
 }
 
@@ -6117,7 +6285,7 @@ void instantiate_types(Stmt &stmt, TypeEnv const &type_env, SemaContext &ctx)
 	{
 		[&](LetStmt &s)
 		{
-			instantiate_types(s.init_expr, type_env, ctx);
+			if(s.init_expr) instantiate_types(*s.init_expr, type_env, ctx);
 			instantiate_types(s.lhs, type_env, ctx);
 		},
 		[&](ExprStmt &s)
@@ -6485,7 +6653,7 @@ TRY_UNIFY_WITH_IMPLICIT_CTOR:
 			Expr ctor_expr(ConstructorExpr(clone(ctor_struct_type)), {});
 			ProcTypeDef ctor_type{
 				.type_params = {},
-				.params = singleton_vec(std::move(param)),
+				.params = mk_vec(std::move(param)),
 				.ret = clone(ctor_struct_type),
 			};
 			ctor_expr.type = Type(UnappliedProcType(std::move(ctor_type), {}));
@@ -6848,6 +7016,8 @@ void typecheck_pattern(
 	bool infallible_pattern_required,
 	Expr *rhs_expr
 );
+
+
 
 void typecheck(Stmt &stmt, SemaContext &ctx);
 
@@ -7225,47 +7395,116 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 		{
 			bool fully_instantiated = typecheck_partial(*e.subject, ctx, hint);
 
-			*e.subject->type | match
-			{
-				[&](StructType const &st)
-				{
-					if(st.name() == "Option")
-						expr.type = clone(st.type_args().args[0]);
-					else if(st.name() == "Result")
-						expr.type = clone(st.type_args().args[0]);
-					else
-						throw ParseError("Try expressions only work on Option or Result");
-				},
-				[&](auto const&)
-				{
-					throw ParseError("Try expressions only work on Option or Result");
-				}
-			};
+			StructType const *st = std::get_if<StructType>(&*e.subject->type);
+			if(not st)
+				throw ParseError("Try expressions only work on Option or Result");
 
-			if(e.error_capture)
-			{
-				typecheck_pattern(
-					*e.error_capture,
-					*e.subject->type,
-					is_lvalue_expr(*e.subject),
-					ctx,
-					*hint.subst,
-					false, // TODO Do require infallible pattern
-					nullptr
-				);
-			}
-
-			if(e.on_failure)
-			{
-				typecheck(*e.on_failure, ctx);
-
-				// TODO Ensure that *e.on_failure does not return
-			}
+			if(st->name() == "Option")
+				expr.type = clone(st->type_args().args[0]);
+			else if(st->name() == "Result")
+				expr.type = clone(st->type_args().args[0]);
 			else
-			{
-				assert(!"TryExpr: auto-return: TODO");
+				throw ParseError("Try expressions only work on Option or Result");
 
-				// TODO Ensure that e.subject->type is compative with the return type of ctx.proc()
+
+			if(st->name() == "Option")
+			{
+				VarDef *some_match_var = ctx.proc()->scope->declare_temp_var();
+				VarDef *result_var = ctx.proc()->scope->declare_temp_var(IsMutable::YES);
+
+				// Construct success arm
+				MatchArm success_arm(
+					pattern_Ctor(
+						mk_path({"Option"}, {"Some"}, ctx.mod().global()),
+						mk_vec(pattern_Var(some_match_var))
+					),
+					stmt_Assignment(expr_Var(result_var), expr_Var(some_match_var))
+				);
+
+				// Construct error arm
+				Pattern error_capture = e.error_capture ? clone(*e.error_capture) : Pattern(WildcardPattern(), nullopt);
+				Stmt on_failure =
+					e.on_failure ?
+						clone(*e.on_failure)
+						:
+						stmt_Ret(
+							expr_Call(expr_Ctor(mk_path({"Option"}, {"None"}, ctx.mod().global())), {})
+						);
+				MatchArm error_arm(clone(error_capture), std::move(on_failure));
+
+				// Construct final match statement
+				e.match_stmt = std::make_unique<Stmt>(
+					stmt_Block(
+						mk_vec(
+							stmt_Let(pattern_Var(result_var, clone(*expr.type))),
+							stmt_Match(
+								clone(*e.subject),
+								mk_vec(
+									std::move(success_arm),
+									std::move(error_arm))))));
+
+				resolve_identifiers(*e.match_stmt, ctx);
+				typecheck(*e.match_stmt, ctx);
+
+				e.result_expr = std::make_unique<Expr>(Expr(VarExpr(result_var), {}));
+				resolve_identifiers(*e.result_expr, ctx);
+				typecheck(*e.result_expr, ctx);
+			}
+			else if(st->name() == "Result")
+			{
+				VarDef *ok_match_var = ctx.proc()->scope->declare_temp_var();
+				VarDef *err_match_var = ctx.proc()->scope->declare_temp_var();
+				VarDef *result_var = ctx.proc()->scope->declare_temp_var(IsMutable::YES);
+
+				// Construct success arm
+				MatchArm success_arm(
+					pattern_Ctor(
+						mk_path({"Result"}, {"Ok"}, ctx.mod().global()),
+						mk_vec(pattern_Var(ok_match_var))
+					),
+					stmt_Assignment(expr_Var(result_var), expr_Var(ok_match_var))
+				);
+
+				// Construct error arm
+				Pattern error_capture =
+					e.error_capture ?
+						clone(*e.error_capture)
+						:
+						pattern_Ctor(
+							mk_path({"Result"}, {"Err"}, ctx.mod().global()),
+							mk_vec(pattern_Var(err_match_var))
+						);
+
+				Stmt on_failure =
+					e.on_failure ?
+						clone(*e.on_failure)
+						:
+						stmt_Ret(
+							expr_Call(
+								expr_Ctor(mk_path({"Result"}, {"Err"}, ctx.mod().global())),
+								mk_vec(expr_Var(err_match_var))
+							)
+						);
+
+				MatchArm error_arm(clone(error_capture), std::move(on_failure));
+
+				// Construct final match statement
+				e.match_stmt = std::make_unique<Stmt>(
+					stmt_Block(
+						mk_vec(
+							stmt_Let(pattern_Var(result_var, clone(*expr.type))),
+							stmt_Match(
+								clone(*e.subject),
+								mk_vec(
+									std::move(success_arm),
+									std::move(error_arm))))));
+
+				resolve_identifiers(*e.match_stmt, ctx);
+				typecheck(*e.match_stmt, ctx);
+
+				e.result_expr = std::make_unique<Expr>(Expr(VarExpr(result_var), {}));
+				resolve_identifiers(*e.result_expr, ctx);
+				typecheck(*e.result_expr, ctx);
 			}
 
 			return fully_instantiated;
@@ -7444,7 +7683,11 @@ void typecheck_pattern(
 				throw ParseError("Constructor in pattern must match against a compatible struct or union type");
 
 			lhs_pattern.type = clone(p.ctor);
-		}
+		},
+		[&](WildcardPattern&)
+		{
+			lhs_pattern.type = clone(*expected_type);
+		},
 	};
 }
 
@@ -7477,14 +7720,29 @@ void typecheck(Stmt &stmt, SemaContext &ctx)
 	{
 		[&](LetStmt &s)
 		{
-			TypeEnv subst;
-			bool fully_instantiated = typecheck_partial(s.init_expr, ctx, TypingHint(try_get_explicit_type(s.lhs), &subst));
-			typecheck_pattern(s.lhs, *s.init_expr.type, is_lvalue_expr(s.init_expr), ctx, subst, true, &s.init_expr);
-
-			if(not fully_instantiated)
+			if(s.init_expr)
 			{
-				instantiate_types(s.init_expr, subst, ctx);
-				instantiate_types(s.lhs, subst, ctx);
+				TypeEnv subst;
+				bool fully_instantiated = typecheck_partial(*s.init_expr, ctx, TypingHint(try_get_explicit_type(s.lhs), &subst));
+				typecheck_pattern(s.lhs, *s.init_expr->type, is_lvalue_expr(*s.init_expr), ctx, subst, true, &*s.init_expr);
+
+				if(not fully_instantiated)
+				{
+					instantiate_types(*s.init_expr, subst, ctx);
+					instantiate_types(s.lhs, subst, ctx);
+				}
+			}
+			else
+			{
+				VarPattern *var_pat = std::get_if<VarPattern>(&s.lhs);
+				if(not var_pat)
+					throw ParseError("Expected variable name in let-statement");
+
+				if(not s.lhs.provided_type)
+					throw ParseError("Expected explicit type in let-statement");
+
+				var_pat->var->type = clone(*s.lhs.provided_type);
+				s.lhs.type = clone(*s.lhs.provided_type);
 			}
 		},
 		[&](ExprStmt &s)
@@ -7545,42 +7803,61 @@ void typecheck(Stmt &stmt, SemaContext &ctx)
 
 					StructDefInstance *subject = t.inst();
 					unordered_set<StructDefInstance const*> matched_cases;
+					bool has_wildcard = false;
 					for(MatchArm &arm: s.arms)
 					{
+						if(has_wildcard)
+							throw ParseError("Pattern is following wildcard pattern and is therefore unreachable");
+
 						TypeEnv subst;
 						typecheck_pattern(arm.capture, *s.expr.type, is_lvalue_expr(s.expr), ctx, subst, false, nullptr);
 						instantiate_type(*arm.capture.type, subst, ctx);
 
+						if(is<WildcardPattern>(arm.capture))
+							has_wildcard = true;
+						else
+						{
+							StructDefInstance const *arm_inst = std::get<StructType>(*arm.capture.type).inst();
+							assert(arm_inst->outer_struct->inst() == subject);
+							if(!matched_cases.insert(arm_inst).second)
+								throw ParseError("Duplicate case value");
+
+							arm.discr = arm_inst->def->get_case_idx();
+						}
+
 						typecheck(*arm.stmt, ctx);
-
-						StructDefInstance const *arm_inst = std::get<StructType>(*arm.capture.type).inst();
-						assert(arm_inst->outer_struct->inst() == subject);
-						if(!matched_cases.insert(arm_inst).second)
-							throw ParseError("Duplicate case value");
-
-						arm.discr = arm_inst->def->get_case_idx();
 					}
 
-					if(matched_cases.size() != subject->def->num_cases)
+					if(matched_cases.size() != subject->def->num_cases and not has_wildcard)
 						throw ParseError("Match is not exhaustive");
 				},
 				[&](UnionType const &t)
 				{
 					unordered_set<Type, std::hash<Type>, TypeEquiv> matched_cases;
+					bool has_wildcard = false;
 					for(MatchArm &arm: s.arms)
 					{
+						if(has_wildcard)
+							throw ParseError("Pattern is following wildcard pattern and is therefore unreachable");
+
 						TypeEnv subst;
 						typecheck_pattern(arm.capture, *s.expr.type, is_lvalue_expr(s.expr), ctx, subst, false, nullptr);
 						instantiate_type(*arm.capture.type, subst, ctx);
 
-						if(!matched_cases.insert(clone(*arm.capture.type)).second)
-							throw ParseError("Duplicate case value");
+						if(is<WildcardPattern>(arm.capture))
+							has_wildcard = true;
+						else
+						{
+							if(!matched_cases.insert(clone(*arm.capture.type)).second)
+								throw ParseError("Duplicate case value");
+
+							arm.discr = *t.canonical_def->contains(*arm.capture.type);
+						}
 
 						typecheck(*arm.stmt, ctx);
-						arm.discr = *t.canonical_def->contains(*arm.capture.type);
 					}
 
-					if(matched_cases.size() != t.canonical_def->alternatives.size())
+					if(matched_cases.size() != t.canonical_def->alternatives.size() and not has_wildcard)
 						throw ParseError("Match is not exhaustive");
 				},
 				[&](auto const&)
@@ -7796,11 +8073,16 @@ public:
 		return "__myca__tmp" + std::to_string(tmp_var_counter++);
 	}
 
+	void set_current_proc(ProcDefInstance const *proc) { m_cur_proc = proc; }
+	ProcDefInstance const* proc() const { return m_cur_proc; }
+
 private:
 	std::ostream &os;
 	int indent_level = 0;
 	bool insert_indent = true;
 	int tmp_var_counter = 0;
+
+	ProcDefInstance const *m_cur_proc = nullptr;
 };
 
 
@@ -8089,6 +8371,8 @@ void generate_c(Type const &type, CBackend &backend)
 // Expressions
 //--------------------------------------------------------------------
 string generate_c(Expr const &expr, CBackend &backend, bool need_result = true);
+void generate_c(Stmt const &stmt, CBackend &backend);
+void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type const &rhs_type, CBackend &backend);
 
 string generate_c_cast(Type const &target_type, string const &expr, Type const &expr_type)
 {
@@ -8305,9 +8589,10 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 
 			return union_var;
 		},
-		[&](TryExpr const&) -> string
+		[&](TryExpr const &e) -> string
 		{
-			assert(!"generate_c: TryExpr: TODO");
+			generate_c(*e.match_stmt, backend);
+			return generate_c(*e.result_expr, backend);
 		},
 	};
 }
@@ -8352,7 +8637,8 @@ void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type
 						generate_c_pattern(*arg.pattern, object_str + "." + param.name, param.type, backend);
 				}
 			}
-		}
+		},
+		[&](WildcardPattern const&) {},
 	};
 }
 
@@ -8384,14 +8670,22 @@ MatchArm const* get_optional_none(MatchStmt const &stmt)
 	return nullptr;
 }
 
-void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend)
+void generate_c(Stmt const &stmt, CBackend &backend)
 {
 	stmt | match
 	{
 		[&](LetStmt const &s)
 		{
-			string init_expr_var = generate_c(s.init_expr, backend);
-			generate_c_pattern(s.lhs, init_expr_var, *s.init_expr.type, backend);
+			if(s.init_expr)
+			{
+				string init_expr_var = generate_c(*s.init_expr, backend);
+				generate_c_pattern(s.lhs, init_expr_var, *s.init_expr->type, backend);
+			}
+			else
+			{
+				VarDef *var = std::get<VarPattern>(s.lhs).var;
+				backend << *var->type << " " << var->name << ";" << LineEnd;
+			}
 		},
 		[&](ExprStmt const &s)
 		{
@@ -8401,18 +8695,26 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 		},
 		[&](BlockStmt const &s)
 		{
-			backend << "{" << LineEnd;
-			backend.increase_indent();
+			if(s.scope)
+			{
+				backend << "{" << LineEnd;
+				backend.increase_indent();
+			}
+
 			for(OwnPtr<Stmt> const &stmt: s.stmts)
-				generate_c(*stmt, proc, backend);
-			backend.decrease_indent();
-			backend << "}" << LineEnd;
+				generate_c(*stmt, backend);
+
+			if(s.scope)
+			{
+				backend.decrease_indent();
+				backend << "}" << LineEnd;
+			}
 		},
 		[&](ReturnStmt const &s)
 		{
 			if(s.ret_expr)
 			{
-				string ret_val = generate_c_cast(proc->type.ret, *s.ret_expr, backend);
+				string ret_val = generate_c_cast(backend.proc()->type.ret, *s.ret_expr, backend);
 				backend << "return " << ret_val << ";" << LineEnd;
 			}
 			else
@@ -8422,11 +8724,11 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 		{
 			string cond_str = generate_c(s.condition, backend);
 			backend << "if(" << cond_str << ")" << LineEnd;
-			generate_c(*s.then, proc, backend);
+			generate_c(*s.then, backend);
 			if(s.else_)
 			{
 				backend << "else" << LineEnd;
-				generate_c(*s.else_, proc, backend);
+				generate_c(*s.else_, backend);
 				backend << LineEnd;
 			}
 		},
@@ -8437,7 +8739,7 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 			backend.increase_indent();
 				string cond_str = generate_c(s.condition, backend);
 				backend << "if(!" << cond_str << ") break;" << LineEnd;
-				generate_c(*s.body, proc, backend);
+				generate_c(*s.body, backend);
 			backend.decrease_indent();
 			backend << "}" << LineEnd;
 		},
@@ -8452,7 +8754,7 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 					if(MatchArm const *some_arm = get_optional_some(s))
 					{
 						generate_c_pattern(some_arm->capture, subject_str, *s.expr.type, backend);
-						generate_c(*some_arm->stmt, proc, backend);
+						generate_c(*some_arm->stmt, backend);
 					}
 				backend.decrease_indent();
 				backend << "}" << LineEnd;
@@ -8462,7 +8764,7 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 					if(MatchArm const *none_arm = get_optional_none(s))
 					{
 						generate_c_pattern(none_arm->capture, subject_str, *s.expr.type, backend);
-						generate_c(*none_arm->stmt, proc, backend);
+						generate_c(*none_arm->stmt, backend);
 					}
 				backend.decrease_indent();
 				backend << "}" << LineEnd;
@@ -8473,28 +8775,40 @@ void generate_c(Stmt const &stmt, ProcDefInstance const *proc, CBackend &backend
 				backend << "switch(" << subject_str << ".__myca__discr)" << LineEnd;
 				backend << "{" << LineEnd;
 				backend.increase_indent();
+					bool has_wildcard = false;
 					for(MatchArm const &arm: s.arms)
 					{
-						backend << "case " << *arm.discr << ":" << LineEnd;
+						if(is<WildcardPattern>(arm.capture))
+						{
+							backend << "default:" << LineEnd;
+							has_wildcard = true;
+						}
+						else
+							backend << "case " << *arm.discr << ":" << LineEnd;
+
 						backend << "{" << LineEnd;
 						backend.increase_indent();
 
-						if(is<UnionType>(*s.expr.type))
+						if(not is<WildcardPattern>(arm.capture))
 						{
-							string arm_expr = subject_str + ".__myca_alt" + std::to_string(*arm.discr);
-							generate_c_pattern(arm.capture, arm_expr, *arm.capture.type, backend);
+							if(is<UnionType>(*s.expr.type))
+							{
+								string arm_expr = subject_str + ".__myca_alt" + std::to_string(*arm.discr);
+								generate_c_pattern(arm.capture, arm_expr, *arm.capture.type, backend);
+							}
+							else
+								generate_c_pattern(arm.capture, subject_str, *s.expr.type, backend);
 						}
-						else
-							generate_c_pattern(arm.capture, subject_str, *s.expr.type, backend);
 
-						generate_c(*arm.stmt, proc, backend);
+						generate_c(*arm.stmt, backend);
 
 						backend.decrease_indent();
 						backend << "}" << LineEnd;
 
 						backend << "break;" << LineEnd;
 					}
-					backend << "default: assert(0);" << LineEnd;
+					if(not has_wildcard)
+						backend << "default: assert(0);" << LineEnd;
 				backend.decrease_indent();
 				backend << "}" << LineEnd;
 			}
@@ -8869,9 +9183,10 @@ void generate_c(Module &mod, CBackend &backend)
 	{
 		if(inst.body)
 		{
+			backend.set_current_proc(inst.proc);
 			generate_c_proc_sig(inst.proc, backend);
 			backend << LineEnd;
-			generate_c(*inst.body, inst.proc, backend);
+			generate_c(*inst.body, backend);
 			backend << LineEnd;
 		}
 	}

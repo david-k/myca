@@ -55,6 +55,15 @@ proc panic(err: Error) -> Never
 	}
 }
 
+proc is_division_by_zero(err: Error) -> bool
+{
+	match err
+	{
+		case DivisionByZero { return true; }
+		case _ { return false; }
+	}
+}
+
 
 proc main() -> i32
 {
