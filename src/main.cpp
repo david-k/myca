@@ -2212,8 +2212,6 @@ struct StructDef
 
 	unordered_map<DefInstanceKey, StructDefInstance> instances{};
 
-	bool resolved = false;
-
 	size_t num_initial_var_members = 0;
 	size_t num_cases = 0;
 
@@ -3583,6 +3581,12 @@ Type parse_prefix_type(Parser &parser, Module &mod)
 		{
 			Type type = parse_prefix_type(parser, mod);
 			return UnresolvedPath("Option", TypeArgList(std::move(type)), mod.global());
+		}
+
+		case Lexeme::BANG:
+		{
+			Type err_type = parse_prefix_type(parser, mod);
+			return UnresolvedPath("Result", TypeArgList(BuiltinType::UNIT, std::move(err_type)), mod.global());
 		}
 
 		case Lexeme::PROC:
@@ -7879,6 +7883,15 @@ void typecheck(TopLevelItem item, SemaContext &ctx)
 			for(VarDef *param: def->param_vars)
 				instantiate_type(*param->type, {}, ctx);
 
+			// HACK: Why instantiate a copy of the return type and not the return type itself?
+			//       - We need the return type to remain unapplied for type inference (see
+			//         typecheck_partial() for CallExpr)
+			//       - But we also need to instantiate any types that are only mentioned in the
+			//         return type (if a function return `?^FILE` we need to instantiate the Option
+			//         type appropriately)
+			Type ret_type = clone(def->type.ret);
+			instantiate_type(ret_type, {}, ctx);
+
 			for(Parameter &param: def->type.params)
 			{
 				if(!param.default_value)
@@ -8019,6 +8032,10 @@ public:
 
 		*this << LineEnd;
 		*this << "typedef struct Never { char _; } Never;" << LineEnd;
+		*this << LineEnd;
+
+		*this << LineEnd;
+		*this << "typedef struct Unit { char _; } Unit;" << LineEnd;
 		*this << LineEnd;
 
 		*this << LineEnd;
@@ -8302,7 +8319,7 @@ string generate_c_to_str(BuiltinType const &type)
 	switch(type)
 	{
 		case BuiltinType::NEVER: return "Never";
-		case BuiltinType::UNIT: TODO("generate_c(Type): UNIT");
+		case BuiltinType::UNIT: return "Unit";
 		case BuiltinType::BOOL: return "bool";
 		case BuiltinType::I8: return "int8_t";
 		case BuiltinType::U8: return "uint8_t";
@@ -8380,17 +8397,11 @@ string generate_c_cast(Type const &target_type, string const &expr, Type const &
 		return expr;
 
 	string type_val = generate_c_to_str(target_type);
-	return target_type | match
-	{
-		[&](StructType const&)
-		{
-			return "(*(" + type_val + "*)&(" + expr + "))";
-		},
-		[&](auto const&)
-		{
-			return "((" + type_val + ")(" + expr + "))";
-		},
-	};
+
+	if(is<StructType>(target_type) and not is_optional_ptr(target_type))
+		return "(*(" + type_val + "*)&(" + expr + "))";
+	else
+		return "((" + type_val + ")(" + expr + "))";
 }
 
 string generate_c_cast(Type const &target_type, Expr const &expr, CBackend &backend)
@@ -8648,7 +8659,7 @@ MatchArm const* get_optional_some(MatchStmt const &stmt)
 	{
 		if(StructType const *st = std::get_if<StructType>(&*arm.capture.type))
 		{
-			if(st->inst()->def->name == "Some")
+			if(st->inst()->def->name == "Option" or st->inst()->def->name == "Some")
 				return &arm;
 		}
 	}
@@ -8662,7 +8673,7 @@ MatchArm const* get_optional_none(MatchStmt const &stmt)
 	{
 		if(StructType const *st = std::get_if<StructType>(&*arm.capture.type))
 		{
-			if(st->inst()->def->name == "None")
+			if(st->inst()->def->name == "Option" or st->inst()->def->name == "None")
 				return &arm;
 		}
 	}
