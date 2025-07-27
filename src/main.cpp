@@ -578,8 +578,6 @@ struct TypeVarDef;
 struct VarDef;
 struct ProcDef;
 struct ProcDefInstance;
-struct ProcTypeDef;
-struct UnionTypeDef;
 struct StructDef;
 struct StructDefInstance;
 struct AliasDef;
@@ -750,28 +748,106 @@ private:
 };
 
 
-struct ProcType
+class ProcType
 {
-	ProcTypeDef *def;
+public:
+	explicit ProcType(ProcType const *canonical_type);
+	ProcType(vector<Type> &&params, Type &&ret);
 
-	// Available after resolve_identifiers()
-	ProcTypeDef const *canonical_def = nullptr;
+	ProcType(ProcType &&rhs) = default;
+	ProcType& operator = (ProcType &&rhs) = default;
+
+	ProcType const* canonical() const { assert(m_canonical_type); return m_canonical_type; }
+
+	vector<Type> const& params() const
+	{
+		if(m_canonical_type)
+			return m_canonical_type->m_params;
+
+		return m_params;
+	}
+
+	Type const& ret() const
+	{
+		if(m_canonical_type)
+			return *m_canonical_type->m_ret;
+
+		return *m_ret;
+	}
+
+	vector<Type>& mutable_params()
+	{
+		assert(not is_canonicalized());
+		return m_params;
+	}
+
+	Type& mutable_ret()
+	{
+		assert(not is_canonicalized());
+		return *m_ret;
+	}
+
+	ProcType clone() const;
+	ProcType clone_independent() const;
+	bool equiv(ProcType const &other) const;
+	size_t hash() const;
+
+	void make_canonical() { assert(not m_canonical_type); m_canonical_type = this; }
+	bool is_canonical() const { return m_canonical_type == this; }
+
+	bool is_canonicalized() const { return m_canonical_type != nullptr; }
+
+private:
+	ProcType const *m_canonical_type = nullptr;
+
+	// If m_canonical_type == nullptr
+	vector<Type> m_params;
+	NullableOwnPtr<Type> m_ret = nullptr;
 };
 
-struct UnappliedProcType
+
+class UnionType
 {
-	UnappliedProcType(ProcTypeDef &&type, TypeArgList &&type_args);
+public:
+	explicit UnionType(UnionType const *canonical_type);
+	explicit UnionType(vector<Type> &&alternatives);
 
-	OwnPtr<ProcTypeDef> type;
-	TypeArgList type_args;
-};
+	UnionType(UnionType &&rhs) = default;
+	UnionType& operator = (UnionType &&rhs) = default;
 
-struct UnionType
-{
-	UnionTypeDef *def;
+	UnionType clone() const;
+	UnionType clone_independent() const;
+	bool equiv(UnionType const &other) const;
+	size_t hash() const;
 
-	// Available after resolve_identifiers()
-	UnionTypeDef const *canonical_def = nullptr;
+	UnionType const* canonical() const { assert(m_canonical_type); return m_canonical_type; }
+
+	optional<size_t> contains(Type const &type) const;
+
+	vector<Type> const& alternatives() const
+	{
+		if(m_canonical_type)
+			return m_canonical_type->m_alternatives;
+
+		return m_alternatives;
+	}
+
+	vector<Type>& mutable_alternatives()
+	{
+		assert(not is_canonicalized());
+		return m_alternatives;
+	}
+
+	void make_canonical() { assert(not m_canonical_type); m_canonical_type = this; }
+	bool is_canonical() const { return m_canonical_type == this; }
+
+	bool is_canonicalized() const { return m_canonical_type != nullptr; }
+
+private:
+	UnionType const *m_canonical_type = nullptr;
+
+	// If m_canonical_type == nullptr
+	vector<Type> m_alternatives;
 };
 
 
@@ -784,7 +860,6 @@ class Type : public variant
 	StructType,
 	ProcType,
 	UnionType,
-	UnappliedProcType,
 	UnresolvedPath
 >
 {
@@ -818,51 +893,142 @@ NullableOwnPtr<T> clone(NullableOwnPtr<T> const &opt)
 	return std::make_unique<T>(clone(*opt));
 }
 
-
-struct Parameter
+template<typename T>
+vector<T> clone(vector<T> const &vec)
 {
-	string name;
-	Type type;
-	NullableOwnPtr<class Expr> default_value;
-};
+	vector<T> cloned;
+	for(T const &t: vec)
+		cloned.push_back(clone(t));
 
-struct ProcTypeDef
-{
-	vector<TypeVarDef*> type_params;
-	vector<Parameter> params;
-	Type ret;
-};
+	return cloned;
+}
 
 
 bool equiv(Type const &a, Type const &b);
 
-struct UnionTypeDef
+
+Type clone(Type const &type);
+
+ProcType::ProcType(ProcType const *canonical_type) :
+	m_canonical_type(canonical_type) {}
+
+ProcType::ProcType(vector<Type> &&params, Type &&ret) :
+	m_params(std::move(params)),
+	m_ret(std::make_unique<Type>(std::move(ret))) {}
+
+ProcType ProcType::clone() const
 {
-	// Must always be sorted
-	vector<Type> alternatives;
+	assert(not is_canonical());
 
-	optional<size_t> contains(Type const &type) const
+	if(m_canonical_type)
+		return ProcType(m_canonical_type);
+
+	return ProcType(::clone(m_params), ::clone(*m_ret));
+}
+
+ProcType ProcType::clone_independent() const
+{
+	return ProcType(::clone(params()), ::clone(ret()));
+}
+
+bool equiv(vector<Type> const &left, vector<Type> const &right)
+{
+	if(left.size() != right.size())
+		return false;
+
+	for(size_t i = 0; i < left.size(); ++i)
 	{
-		for(size_t i = 0; i < alternatives.size(); ++i)
-		{
-			if(equiv(type, alternatives[i]))
-				return i;
-		}
-
-		return nullopt;
+		if(not equiv(left[i], right[i]))
+			return false;
 	}
-};
+
+	return true;
+}
+
+bool ProcType::equiv(ProcType const &other) const
+{
+	if(m_canonical_type and other.m_canonical_type)
+		return m_canonical_type == other.m_canonical_type;
+
+	if(not ::equiv(params(), other.params()))
+		return false;
+
+	return ::equiv(ret(), other.ret());
+}
+
+size_t ProcType::hash() const
+{
+	if(m_canonical_type and m_canonical_type != this)
+		return m_canonical_type->hash();
+
+	size_t h = 0;
+	for(Type const &param: m_params)
+		combine_hashes(h, ::compute_hash(param));
+
+	combine_hashes(h, ::compute_hash(*m_ret));
+	return h;
+}
 
 
-UnappliedProcType::UnappliedProcType(ProcTypeDef &&type, TypeArgList &&type_args) :
-	type(std::make_unique<ProcTypeDef>(std::move(type))),
-	type_args(std::move(type_args)) {}
+UnionType::UnionType(UnionType const *canonical_type) :
+	m_canonical_type(canonical_type) {}
+
+UnionType::UnionType(vector<Type> &&alternatives) :
+	m_alternatives(std::move(alternatives)) {}
+
+UnionType UnionType::clone() const
+{
+	assert(not is_canonical());
+
+	if(m_canonical_type)
+		return UnionType(m_canonical_type);
+
+	return UnionType(::clone(m_alternatives));
+}
+
+UnionType UnionType::clone_independent() const
+{
+	return UnionType(::clone(alternatives()));
+}
+
+bool UnionType::equiv(UnionType const &other) const
+{
+	if(m_canonical_type and other.m_canonical_type)
+		return m_canonical_type == other.m_canonical_type;
+
+	return ::equiv(alternatives(), other.alternatives());
+}
+
+size_t UnionType::hash() const
+{
+	if(m_canonical_type and m_canonical_type != this)
+		return m_canonical_type->hash();
+
+	size_t h = 0;
+	for(Type const &alt: m_alternatives)
+		combine_hashes(h, ::compute_hash(alt));
+
+	return h;
+}
+
+
+optional<size_t> UnionType::contains(Type const &type) const
+{
+	assert(m_canonical_type);
+
+	vector<Type> const &alts = alternatives();
+	for(size_t i = 0; i < alts.size(); ++i)
+	{
+		if(::equiv(type, alts[i]))
+			return i;
+	}
+
+	return nullopt;
+}
 
 
 TypeArgList clone(TypeArgList const &list);
 UnresolvedPath clone(UnresolvedPath const &path);
-ProcTypeDef clone(ProcTypeDef const &unapplied);
-UnionTypeDef clone(UnionTypeDef const &unapplied);
 
 Type clone(Type const &type)
 {
@@ -873,31 +1039,19 @@ Type clone(Type const &type)
 		[&](PointerType const &t) -> Type { return PointerType(clone(*t.target_type), t.mutability); },
 		[&](ManyPointerType const &t) -> Type { return ManyPointerType(clone(*t.element_type), t.mutability); },
 		[&](StructType const &t) -> Type { return t.clone(); },
-		[&](ProcType const &t) -> Type { return t; },
-		[&](UnionType const &t) -> Type { return t; },
-		[&](UnappliedProcType const &t) -> Type { return UnappliedProcType(clone(*t.type), clone(t.type_args)); },
+		[&](ProcType const &t) -> Type { return t.clone(); },
+		[&](UnionType const &t) -> Type { return t.clone(); },
 		[&](UnresolvedPath const &t) -> Type { return clone(t); },
 	};
 }
 
 
-UnionTypeDef clone(UnionTypeDef const &union_)
-{
-	vector<Type> alternatives;
-	for(Type const &t: union_.alternatives)
-		alternatives.push_back(clone(t));
-
-	return UnionTypeDef{
-		.alternatives = std::move(alternatives),
-	};
-}
-
 UnresolvedPath clone(UnresolvedPath const &path)
 {
 	return path.context | match
 	{
-		[&](Scope *s) { return UnresolvedPath(path.name, clone(path.type_args), s); },
-		[&](OwnPtr<UnresolvedPath> const &parent_path) { return UnresolvedPath(path.name, clone(path.type_args), clone(*parent_path)); },
+		[&](Scope *scope) { return UnresolvedPath(path.name, clone(path.type_args), scope); },
+		[&](OwnPtr<UnresolvedPath> const &parent) { return UnresolvedPath(path.name, clone(path.type_args), clone(*parent)); },
 	};
 }
 
@@ -907,18 +1061,18 @@ UnresolvedPath::UnresolvedPath(string const &name, TypeArgList &&type_args, Scop
 	type_args(std::move(type_args)),
 	context(scope) {}
 
-UnresolvedPath::UnresolvedPath(string const &name, TypeArgList &&type_args, UnresolvedPath &&context) :
+UnresolvedPath::UnresolvedPath(string const &name, TypeArgList &&type_args, UnresolvedPath &&parent) :
 	name(name),
 	type_args(std::move(type_args)),
-	context(std::make_unique<UnresolvedPath>(std::move(context))) {}
+	context(std::make_unique<UnresolvedPath>(std::move(parent))) {}
 
 UnresolvedPath* UnresolvedPath::try_get_parent() const
 {
-	OwnPtr<UnresolvedPath> const *parent = std::get_if<OwnPtr<UnresolvedPath>>(&context);
-	if(not parent)
-		return nullptr;
-
-	return parent->get();
+	return context | match
+	{
+		[&](Scope*) -> UnresolvedPath* { return nullptr; },
+		[&](OwnPtr<UnresolvedPath> const &parent) { return parent.get(); },
+	};
 }
 
 
@@ -1307,6 +1461,7 @@ struct UnionInitExpr
 	OwnPtr<Expr> value;
 };
 
+// TODO Unify ProcExpr and UnappliedProcExpr
 struct UnappliedProcExpr
 {
 	ProcDef *proc;
@@ -1382,6 +1537,13 @@ public:
 
 
 Expr clone(Expr const &expr);
+
+struct Parameter
+{
+	string name;
+	Type type;
+	NullableOwnPtr<Expr> default_value;
+};
 
 Parameter clone(Parameter const &p)
 {
@@ -1835,18 +1997,6 @@ struct VarDef
 //--------------------------------------------------------------------
 // Procedures
 //--------------------------------------------------------------------
-ProcTypeDef clone(ProcTypeDef const &proc)
-{
-	vector<Parameter> params;
-	for(Parameter const &p: proc.params)
-		params.push_back(clone(p));
-
-	return ProcTypeDef{
-		.type_params = proc.type_params,
-		.params = std::move(params),
-		.ret = clone(proc.ret),
-	};
-}
 
 // For simplicity, we do not consider α-equivlance for type parameters. It's not necessary as
 // generic procedures are not first class and cannot be passed around.
@@ -1854,36 +2004,20 @@ ProcTypeDef clone(ProcTypeDef const &proc)
 namespace std
 {
 	template<>
-	struct hash<::ProcTypeDef>
+	struct hash<::ProcType>
 	{
-		size_t operator () (::ProcTypeDef const &proc) const
+		size_t operator () (::ProcType const &proc) const
 		{
-			size_t h = 0;
-			for(::TypeVarDef const *tparam: proc.type_params)
-				::combine_hashes(h, ::compute_hash(tparam));
-
-			for(::Parameter const &param: proc.params)
-			{
-				::combine_hashes(h, ::compute_hash(param.type));
-				::combine_hashes(h, ::compute_hash(param.name));
-				::combine_hashes(h, ::compute_hash((bool)param.default_value));
-			}
-
-			::combine_hashes(h, ::compute_hash(proc.ret));
-			return h;
+			return proc.hash();
 		}
 	};
 
 	template<>
-	struct hash<::UnionTypeDef>
+	struct hash<::UnionType>
 	{
-		size_t operator () (::UnionTypeDef const &proc) const
+		size_t operator () (::UnionType const &union_) const
 		{
-			size_t h = 0;
-			for(::Type const &alt: proc.alternatives)
-				::combine_hashes(h, ::compute_hash(alt));
-
-			return h;
+			return union_.hash();
 		}
 	};
 }
@@ -1891,56 +2025,17 @@ namespace std
 
 struct ProcTypeEquiv
 {
-	bool operator () (ProcTypeDef const &a, ProcTypeDef const &b) const
+	bool operator () (ProcType const &a, ProcType const &b) const
 	{
-		if(a.type_params.size() != b.type_params.size())
-			return false;
-
-		if(a.params.size() != b.params.size())
-			return false;
-
-		for(size_t i = 0; i < a.type_params.size(); ++i)
-		{
-			if(a.type_params[i] != b.type_params[i])
-				return false;
-		}
-
-		for(size_t i = 0; i < a.params.size(); ++i)
-		{
-			Parameter const &pa = a.params[i];
-			Parameter const &pb = b.params[i];
-
-			if(pa.name != pb.name)
-				return false;
-
-			if(not equiv(pa.type, pb.type))
-				return false;
-
-			if((bool)pa.default_value != (bool)pb.default_value)
-				return false;
-		}
-
-		if(not equiv(a.ret, b.ret))
-			return false;
-
-		return true;
+		return a.equiv(b);
 	}
 };
 
 struct UnionTypeEquiv
 {
-	bool operator () (UnionTypeDef const &a, UnionTypeDef const &b) const
+	bool operator () (UnionType const &a, UnionType const &b) const
 	{
-		if(a.alternatives.size() != b.alternatives.size())
-			return false;
-
-		for(size_t i = 0; i < a.alternatives.size(); ++i)
-		{
-			if(not equiv(a.alternatives[i], b.alternatives[i]))
-				return false;
-		}
-
-		return true;
+		return a.equiv(b);
 	}
 };
 
@@ -2018,14 +2113,13 @@ namespace std
 				},
 				[&](::ProcType const &t)
 				{
-					::combine_hashes(h, ::compute_hash(*t.def));
+					::combine_hashes(h, t.hash());
 				},
 				[&](::UnionType const &t)
 				{
-					::combine_hashes(h, ::compute_hash(*t.def));
+					::combine_hashes(h, t.hash());
 				},
 				[&](::UnresolvedPath const&) { assert(!"hash<Type>: UnresolvedPath"); },
-				[&](::UnappliedProcType const&) { assert(!"hash<Type>: UnappliedProcType"); },
 			};
 
 			return h;
@@ -2042,7 +2136,8 @@ struct ProcDefInstance
 
 	TypeArgList type_args;
 	TypeEnv type_env;
-	ProcTypeDef type;
+	vector<Parameter> params;
+	ProcType type = ProcType({}, Type());
 	bool is_concrete;
 
 	bool is_partial() const;
@@ -2051,10 +2146,12 @@ struct ProcDefInstance
 struct ProcDef
 {
 	ProcDef(string const &name, Scope *scope) :
-		name(name), scope(scope) {}
+		name(name), type({}, Type()), scope(scope) {}
 
 	string name;
-	ProcTypeDef type;
+	vector<TypeVarDef*> type_params;
+	vector<Parameter> params;
+	ProcType type;
 	Scope *scope;
 	vector<VarDef*> param_vars;
 	optional<Stmt> body;
@@ -2065,7 +2162,7 @@ struct ProcDef
 
 bool ProcDefInstance::is_partial() const
 {
-	return type_args.size() < def->type.type_params.size();
+	return type_args.size() < def->type_params.size();
 }
 
 
@@ -2118,7 +2215,7 @@ using Member = variant<
 
 using InstanceMember = variant<Parameter, struct StructDefInstance*>;
 
-using TypeDefInstance = variant<struct StructDefInstance*, UnionTypeDef const*>;
+using TypeDefInstance = variant<struct StructDefInstance*, UnionType const*>;
 
 namespace std
 {
@@ -2132,7 +2229,7 @@ namespace std
 			v | match
 			{
 				[&](struct StructDefInstance const *s) { ::combine_hashes(h, ::compute_hash(s)); },
-				[&](UnionTypeDef const *s) { ::combine_hashes(h, ::compute_hash(s)); },
+				[&](UnionType const *s) { ::combine_hashes(h, ::compute_hash(s)); },
 			};
 
 			return h;
@@ -2565,7 +2662,7 @@ private:
 struct ModuleListener
 {
 	virtual void new_struct_inst(StructDefInstance*) {}
-	virtual void new_union_inst(UnionTypeDef const*) {}
+	virtual void new_union_inst(UnionType const*) {}
 	virtual void new_proc_inst(ProcDefInstance*) {}
 };
 
@@ -2582,11 +2679,72 @@ void flatten_union(vector<Type> const &alternatives, vector<Type> &result)
 	for(Type const &alt: alternatives)
 	{
 		if(UnionType const *child_union = std::get_if<UnionType>(&alt))
-			flatten_union(child_union->def->alternatives, result);
+			flatten_union(child_union->alternatives(), result);
 		else
 			result.push_back(clone(alt));
 	}
 }
+
+
+struct CanonicalProcTypeHash
+{
+	using is_transparent = void;
+
+	size_t operator () (ProcType const &t) const
+	{
+		return compute_hash(t);
+	}
+
+	size_t operator () (OwnPtr<ProcType> const &t) const
+	{
+		return compute_hash(*t);
+	}
+};
+
+struct CanonicalProcTypeEquiv
+{
+	using is_transparent = void;
+
+	bool operator () (OwnPtr<ProcType> const &a, OwnPtr<ProcType> const &b) const
+	{
+		return a->equiv(*b);
+	}
+
+	bool operator () (ProcType const &a, OwnPtr<ProcType> const &b) const
+	{
+		return a.equiv(*b);
+	}
+};
+
+struct CanonicalUnionTypeHash
+{
+	using is_transparent = void;
+
+	size_t operator () (UnionType const &t) const
+	{
+		return compute_hash(t);
+	}
+
+	size_t operator () (OwnPtr<UnionType> const &t) const
+	{
+		return compute_hash(*t);
+	}
+};
+
+struct CanonicalUnionTypeEquiv
+{
+	using is_transparent = void;
+
+	bool operator () (OwnPtr<UnionType> const &a, OwnPtr<UnionType> const &b) const
+	{
+		return a->equiv(*b);
+	}
+
+	bool operator () (UnionType const &a, OwnPtr<UnionType> const &b) const
+	{
+		return a.equiv(*b);
+	}
+};
 
 class Module
 {
@@ -2614,61 +2772,55 @@ public:
 		m_items.push_back(item);
 	}
 
-	ProcTypeDef* add_proc_type(ProcTypeDef &&proc)
-	{
-		m_proc_types.push_back(std::make_unique<ProcTypeDef>(std::move(proc)));
-		return m_proc_types.back().get();
-	}
-
-	ProcTypeDef const* get_canonical(ProcTypeDef const &proc)
+	ProcType canonicalize(ProcType const &proc)
 	{
 		auto it = m_canonical_proc_types.find(proc);
 		if(it != m_canonical_proc_types.end())
-			return &*it;
+			return ProcType(it->get());
 
-		auto res = m_canonical_proc_types.insert(clone(proc));
-		return &*res.first;
+		OwnPtr<ProcType> canonical = std::make_unique<ProcType>(proc.clone());
+		canonical->make_canonical();
+		auto res = m_canonical_proc_types.insert(std::move(canonical));
+
+		return ProcType(res.first->get());
 	}
 
-	UnionTypeDef* add_union_type(UnionTypeDef &&union_)
-	{
-		m_union_types.push_back(std::make_unique<UnionTypeDef>(std::move(union_)));
-		return m_union_types.back().get();
-	}
 
-	UnionTypeDef const* get_canonical(UnionTypeDef const &union_)
+	UnionType canonicalize(UnionType const &union_)
 	{
-		UnionTypeDef canonical;
-		flatten_union(union_.alternatives, canonical.alternatives);
-		std::sort(canonical.alternatives.begin(), canonical.alternatives.end());
+		vector<Type> flattened;
+		flatten_union(union_.alternatives(), flattened);
+		std::sort(flattened.begin(), flattened.end());
 
+		OwnPtr<UnionType> canonical = std::make_unique<UnionType>(std::move(flattened));
 		auto it = m_canonical_union_types.find(canonical);
 		if(it != m_canonical_union_types.end())
-			return &*it;
+			return UnionType(it->get());
 
 		// TODO Make sure each alternative has a unique type
 
-		auto res = m_canonical_union_types.insert(clone(canonical));
-		UnionTypeDef const *def = &*res.first;
+		auto res = m_canonical_union_types.insert(std::move(canonical));
+		UnionType *def = res.first->get();
+		def->make_canonical();
 
 		for(ModuleListener *l: m_listeners)
 			l->new_union_inst(def);
 
-		return def;
+		return UnionType(def);
 	}
 
-	UnionTypeInfo* try_get_union_info(UnionTypeDef const *canonical_def)
+	UnionTypeInfo* try_get_union_info(UnionType const *union_)
 	{
-		auto it = m_union_type_info.find(canonical_def);
+		auto it = m_union_type_info.find(union_->canonical());
 		if(it == m_union_type_info.end())
 			return nullptr;
 
 		return &it->second;
 	}
 
-	UnionTypeInfo* set_union_info(UnionTypeDef const *canonical_def, UnionTypeInfo &&info)
+	UnionTypeInfo* set_union_info(UnionType const *union_, UnionTypeInfo &&info)
 	{
-		auto res = m_union_type_info.emplace(canonical_def, std::move(info));
+		auto res = m_union_type_info.emplace(union_->canonical(), std::move(info));
 		assert(res.second);
 
 		return &res.first->second;
@@ -2711,12 +2863,10 @@ private:
 	Scope *m_cur_scope;
 	vector<TopLevelItem> m_items;
 
-	vector<OwnPtr<ProcTypeDef>> m_proc_types;
-	unordered_set<ProcTypeDef, std::hash<ProcTypeDef>, ProcTypeEquiv> m_canonical_proc_types;
+	unordered_set<OwnPtr<ProcType>, CanonicalProcTypeHash, CanonicalProcTypeEquiv> m_canonical_proc_types;
 
-	vector<OwnPtr<UnionTypeDef>> m_union_types;
-	unordered_set<UnionTypeDef, std::hash<UnionTypeDef>, UnionTypeEquiv> m_canonical_union_types;
-	unordered_map<UnionTypeDef const*, UnionTypeInfo> m_union_type_info;
+	unordered_set<OwnPtr<UnionType>, CanonicalUnionTypeHash, CanonicalUnionTypeEquiv> m_canonical_union_types;
+	unordered_map<UnionType const*, UnionTypeInfo> m_union_type_info;
 
 	vector<ModuleListener*> m_listeners;
 };
@@ -2934,15 +3084,15 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 		},
 		[&](ProcType const &t)
 		{
-			os << "proc(" << RangeFmt(t.def->params, ", ", [&](Parameter const  &p)
+			os << "proc(" << RangeFmt(t.params(), ", ", [&](Type const &p)
 			{
-				os << p.type;
+				os << p;
 			});
-			os << ") -> " << t.def->ret;
+			os << ") -> " << t.ret();
 		},
 		[&](UnionType const &t)
 		{
-			os << "(" << RangeFmt(t.def->alternatives, " | ", [&](Type const &t)
+			os << "(" << RangeFmt(t.alternatives(), " | ", [&](Type const &t)
 			{
 				os << t;
 			}) << ")";
@@ -2950,17 +3100,6 @@ std::ostream& operator << (std::ostream &os, Type const &type)
 		[&](UnresolvedPath const &p)
 		{
 			os << p;
-		},
-		[&](UnappliedProcType const &t)
-		{
-			os << "proc(" << RangeFmt(t.type->params, ", ", [&](Parameter const &p)
-			{
-				os << p.type;
-			});
-
-			os << ") -> " << t.type->ret;
-			if(t.type_args.size())
-				os << "'(" << RangeFmt(t.type_args.args, ", ") << ")";
 		},
 	};
 
@@ -2978,25 +3117,9 @@ std::ostream& operator << (std::ostream &os, XInt64 xint)
 	return os;
 }
 
-class PrintListener
-{
-public:
-	virtual void before_proc(std::ostream&, ProcDef*) {}
-	virtual void after_proc(std::ostream&, ProcDef*) {}
+void print(std::ostream &os, Stmt const &stmt, int indent = 0);
 
-	virtual void after_expr(std::ostream&, Expr const&) {}
-
-	virtual void after_stmt(std::ostream &os, Stmt const &stmt, int indent)
-	{
-		(void)os;
-		(void)stmt;
-		(void)indent;
-	}
-};
-
-void print(std::ostream &os, Stmt const &stmt, int indent = 0, PrintListener *listener = nullptr);
-
-std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener = nullptr)
+std::ostream& print(std::ostream &os, Expr const &expr)
 {
 	expr | match
 	{
@@ -3037,12 +3160,12 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 				case UnaryOp::NOT: os << "not "; break;
 				case UnaryOp::NEG: os << "-"; break;
 			}
-			print(os, *e.sub, listener) << ")";
+			print(os, *e.sub) << ")";
 		},
 		[&](BinaryExpr const &e)
 		{
 			os << "(";
-			print(os, *e.left, listener);
+			print(os, *e.left);
 			switch(e.op)
 			{
 				case BinaryOp::ADD: os << " + "; break;
@@ -3056,7 +3179,7 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 				case BinaryOp::GT: os << " > "; break;
 				case BinaryOp::GE: os << " >= "; break;
 			}
-			print(os, *e.right, listener) << ")";
+			print(os, *e.right) << ")";
 		},
 		[&](AddressOfExpr const &e)
 		{
@@ -3065,44 +3188,44 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 				os << "mut ";
 
 			os << "(";
-			print(os, *e.object_expr, listener) << ")";
+			print(os, *e.object_expr) << ")";
 		},
 		[&](DerefExpr const &e)
 		{
 			os << "(";
-			print(os, *e.ptr_expr, listener) << ")^";
+			print(os, *e.ptr_expr) << ")^";
 		},
 		[&](IndexExpr const &e)
 		{
 			os << "(";
-			print(os, *e.ptr_expr, listener) << ")[";
-			print(os, *e.idx_expr, listener) << "]";
+			print(os, *e.ptr_expr) << ")[";
+			print(os, *e.idx_expr) << "]";
 		},
 		[&](MemberAccessExpr const &e)
 		{
-			print(os, *e.object, listener) << "." << e.member;
+			print(os, *e.object) << "." << e.member;
 		},
 		[&](AssignmentExpr const &e)
 		{
 			os << "(";
-			print(os, *e.lhs, listener) << " = ";
-			print(os, *e.rhs, listener) << ")";
+			print(os, *e.lhs) << " = ";
+			print(os, *e.rhs) << ")";
 		},
 		[&](AsExpr const &e)
 		{
 			os << "(";
-			print(os, *e.src_expr, listener) << " as " << e.target_type << ")";
+			print(os, *e.src_expr) << " as " << e.target_type << ")";
 		},
 		[&](CallExpr const &e)
 		{
-			print(os, *e.callable, listener);
+			print(os, *e.callable);
 			os << "(";
 			os << RangeFmt(e.args, ", ", [&](Argument const &arg)
 			{
 				if(arg.name)
 					os << *arg.name << ": ";
 
-				print(os, *arg.expr, listener);
+				print(os, *arg.expr);
 			});
 			os << ")";
 		},
@@ -3113,20 +3236,20 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 		[&](MakeExpr const &e)
 		{
 			os << "make ";
-			print(os, *e.init, listener);
+			print(os, *e.init);
 			os << " @ ";
-			print(os, *e.addr, listener);
+			print(os, *e.addr);
 		},
 		[&](UnionInitExpr const &e)
 		{
-			print(os, *e.value, listener);
+			print(os, *e.value);
 		},
 		[&](TryExpr const &e)
 		{
-			print(os, *e.subject, listener);
+			print(os, *e.subject);
 			os << "?";
 			if(e.on_failure)
-				print(os, *e.on_failure, 0, listener);
+				print(os, *e.on_failure, 0);
 		},
 		[&](UnresolvedPath const &p)
 		{
@@ -3139,9 +3262,6 @@ std::ostream& print(std::ostream &os, Expr const &expr, PrintListener *listener 
 				os << "'(" << RangeFmt(e.type_args.args, ", ") << ")";
 		},
 	};
-
-	if(listener)
-		listener->after_expr(os, expr);
 
 	return os;
 }
@@ -3195,7 +3315,7 @@ std::ostream& print(std::ostream &os, Pattern const &pattern)
 }
 
 
-void print(std::ostream &os, Stmt const &stmt, int indent, PrintListener *listener)
+void print(std::ostream &os, Stmt const &stmt, int indent)
 {
 	stmt | match
 	{
@@ -3207,7 +3327,7 @@ void print(std::ostream &os, Stmt const &stmt, int indent, PrintListener *listen
 			if(s.init_expr)
 			{
 				os << " = ";
-				print(os, *s.init_expr, listener);
+				print(os, *s.init_expr);
 			}
 
 			os << ";";
@@ -3215,14 +3335,14 @@ void print(std::ostream &os, Stmt const &stmt, int indent, PrintListener *listen
 		[&](ExprStmt const &s)
 		{
 			os << string(indent*INDENT_WIDTH, ' ');
-			print(os, s.expr, listener) << ";";
+			print(os, s.expr) << ";";
 		},
 		[&](BlockStmt const &s)
 		{
 			os << string(indent*INDENT_WIDTH, ' ') << "{\n";
 			for(OwnPtr<Stmt> const &stmt: s.stmts)
 			{
-				print(os, *stmt, indent+1, listener);
+				print(os, *stmt, indent+1);
 				os << "\n";
 			}
 			os << string(indent*INDENT_WIDTH, ' ') << "}";
@@ -3234,46 +3354,44 @@ void print(std::ostream &os, Stmt const &stmt, int indent, PrintListener *listen
 			if(s.ret_expr)
 			{
 				os << " ";
-				print(os, *s.ret_expr, listener);
+				print(os, *s.ret_expr);
 			}
 			os << ";";
 		},
 		[&](IfStmt const &s)
 		{
 			os << string(indent*INDENT_WIDTH, ' ') << "if ";
-			print(os, s.condition, listener) << "\n";
-			print(os, *s.then, indent, listener);
+			print(os, s.condition) << "\n";
+			print(os, *s.then, indent);
 			if(s.else_)
 			{
 				os << "\n" << string(indent*INDENT_WIDTH, ' ') << "else\n";
-				print(os, *s.else_, indent, listener);
+				print(os, *s.else_, indent);
 			}
 		},
 		[&](WhileStmt const &s)
 		{
 			os << string(indent*INDENT_WIDTH, ' ') << "while ";
-			print(os, s.condition, listener) << "\n";
-			print(os, *s.body, indent, listener);
+			print(os, s.condition) << "\n";
+			print(os, *s.body, indent);
 		},
 		[&](MatchStmt const &s)
 		{
 			os << string(indent*INDENT_WIDTH, ' ') << "match ";
-			print(os, s.expr, listener) << "\n";
+			print(os, s.expr) << "\n";
 			os << string(indent*INDENT_WIDTH, ' ') << "{\n";
 			for(MatchArm const &arm: s.arms)
 			{
 				os << string((indent+1)*INDENT_WIDTH, ' ') << "case ";
 				print(os, arm.capture);
 				os << "\n";
-				print(os, *arm.stmt, indent+1, listener);
+				print(os, *arm.stmt, indent+1);
 				os << "\n";
 			}
 			os << string(indent*INDENT_WIDTH, ' ') << "}";
 		},
 	};
 
-	if(listener)
-		listener->after_stmt(os, stmt, indent);
 }
 
 std::ostream& operator << (std::ostream &os, Stmt const &stmt)
@@ -3296,31 +3414,27 @@ std::ostream& operator << (std::ostream &os, vector<TypeVarDef*> const &type_par
 	return os;
 }
 
-void print(TopLevelItem const &item, std::ostream &os, int indent, PrintListener *listener = nullptr)
+void print(TopLevelItem const &item, std::ostream &os, int indent)
 {
 	item | match
 	{
 		[&](ProcDef *def)
 		{
-			if(listener) listener->before_proc(os, def);
-
-			os << "proc " << def->name << def->type.type_params;
+			os << "proc " << def->name << def->type_params;
 			os << "(";
-			os << RangeFmt(def->type.params, ", ", [&](Parameter const &p)
+			os << RangeFmt(def->params, ", ", [&](Parameter const &p)
 			{
 				os << p.name << ": " << p.type;
 			});
-			os << ") -> " << def->type.ret;
+			os << ") -> " << def->type.ret();
 
 			if(def->body)
 			{
 				os << "\n";
-				print(os, *def->body, 0, listener);
+				print(os, *def->body, 0);
 			}
 			else
 				os << ";";
-
-			if(listener) listener->after_proc(os, def);
 		},
 		[&](StructDef *def)
 		{
@@ -3362,7 +3476,7 @@ void print(TopLevelItem const &item, std::ostream &os, int indent, PrintListener
 						},
 						[&](StructDef *case_member)
 						{
-							print(case_member, os, indent+1, listener);
+							print(case_member, os, indent+1);
 							os << ",";
 						},
 					};
@@ -3378,11 +3492,11 @@ void print(TopLevelItem const &item, std::ostream &os, int indent, PrintListener
 }
 
 
-std::ostream& print(std::ostream &os, Module const &mod, PrintListener *listener = nullptr)
+std::ostream& print(std::ostream &os, Module const &mod)
 {
 	for(TopLevelItem item: mod.items())
 	{
-		print(item, os, 0, listener);
+		print(item, os, 0);
 		os << "\n\n";
 	}
 
@@ -3591,19 +3705,19 @@ Type parse_prefix_type(Parser &parser, Module &mod)
 
 		case Lexeme::PROC:
 		{
-			ProcTypeDef proc_type;
+			vector<Type> params;
 			consume(parser, Lexeme::LEFT_PAREN);
 			while(parser.peek() != Lexeme::RIGHT_PAREN)
 			{
-				proc_type.params.push_back(Parameter("", parse_type(parser, mod), nullptr));
+				params.push_back(parse_type(parser, mod));
 				if(parser.peek() != Lexeme::RIGHT_PAREN)
 					consume(parser, Lexeme::COMMA);
 			}
 			consume(parser, Lexeme::RIGHT_PAREN);
 			consume(parser, Lexeme::THIN_ARROW);
-			proc_type.ret = parse_type(parser, mod);
+			Type ret = parse_type(parser, mod);
 
-			return ProcType(mod.add_proc_type(std::move(proc_type)));
+			return ProcType(std::move(params), std::move(ret));
 		}
 
 		case Lexeme::STRUCT:
@@ -3641,7 +3755,7 @@ Type parse_union_type(Parser &parser, Module &mod)
 	if(alternatives.size() == 1)
 		return std::move(alternatives.back());
 
-	return UnionType(mod.add_union_type(UnionTypeDef(std::move(alternatives))));
+	return UnionType(std::move(alternatives));
 }
 
 Type parse_type(Parser &parser, Module &mod)
@@ -4201,10 +4315,11 @@ ProcDef* parse_proc(Parser &parser, Module &mod)
 {
 	string_view name = consume(parser, Lexeme::IDENTIFIER).text;
 	ProcDef *proc = mod.scope()->add_proc(string(name), mod.open_scope());
-	proc->type.type_params = parse_type_param_list(parser, mod);
+	proc->type_params = parse_type_param_list(parser, mod);
 
 	// Parse parameters
 	consume(parser, Lexeme::LEFT_PAREN);
+	vector<Type> param_types;
 	while(parser.peek() != Lexeme::RIGHT_PAREN)
 	{
 		string_view param_name = consume(parser, Lexeme::IDENTIFIER).text;
@@ -4213,12 +4328,13 @@ ProcDef* parse_proc(Parser &parser, Module &mod)
 		VarDef *param = mod.scope()->declare_var(string(param_name), IsMutable::NO, VarKind::PARAM);
 		param->type = clone(param_type);
 		proc->param_vars.push_back(param);
+		param_types.push_back(clone(param_type));
 
 		NullableOwnPtr<Expr> default_value;
 		if(try_consume(parser, Lexeme::EQ))
 			default_value = std::make_unique<Expr>(parse_expr(parser, mod));
 
-		proc->type.params.push_back(Parameter(string(param_name), std::move(param_type), std::move(default_value)));
+		proc->params.push_back(Parameter(string(param_name), std::move(param_type), std::move(default_value)));
 
 		if(parser.peek() != Lexeme::RIGHT_PAREN)
 			consume(parser, Lexeme::COMMA);
@@ -4226,9 +4342,11 @@ ProcDef* parse_proc(Parser &parser, Module &mod)
 	consume(parser, Lexeme::RIGHT_PAREN);
 
 	// Parse return type
-	proc->type.ret = BuiltinType::UNIT;
+	Type ret_type = BuiltinType::UNIT;
 	if(try_consume(parser, Lexeme::THIN_ARROW))
-		proc->type.ret = parse_type(parser, mod);
+		ret_type = parse_type(parser, mod);
+
+	proc->type = ProcType(std::move(param_types), std::move(ret_type));
 
 	// Parse body
 	if(!try_consume(parser, Lexeme::SEMICOLON))
@@ -4888,19 +5006,18 @@ bool equiv(Type const &a, Type const &b)
 		[&](ProcType const &ta)
 		{
 			if(ProcType const *tb = std::get_if<ProcType>(&b))
-				return ta.canonical_def == tb->canonical_def;
+				return ta.equiv(*tb);
 
 			return false;
 		},
 		[&](UnionType const &ta)
 		{
 			if(UnionType const *tb = std::get_if<UnionType>(&b))
-				return ta.canonical_def == tb->canonical_def;
+				return ta.equiv(*tb);
 
 			return false;
 		},
 		[&](UnresolvedPath const&) -> bool { assert(!"equiv: UnresolvedPath"); },
-		[&](UnappliedProcType const&) -> bool { assert(!"equiv: UnappliedProcType"); },
 	};
 }
 
@@ -4966,7 +5083,7 @@ bool operator < (Type const &a, Type const &b)
 
 			// TODO Comparison based on pointers is non-deterministic. I need a way to
 			//      generate unique names for type parameters
-			return ta.canonical_def < tb.canonical_def;
+			return ta.canonical() < tb.canonical();
 		},
 		[&](UnionType const &ta)
 		{
@@ -4974,10 +5091,9 @@ bool operator < (Type const &a, Type const &b)
 
 			// TODO Comparison based on pointers is non-deterministic. I need a way to
 			//      generate unique names for type parameters
-			return ta.canonical_def < tb.canonical_def;
+			return ta.canonical() < tb.canonical();
 		},
 		[&](UnresolvedPath const&) -> bool { assert(!"operator < (Type, Type): UnresolvedPath"); },
-		[&](UnappliedProcType const&) -> bool { assert(!"operator < (Type, Type): UnappliedProcType"); },
 	};
 }
 
@@ -5039,7 +5155,7 @@ bool is_expr_assignable(Type const &dest, Expr &src, SemaContext &ctx)
 }
 
 
-MemoryLayout compute_union_layout(UnionTypeDef const *union_, Module &mod, unordered_set<TypeDefInstance> &seen);
+MemoryLayout compute_union_layout(UnionType const *union_, Module &mod, unordered_set<TypeDefInstance> &seen);
 MemoryLayout compute_own_layout(StructDefInstance *struct_, Module &mod, unordered_set<TypeDefInstance> &seen);
 
 Type const* is_optional_ptr(StructType const *struct_)
@@ -5102,16 +5218,15 @@ MemoryLayout compute_layout(
 		[&](UnionType const &t) -> MemoryLayout
 		{
 			if(parent_type_deps)
-				parent_type_deps->insert(t.canonical_def);
+				parent_type_deps->insert(t.canonical());
 
-			return compute_union_layout(t.canonical_def, mod, seen);
+			return compute_union_layout(t.canonical(), mod, seen);
 		},
 		[&](UnresolvedPath const&) -> MemoryLayout { assert(!"compute_layout: UnresolvedPath"); },
-		[&](UnappliedProcType const&) -> MemoryLayout { assert(!"compute_layout: UnappliedProcType"); },
 	};
 }
 
-MemoryLayout compute_union_layout(UnionTypeDef const *union_, Module &mod, unordered_set<TypeDefInstance> &seen)
+MemoryLayout compute_union_layout(UnionType const *union_, Module &mod, unordered_set<TypeDefInstance> &seen)
 {
 	if(UnionTypeInfo *info = mod.try_get_union_info(union_))
 		return info->layout;
@@ -5119,13 +5234,13 @@ MemoryLayout compute_union_layout(UnionTypeDef const *union_, Module &mod, unord
 	if(!seen.insert(union_).second)
 		throw ParseError("Cyclic type definition");
 
-	BuiltinType discr_type = smallest_int_type_for(XInt64(union_->alternatives.size()));
+	BuiltinType discr_type = smallest_int_type_for(XInt64(union_->alternatives().size()));
 
 	UnionTypeInfo info;
 	info.layout.extend(get_layout(discr_type));
 
 	MemoryLayout alt_layouts;
-	for(Type const &alt: union_->alternatives)
+	for(Type const &alt: union_->alternatives())
 		alt_layouts.extend(compute_layout(alt, mod, &info.type_deps, seen));
 
 	info.layout.extend(alt_layouts);
@@ -5236,10 +5351,10 @@ void compute_type_layouts(Module &mod)
 {
 	compute_type_layouts(mod.global());
 
-	for(UnionTypeDef const &union_: mod.union_types())
+	for(OwnPtr<UnionType> const &union_: mod.union_types())
 	{
 		unordered_set<TypeDefInstance> seen;
-		compute_union_layout(&union_, mod, seen);
+		compute_union_layout(union_.get(), mod, seen);
 	}
 }
 
@@ -5248,6 +5363,20 @@ void compute_type_layouts(Module &mod)
 // Resolve identifiers
 //--------------------------------------------------------------------
 void resolve_types(Type &type, SemaContext &ctx);
+void type_substitute(Type &type, TypeEnv const &type_env);
+
+void type_substitute(ProcType &type, TypeEnv const &type_env)
+{
+	// The way type_substitute() is used should ensure that `type_env` does not affect the
+	// type arguments of a fully instantiated ProcType
+	if(not type.is_canonicalized())
+	{
+		for(Type &param: type.mutable_params())
+			type_substitute(param, type_env);
+
+		type_substitute(type.mutable_ret(), type_env);
+	}
+}
 
 void type_substitute(Type &type, TypeEnv const &type_env)
 {
@@ -5284,21 +5413,19 @@ void type_substitute(Type &type, TypeEnv const &type_env)
 				}
 			}
 		},
-		[&](ProcType&)
+		[&](ProcType &t)
 		{
-			// The way type_substitute() is used should ensure that `type_env` does not affect the
-			// type arguments of a fully instantiated ProcType
+			type_substitute(t, type_env);
 		},
-		[&](UnionType&)
+		[&](UnionType &t)
 		{
 			// The way type_substitute() is used should ensure that `type_env` does not affect the
 			// type arguments of a fully instantiated UnionType
-		},
-		[&](UnappliedProcType &t)
-		{
-			for(Type &arg: t.type_args)
-				type_substitute(arg, type_env);
-
+			if(not t.is_canonicalized())
+			{
+				for(Type &alt: t.mutable_alternatives())
+					type_substitute(alt, type_env);
+			}
 		},
 		[&](UnresolvedPath&) { assert(!"type_substitute: Type: UnresolvedPath"); },
 	};
@@ -5352,9 +5479,9 @@ variant<Type, Expr> resolve_path(UnresolvedPath &&path, SemaContext &ctx)
 		},
 		[&](ProcDef &proc) -> variant<Type, Expr>
 		{
-			assert(path.type_args.size() <= proc.type.type_params.size());
+			assert(path.type_args.size() <= proc.type_params.size());
 
-			size_t num_missing_args = proc.type.type_params.size() - path.type_args.size();
+			size_t num_missing_args = proc.type_params.size() - path.type_args.size();
 			TypeArgList remaining_args;
 			remaining_args.append(path.type_args);
 			while(num_missing_args--)
@@ -5427,6 +5554,16 @@ Expr resolve_path_to_expr(UnresolvedPath &&path, SemaContext &ctx)
 
 void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx);
 
+void resolve_types(ProcType &t, SemaContext &ctx)
+{
+	if(not t.is_canonicalized())
+	{
+		resolve_types(t.mutable_ret(), ctx);
+		for(Type &p: t.mutable_params())
+			resolve_types(p, ctx);
+	}
+}
+
 void resolve_types(Type &type, SemaContext &ctx)
 {
 	type | match
@@ -5444,33 +5581,22 @@ void resolve_types(Type &type, SemaContext &ctx)
 		[&](StructType&) {},
 		[&](ProcType &t)
 		{
-			if(not t.canonical_def)
-			{
-				resolve_types(t.def->ret, ctx);
-				for(Parameter &p: t.def->params)
-					resolve_types(p.type, ctx);
-
-				t.canonical_def = ctx.mod().get_canonical(*t.def);
-			}
+			resolve_types(t, ctx);
 		},
 		[&](UnionType &t)
 		{
-			if(not t.canonical_def)
+			if(not t.is_canonicalized())
 			{
-				for(Type &alt: t.def->alternatives)
-				{
+				for(Type &alt: t.mutable_alternatives())
 					resolve_types(alt, ctx);
-					instantiate_type(alt, {}, ctx);
-				}
-
-				t.canonical_def = ctx.mod().get_canonical(*t.def);
 			}
+
+			instantiate_type(type, {}, ctx);
 		},
 		[&](UnresolvedPath &p)
 		{
 			type = resolve_path_to_type(std::move(p), ctx);
 		},
-		[&](UnappliedProcType&) {},
 	};
 }
 
@@ -5643,15 +5769,16 @@ void resolve_identifiers(TopLevelItem item, SemaContext &ctx)
 	{
 		[&](ProcDef *def)
 		{
-			resolve_identifiers(def->type.params, ctx);
+			resolve_types(def->type, ctx);
 
 			for(VarDef *param: def->param_vars)
 				resolve_types(param->type.value(), ctx);
 
+			for(Parameter &param: def->params)
+				resolve_types(param.type, ctx);
+
 			if(def->body)
 				resolve_identifiers(*def->body, ctx);
-
-			resolve_types(def->type.ret, ctx);
 		},
 		[&](StructDef *def)
 		{
@@ -5733,16 +5860,6 @@ void typecheck(Expr &expr, SemaContext &ctx, Type const *type_hint = nullptr);
 void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx);
 void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx);
 
-void fill_type_env(TypeEnv &type_env, vector<TypeVarDef*> const &type_params, TypeArgList &&type_args)
-{
-	assert(type_args.size() <= type_params.size());
-	for(size_t i = 0; i < type_args.size(); ++i)
-	{
-		TypeVarDef *tparam = type_params[i];
-		type_env.add_unique(TypeParameterVar(tparam), std::move(type_args.args[i]));
-	}
-}
-
 bool is_concrete(Type const &type)
 {
 	return type | match
@@ -5769,17 +5886,17 @@ bool is_concrete(Type const &type)
 		},
 		[&](ProcType const &t)
 		{
-			for(Parameter &p: t.def->params)
+			for(Type const &p: t.params())
 			{
-				if(not is_concrete(p.type))
+				if(not is_concrete(p))
 					return false;
 			}
 
-			return is_concrete(t.def->ret);
+			return is_concrete(t.ret());
 		},
 		[&](UnionType const &t)
 		{
-			for(Type &alt: t.def->alternatives)
+			for(Type const &alt: t.alternatives())
 			{
 				if(not is_concrete(alt))
 					return false;
@@ -5788,7 +5905,6 @@ bool is_concrete(Type const &type)
 			return true;
 		},
 		[&](UnresolvedPath const&) -> bool { assert(!"is_concrete: UnresolvedPath"); },
-		[&](UnappliedProcType const&) -> bool { assert(!"is_concrete: UnappliedProcType"); },
 	};
 }
 
@@ -5827,17 +5943,17 @@ bool is_fully_instantiated(Type const &type)
 		},
 		[&](ProcType const &t)
 		{
-			for(Parameter &p: t.def->params)
+			for(Type const &p: t.params())
 			{
-				if(not is_fully_instantiated(p.type))
+				if(not is_fully_instantiated(p))
 					return false;
 			}
 
-			return is_fully_instantiated(t.def->ret);
+			return is_fully_instantiated(t.ret());
 		},
 		[&](UnionType const &t)
 		{
-			for(Type &alt: t.def->alternatives)
+			for(Type const &alt: t.alternatives())
 			{
 				if(not is_fully_instantiated(alt))
 					return false;
@@ -5846,16 +5962,6 @@ bool is_fully_instantiated(Type const &type)
 			return true;
 		},
 		[&](UnresolvedPath const&) -> bool { assert(!"is_fully_instantiated: UnresolvedPath"); },
-		[&](UnappliedProcType const &t)
-		{
-			for(Type const &arg: t.type_args)
-			{
-				if(not is_fully_instantiated(arg))
-					return false;
-			}
-
-			return true;
-		},
 	};
 }
 
@@ -5893,8 +5999,11 @@ StructDefInstance* instantiate_struct(
 	inst->type_args = clone(type_args);
 	inst->own_args_concrete = args_concrete;
 
+	// Fill type env
 	inst->type_env = inst->outer_struct ? clone(inst->outer_struct->inst()->type_env) : TypeEnv();
-	fill_type_env(inst->type_env, struct_->type_params, clone(type_args));
+	assert(type_args.size() <= struct_->type_params.size());
+	for(size_t i = 0; i < type_args.size(); ++i)
+		inst->type_env.add_unique(TypeParameterVar(struct_->type_params[i]), clone(type_args.args[i]));
 
 	if(struct_->constructor_params)
 	{
@@ -5981,6 +6090,7 @@ void StructType::instantiate(TypeEnv const &type_env, SemaContext &ctx)
 	}
 }
 
+ProcType instantiate_proc_type(ProcType const &proc_def, TypeEnv const &type_env, SemaContext &ctx);
 
 ProcDefInstance* instantiate_proc(
 	ProcDef *proc,
@@ -5988,7 +6098,7 @@ ProcDefInstance* instantiate_proc(
 	SemaContext &ctx
 )
 {
-	assert(type_args.size() == proc->type.type_params.size());
+	assert(type_args.size() == proc->type_params.size());
 
 	// Check if we have already instantiated the procedure
 	auto it = proc->instances.find(type_args);
@@ -6011,10 +6121,15 @@ ProcDefInstance* instantiate_proc(
 	inst->is_concrete = true;
 	inst->type_args = clone(type_args);
 	inst->is_concrete = args_concrete;
-	inst->type = clone(proc->type);
+	inst->type = proc->type.clone();
+	inst->params = clone(proc->params);
 
-	fill_type_env(inst->type_env, proc->type.type_params, clone(type_args));
-	for(Parameter &p: inst->type.params)
+	// Create type env
+	assert(type_args.size() <= proc->type_params.size());
+	for(size_t i = 0; i < type_args.size(); ++i)
+		inst->type_env.add_unique(TypeParameterVar(proc->type_params[i]), clone(type_args.args[i]));
+
+	for(Parameter &p: inst->params)
 	{
 		instantiate_type(p.type, inst->type_env, ctx);
 
@@ -6023,54 +6138,30 @@ ProcDefInstance* instantiate_proc(
 			typecheck(*p.default_value, ctx);
 	}
 
-	instantiate_type(inst->type.ret, inst->type_env, ctx);
+	inst->type = instantiate_proc_type(inst->type, inst->type_env, ctx);
 
 	ctx.mod().notify_new_proc_inst(inst);
 
 	return inst;
 }
 
-ProcType instantiate_proc_type(ProcTypeDef const &proc_def, TypeEnv const &type_env, SemaContext &ctx)
+ProcType instantiate_proc_type(ProcType const &proc_def, TypeEnv const &type_env, SemaContext &ctx)
 {
-	ProcTypeDef new_type;
-	for(TypeVarDef *p: proc_def.type_params)
-	{
-		if(not type_env.contains(TypeParameterVar(p)))
-			new_type.type_params.push_back(p);
-	}
+	ProcType new_type = proc_def.clone_independent();
+	instantiate_type(new_type.mutable_ret(), type_env, ctx);
+	for(Type &p: new_type.mutable_params())
+		instantiate_type(p, type_env, ctx);
 
-	for(Parameter const &p: proc_def.params)
-	{
-		Parameter new_param = clone(p);
-		instantiate_type(new_param.type, type_env, ctx);
-		new_type.params.push_back(std::move(new_param));
-	}
-
-	new_type.ret = clone(proc_def.ret);
-	instantiate_type(new_type.ret, type_env, ctx);
-
-	ProcTypeDef *def = ctx.mod().add_proc_type(std::move(new_type));
-	return ProcType{
-		.def = def,
-		.canonical_def = ctx.mod().get_canonical(*def),
-	};
+	return ctx.mod().canonicalize(new_type);
 }
 
-UnionType instantiate_union_type(UnionTypeDef const &union_, TypeEnv const &type_env, SemaContext &ctx)
+UnionType instantiate_union_type(UnionType const &union_, TypeEnv const &type_env, SemaContext &ctx)
 {
-	UnionTypeDef new_type;
-	for(Type const &alt: union_.alternatives)
-	{
-		Type new_alt = clone(alt);
-		instantiate_type(new_alt, type_env, ctx);
-		new_type.alternatives.push_back(std::move(new_alt));
-	}
+	UnionType new_type = union_.clone_independent();
+	for(Type &alt: new_type.mutable_alternatives())
+		instantiate_type(alt, type_env, ctx);
 
-	UnionType ut;
-	ut.def = ctx.mod().add_union_type(std::move(new_type));
-	ut.canonical_def = ctx.mod().get_canonical(*ut.def);
-
-	return ut;
+	return ctx.mod().canonicalize(new_type);
 }
 
 
@@ -6123,15 +6214,11 @@ void instantiate_type(Type &type, TypeEnv const &type_env, SemaContext &ctx)
 		},
 		[&](ProcType &t)
 		{
-			type = instantiate_proc_type(*t.def, type_env, ctx);
+			type = instantiate_proc_type(t, type_env, ctx);
 		},
 		[&](UnionType &t)
 		{
-			type = instantiate_union_type(*t.def, type_env, ctx);
-		},
-		[&](UnappliedProcType &t)
-		{
-			type = instantiate_proc_type(*t.type, type_env, ctx);
+			type = instantiate_union_type(t, type_env, ctx);
 		},
 		[&](UnresolvedPath&) { assert(!"instantiate_type: Type: UnresolvedPath"); },
 	};
@@ -6157,26 +6244,12 @@ void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx)
 
 			ProcDefInstance *inst = instantiate_proc(e.proc, std::move(e.type_args), ctx);
 			expr = expr.clone_as(ProcExpr(inst));
-			expr.type = ProcType(&inst->type, ctx.mod().get_canonical(inst->type));
+			expr.type = inst->type.clone();
 		},
 		[&](VarExpr&) {},
 		[&](ConstructorExpr &e)
 		{
 			instantiate_type(e.ctor, type_env, ctx);
-
-			StructType &st = std::get<StructType>(e.ctor);
-
-			// We need to update expr.type. Reason:
-			// - the Parameters in expr.type are expected to be typechecked, in particular,
-			//   Parameter.default_value.type must have been computed
-			// - this is not the case for UnappliedConstructorExpr
-			ProcTypeDef ctor_type;
-			ctor_type.params = clone(*st.inst()->constructor_params);
-			ctor_type.ret = StructType(st.inst());
-			expr.type = ProcType{
-				.def = ctx.mod().add_proc_type(clone(ctor_type)),
-				.canonical_def = ctx.mod().get_canonical(ctor_type)
-			};
 		},
 		[&](ProcExpr &e)
 		{
@@ -6185,7 +6258,6 @@ void instantiate_types(Expr &expr, TypeEnv const &type_env, SemaContext &ctx)
 				instantiate_type(arg, type_env, ctx);
 
 			e.inst = instantiate_proc(e.inst->def, std::move(new_type_args), ctx);
-			expr.type = ProcType(&e.inst->type, ctx.mod().get_canonical(e.inst->type));
 		},
 		[&](UnaryExpr &e)
 		{
@@ -6368,14 +6440,30 @@ bool type_var_occurs_in(TypeDeductionVar var, Type const &type)
 
 			return false;
 		},
-		[&](ProcType const&) { return false; },
-		[&](UnionType const&) { return false; },
-		[&](UnappliedProcType const &t)
+		[&](ProcType const &t)
 		{
-			for(Type const &arg: t.type_args)
+			if(not t.is_canonicalized())
 			{
-				if(type_var_occurs_in(var, arg))
-					return true;
+				for(Type const &param: t.params())
+				{
+					if(type_var_occurs_in(var, param))
+						return true;
+				}
+
+				return type_var_occurs_in(var, t.ret());
+			}
+
+			return false;
+		},
+		[&](UnionType const &t)
+		{
+			if(not t.is_canonicalized())
+			{
+				for(Type const &alt: t.alternatives())
+				{
+					if(type_var_occurs_in(var, alt))
+						return true;
+				}
 			}
 
 			return false;
@@ -6635,9 +6723,9 @@ bool try_unify_structs(Type const &dest, Type const &src, TypeEnv &subst, SemaCo
 TRY_UNIFY_WITH_IMPLICIT_CTOR:
 	if(mode == UnificationMode::VALUE_ASSIGNMENT && dest_struct->def()->implicit_ctor)
 	{
-		Parameter param = clone(dest_struct->def()->implicit_ctor->constructor_params->at(0));
-		type_substitute(param.type, create_type_env(*dest_struct));
-		unify(param.type, src, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, right_expr);
+		Type param = clone(dest_struct->def()->implicit_ctor->constructor_params->at(0).type);
+		type_substitute(param, create_type_env(*dest_struct));
+		unify(param, src, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, right_expr);
 
 		if(right_expr)
 		{
@@ -6655,12 +6743,7 @@ TRY_UNIFY_WITH_IMPLICIT_CTOR:
 			});
 
 			Expr ctor_expr(ConstructorExpr(clone(ctor_struct_type)), {});
-			ProcTypeDef ctor_type{
-				.type_params = {},
-				.params = mk_vec(std::move(param)),
-				.ret = clone(ctor_struct_type),
-			};
-			ctor_expr.type = Type(UnappliedProcType(std::move(ctor_type), {}));
+			ctor_expr.type = ProcType(mk_vec(std::move(param)), clone(ctor_struct_type));
 
 			Expr call_expr(CallExpr(std::move(ctor_expr), std::move(ctor_args)), {});
 			call_expr.type = clone(ctor_struct_type);
@@ -6797,16 +6880,19 @@ void unify(Type const &left, Type const &right, TypeEnv &subst, SemaContext &ctx
 		},
 
 		[&](ProcType const&) { assert(!"unify: ProcType: TODO"); },
-		[&](UnappliedProcType const&) { assert(!"unify: UnappliedProcType: TODO"); },
 
 		[&](UnionType const &left_t) 
 		{
+			// Must be canonicalized because otherwise the order of the alternatives might be
+			// different, which would lead to an incorrect match_idx below
+			assert(left_t.is_canonicalized());
+
 			if(equiv(left, right))
 				return;
 
 			assert(mode == UnificationMode::VALUE_ASSIGNMENT);
 
-			vector<Type> const &alts = left_t.canonical_def->alternatives;
+			vector<Type> const &alts = left_t.alternatives();
 			optional<size_t> match_idx;
 			TypeEnv alt_subst;
 			for(size_t i = 0; i < alts.size(); ++i)
@@ -6943,7 +7029,6 @@ bool is_cast_ok(Type const &dest_type, Type const &src_type, SemaContext &ctx)
 		},
 		[&](ProcType const&) -> bool { assert(!"is_cast_ok: ProcType: TODO"); },
 		[&](UnionType const&) -> bool { assert(!"is_cast_ok: UnionType: TODO"); },
-		[&](UnappliedProcType const&) -> bool { assert(!"is_cast_ok: UnappliedProcType"); },
 		[&](UnresolvedPath const&) -> bool { assert(!"is_cast_ok: UnresolvedPath"); },
 	};
 }
@@ -6976,36 +7061,67 @@ Parameter* find_var_member(StructType const *struct_, string const &field)
 
 void add_size_to_alloc_call(Expr &addr, Expr &&size_expr);
 
-ProcTypeDef get_callee_proc_type(Type const &callee_type)
+struct CalleeSpec
 {
-	return callee_type | match
+	vector<Parameter> params;
+	Type ret;
+};
+
+void type_substitute(CalleeSpec &spec, TypeEnv const &type_env)
+{
+	for(Parameter &p: spec.params)
 	{
-		[&](ProcType const &t)
+		type_substitute(p.type, type_env);
+
+		// I should also substitute the types in p.default_value
+	}
+
+	type_substitute(spec.ret, type_env);
+}
+
+CalleeSpec get_callee_spec(Expr const &callee)
+{
+	return callee | match
+	{
+		[&](ProcExpr const &e)
 		{
-			return clone(*t.def);
-		},
-		[&](UnappliedProcType const &t) -> ProcTypeDef
-		{
-			TypeEnv env;
-			for(size_t i = 0; i < t.type_args.size(); ++i)
-				env.add_unique(TypeParameterVar(t.type->type_params[i]), clone(t.type_args.args[i]));
-
-			vector<Parameter> callee_params = clone(t.type->params);
-			for(Parameter &param: callee_params)
-				type_substitute(param.type, env);
-
-			Type ret = clone(t.type->ret);
-			type_substitute(ret, env);
-
-			return ProcTypeDef{
-				.type_params = {},
-				.params = std::move(callee_params),
-				.ret = std::move(ret),
+			return CalleeSpec{
+				.params = clone(e.inst->params),
+				.ret = clone(e.inst->type.ret()),
 			};
 		},
-		[&](auto const&) -> ProcTypeDef
+		[&](UnappliedProcExpr const &e)
 		{
-			throw ParseError("Type is not callable: " + str(callee_type));
+			TypeEnv tenv;
+			for(size_t i = 0; i < e.type_args.size(); ++i)
+				tenv.add_unique(TypeParameterVar(e.proc->type_params[i]), clone(e.type_args.args[i]));
+
+			CalleeSpec spec{
+				.params = clone(e.proc->params),
+				.ret = clone(e.proc->type.ret()),
+			};
+			type_substitute(spec, tenv);
+
+			return spec;
+		},
+		[&](ConstructorExpr const &e)
+		{
+			StructDef *struct_ = e.struct_().def();
+			assert(struct_->constructor_params);
+
+			CalleeSpec spec{
+				.params = clone(*struct_->constructor_params),
+				.ret = clone(e.ctor),
+			};
+
+			if(not e.struct_().is_instantiated())
+				type_substitute(spec, create_type_env(e.struct_()));
+
+			return spec;
+		},
+		[&](auto const&) -> CalleeSpec
+		{
+			throw ParseError("Type is not callable: " + str(callee));
 		}
 	};
 }
@@ -7070,7 +7186,12 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 		[&](UnresolvedPath&) -> bool { assert(!"typecheck_partial: UnresolvedPath"); },
 		[&](UnappliedProcExpr &e)
 		{
-			expr.type = UnappliedProcType(clone(e.proc->type), clone(e.type_args));
+			TypeEnv env;
+			for(size_t i = 0; i < e.type_args.size(); ++i)
+				env.add_unique(TypeParameterVar(e.proc->type_params[i]), clone(e.type_args.args[i]));
+
+			expr.type = e.proc->type.clone();
+			type_substitute(*expr.type, env);
 			return false;
 		},
 		[&](ConstructorExpr &e)
@@ -7083,17 +7204,14 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 
 			TypeEnv env;
 			create_type_env(*struct_type, env);
-			vector<Parameter> callee_params = clone(*struct_type->def()->constructor_params);
-			for(Parameter &param: callee_params)
-				type_substitute(param.type, env);
+			vector<Type> ctor_params;
+			for(Parameter const &param: *struct_type->def()->constructor_params)
+			{
+				ctor_params.push_back(clone(param.type));
+				type_substitute(ctor_params.back(), env);
+			}
 
-			ProcTypeDef ctor_type{
-				.type_params = {},
-				.params = std::move(callee_params),
-				.ret = clone(e.ctor),
-			};
-
-			expr.type = UnappliedProcType(std::move(ctor_type), {});
+			expr.type = ProcType(std::move(ctor_params), clone(e.ctor));
 			return false;
 		},
 		[&](VarExpr &e)
@@ -7105,7 +7223,7 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 		},
 		[&](ProcExpr &e)
 		{
-			expr.type = ProcType(&e.inst->type, ctx.mod().get_canonical(e.inst->type));
+			expr.type = e.inst->type.clone();
 			return true;
 		},
 		[&](UnaryExpr &e)
@@ -7314,12 +7432,12 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 		{
 			bool fully_instantiated = typecheck_partial(*e.callable, ctx, TypingHint(hint.subst));
 
-			ProcTypeDef callee_type = get_callee_proc_type(*e.callable->type);
-			if(e.args.size() > callee_type.params.size())
+			CalleeSpec callee_spec = get_callee_spec(*e.callable);
+			if(e.args.size() > callee_spec.params.size())
 				throw ParseError("Too many arguments");
 
 			if(hint.type)
-				unify(*hint.type, callee_type.ret, *hint.subst, ctx, UnificationMode::VALUE_ASSIGNMENT);
+				unify(*hint.type, callee_spec.ret, *hint.subst, ctx, UnificationMode::VALUE_ASSIGNMENT);
 
 			unordered_set<size_t> assigned_params;
 			bool has_ooo_named_args = false;
@@ -7330,7 +7448,7 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 				// Find the corresponding parameter depending on whether the argument is named or not
 				if(arg.name)
 				{
-					if(optional<size_t> param_idx_opt = find_by_name(callee_type.params, *arg.name))
+					if(optional<size_t> param_idx_opt = find_by_name(callee_spec.params, *arg.name))
 					{
 						arg.param_idx = *param_idx_opt;
 						if(*param_idx_opt != i)
@@ -7351,7 +7469,7 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 				if(!res.second)
 					throw ParseError("Multiple arguments for same parameter");
 
-				Parameter const &param = callee_type.params.at(*arg.param_idx);
+				Parameter const &param = callee_spec.params.at(*arg.param_idx);
 				bool arg_fully_instantiated = typecheck_partial(*arg.expr, ctx, hint.with_type(&param.type));
 				if(not arg_fully_instantiated) fully_instantiated = false;
 
@@ -7362,16 +7480,16 @@ bool typecheck_partial(Expr &expr, SemaContext &ctx, TypingHint hint)
 				}
 			}
 
-			for(size_t param_idx = 0; param_idx < callee_type.params.size(); ++param_idx)
+			for(size_t param_idx = 0; param_idx < callee_spec.params.size(); ++param_idx)
 			{
 				if(!assigned_params.contains(param_idx))
 				{
-					if(!callee_type.params.at(param_idx).default_value)
+					if(!callee_spec.params.at(param_idx).default_value)
 						throw ParseError("Missing value for procedure/struct argument in call");
 				}
 			}
 
-			expr.type = clone(callee_type.ret);
+			expr.type = clone(callee_spec.ret);
 			type_substitute(*expr.type, *hint.subst);
 
 			return fully_instantiated;
@@ -7529,16 +7647,16 @@ void typecheck(Expr &expr, SemaContext &ctx, Type const *type_hint)
 void add_size_to_alloc_call(Expr &addr, Expr &&size_expr)
 {
 	vector<Argument> *args = nullptr;
-	vector<Parameter> const *params = nullptr;
+	vector<Type> const *params = nullptr;
 
 	// Try to extract the arguments and parameters of the function call
 	if(CallExpr *addr_call = std::get_if<CallExpr>(&addr))
 	{
 		args = &addr_call->args;
 		if(ProcExpr *proc_expr = std::get_if<ProcExpr>(addr_call->callable.get()))
-			params = &proc_expr->inst->type.params;
+			params = &proc_expr->inst->type.params();
 		else if(UnappliedProcExpr *proc_expr = std::get_if<UnappliedProcExpr>(addr_call->callable.get()))
-			params = &proc_expr->proc->type.params;
+			params = &proc_expr->proc->type.params();
 	}
 
 	// Add `size_expr` as an argument
@@ -7547,7 +7665,7 @@ void add_size_to_alloc_call(Expr &addr, Expr &&size_expr)
 		if(
 			args->size() == 0 &&
 			params->size() == 1 &&
-			equiv(params->at(0).type, Type(BuiltinType::USIZE))
+			equiv(params->at(0), Type(BuiltinType::USIZE))
 		)
 		{
 			args->push_back(Argument{
@@ -7679,8 +7797,7 @@ void typecheck_pattern(
 			}
 			else if(UnionType const *rhs_union_type = std::get_if<UnionType>(expected_type))
 			{
-				UnionTypeDef const *union_ = rhs_union_type->canonical_def;
-				if(not union_->contains(p.ctor))
+				if(not rhs_union_type->contains(p.ctor))
 					throw ParseError("Constructor in pattern must match against a member of the union type");
 			}
 			else
@@ -7763,9 +7880,9 @@ void typecheck(Stmt &stmt, SemaContext &ctx)
 			if(s.ret_expr)
 			{
 				TypeEnv subst;
-				bool fully_instantiated = typecheck_partial(*s.ret_expr, ctx, TypingHint(&ctx.proc()->type.ret, &subst));
+				bool fully_instantiated = typecheck_partial(*s.ret_expr, ctx, TypingHint(&ctx.proc()->type.ret(), &subst));
 				try {
-					unify(ctx.proc()->type.ret, *s.ret_expr->type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, &*s.ret_expr);
+					unify(ctx.proc()->type.ret(), *s.ret_expr->type, subst, ctx, UnificationMode::VALUE_ASSIGNMENT, &*s.ret_expr);
 					if(not fully_instantiated)
 						instantiate_types(*s.ret_expr, subst, ctx);
 				}
@@ -7775,7 +7892,7 @@ void typecheck(Stmt &stmt, SemaContext &ctx)
 			}
 			else
 			{
-				if(!equiv(ctx.proc()->type.ret, BuiltinType::UNIT))
+				if(!equiv(ctx.proc()->type.ret(), BuiltinType::UNIT))
 					throw ParseError("Return statement must return unit value");
 			}
 		},
@@ -7855,13 +7972,13 @@ void typecheck(Stmt &stmt, SemaContext &ctx)
 							if(!matched_cases.insert(clone(*arm.capture.type)).second)
 								throw ParseError("Duplicate case value");
 
-							arm.discr = *t.canonical_def->contains(*arm.capture.type);
+							arm.discr = *t.contains(*arm.capture.type);
 						}
 
 						typecheck(*arm.stmt, ctx);
 					}
 
-					if(matched_cases.size() != t.canonical_def->alternatives.size() and not has_wildcard)
+					if(matched_cases.size() != t.alternatives().size() and not has_wildcard)
 						throw ParseError("Match is not exhaustive");
 				},
 				[&](auto const&)
@@ -7883,16 +8000,16 @@ void typecheck(TopLevelItem item, SemaContext &ctx)
 			for(VarDef *param: def->param_vars)
 				instantiate_type(*param->type, {}, ctx);
 
-			// HACK: Why instantiate a copy of the return type and not the return type itself?
+			// HACK: Why instantiate a copy of the proc type and not the proc type itself?
 			//       - We need the return type to remain unapplied for type inference (see
 			//         typecheck_partial() for CallExpr)
 			//       - But we also need to instantiate any types that are only mentioned in the
-			//         return type (if a function return `?^FILE` we need to instantiate the Option
+			//         proc type (if a function return `?^FILE` we need to instantiate the Option
 			//         type appropriately)
-			Type ret_type = clone(def->type.ret);
-			instantiate_type(ret_type, {}, ctx);
+			ProcType proc_type = def->type.clone();
+			instantiate_proc_type(proc_type, {}, ctx);
 
-			for(Parameter &param: def->type.params)
+			for(Parameter &param: def->params)
 			{
 				if(!param.default_value)
 					continue;
@@ -8136,10 +8253,10 @@ string mangle_type_args(TypeArgList const &types)
 	return mangled;
 }
 
-string mangle_union_type_segment(UnionTypeDef const &union_)
+string mangle_union_type_segment(UnionType const &union_)
 {
 	string mangled = "U";
-	for(Type const &alt: union_.alternatives)
+	for(Type const &alt: union_.alternatives())
 		mangled += mangle_type_segment(alt);
 
 	return mangled + "E";
@@ -8196,10 +8313,9 @@ string mangle_type_segment(Type const &type)
 		[&](ProcType const&) -> string { assert(!"mangle_type_segment: ProcType: TODO"); },
 		[&](UnionType const &t) -> string
 		{
-			return mangle_union_type_segment(*t.canonical_def);
+			return mangle_union_type_segment(t);
 		},
 
-		[&](UnappliedProcType const&) -> string { assert(!"mangle_type_segment: UnappliedProcType"); },
 		[&](UnresolvedPath const&) -> string { assert(!"mangle_type_segment: UnresolvedPath"); },
 	};
 }
@@ -8210,7 +8326,7 @@ string mangle_type(Type const &type)
 	return "_YT" + mangle_type_segment(type);
 }
 
-string mangle_union_type(UnionTypeDef const &union_)
+string mangle_union_type(UnionType const &union_)
 {
 	return "_YT" + mangle_union_type_segment(union_);
 }
@@ -8373,7 +8489,6 @@ string generate_c_to_str(Type const &type)
 		[&](ProcType const&) -> string { assert(!"generate_c_to_str: ProcType: TODO"); },
 		[&](UnionType const&) -> string { return "struct " + mangle_type(type); },
 
-		[&](UnappliedProcType const&) -> string { assert(!"generate_c_to_str: UnappliedProcType"); },
 		[&](UnresolvedPath const&) -> string { assert(!"generate_c_to_str: UnresolvedPath"); },
 	};
 }
@@ -8535,23 +8650,35 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 			}
 
 
-			vector<Parameter> const &params = std::get<ProcType>(*e.callable->type).def->params;
+			vector<Parameter> const& callee_params = *e.callable | match
+			{
+				[&](ProcExpr const &e) -> vector<Parameter> const& { return e.inst->params; },
+				[&](ConstructorExpr const &e) -> vector<Parameter> const&
+				{
+					assert(e.struct_().is_instantiated());
+					StructDefInstance *inst = e.struct_().inst();
+					assert(inst->constructor_params);
+
+					return *inst->constructor_params;
+				},
+				[&](auto const&) -> vector<Parameter> const& { assert(!"Callee not instantiated"); }
+			};
 
 			// Evaluate arguments in the order they were provided
-			vector<string> arg_vals(params.size());
+			vector<string> arg_vals(callee_params.size());
 			for(Argument const &arg: e.args)
 			{
-				Type const &param_type = params[*arg.param_idx].type;
+				Type const &param_type = callee_params[*arg.param_idx].type;
 				arg_vals[*arg.param_idx] = generate_c_cast(param_type, *arg.expr, backend);
 			}
 
 			// Evaluate a parameter's default value if an argument is missing
-			for(size_t i = 0; i < params.size(); ++i)
+			for(size_t i = 0; i < callee_params.size(); ++i)
 			{
 				if(arg_vals[i].empty())
 				{
-					assert(params[i].default_value);
-					arg_vals[i] = generate_c_cast(params[i].type, *params[i].default_value, backend);
+					assert(callee_params[i].default_value);
+					arg_vals[i] = generate_c_cast(callee_params[i].type, *callee_params[i].default_value, backend);
 				}
 			}
 
@@ -8590,8 +8717,8 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](UnionInitExpr const &e)
 		{
-			UnionTypeDef const  &union_ = *std::get<UnionType>(*expr.type).canonical_def;
-			string init_val = generate_c_cast(union_.alternatives[e.alt_idx], *e.value, backend);
+			UnionType const  &union_ = std::get<UnionType>(*expr.type);
+			string init_val = generate_c_cast(union_.alternatives()[e.alt_idx], *e.value, backend);
 
 			string union_var = backend.new_tmp_var();
 			backend << "struct " << mangle_type(*expr.type) << " " << union_var << ";" << LineEnd;
@@ -8725,7 +8852,7 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 		{
 			if(s.ret_expr)
 			{
-				string ret_val = generate_c_cast(backend.proc()->type.ret, *s.ret_expr, backend);
+				string ret_val = generate_c_cast(backend.proc()->type.ret(), *s.ret_expr, backend);
 				backend << "return " << ret_val << ";" << LineEnd;
 			}
 			else
@@ -8950,11 +9077,9 @@ void generate_c_struct_methods(CStruct const &cstruct, CBackend &backend)
 //--------------------------------------------------------------------
 // Union types
 //--------------------------------------------------------------------
-void generate_c_union_type(UnionTypeDef const &union_, CBackend &backend)
+void generate_c_union_type(UnionType const &union_, CBackend &backend)
 {
-	assert(union_.alternatives.size() <= 255);
-
-
+	assert(union_.alternatives().size() <= 255);
 
 	backend << "struct " << mangle_union_type(union_) << LineEnd;
 	backend << "{" << LineEnd;
@@ -8963,9 +9088,9 @@ void generate_c_union_type(UnionTypeDef const &union_, CBackend &backend)
 		backend << "union" << LineEnd;
 		backend << "{" << LineEnd;
 		backend.increase_indent();
-			for(size_t i = 0; i < union_.alternatives.size(); ++i)
+			for(size_t i = 0; i < union_.alternatives().size(); ++i)
 			{
-				Type const &alt = union_.alternatives[i];
+				Type const &alt = union_.alternatives()[i];
 				backend << alt << " " << "__myca_alt" << i << ";" << LineEnd;
 			}
 		backend.decrease_indent();
@@ -8980,15 +9105,17 @@ void generate_c_union_type(UnionTypeDef const &union_, CBackend &backend)
 //--------------------------------------------------------------------
 void generate_c_proc_sig(ProcDefInstance const *proc, CBackend &backend)
 {
-	if(equiv(proc->type.ret, BuiltinType::UNIT))
+	if(equiv(proc->type.ret(), BuiltinType::UNIT))
 		backend << "void";
 	else
-		backend << proc->type.ret;
+		backend << proc->type.ret();
 
 	backend << " " << mangle_procedure(proc) << "(";
-	backend << RangeFmt(proc->type.params, ", ", [&](Parameter const &p)
+	size_t param_idx = 0;
+	backend << RangeFmt(proc->type.params(), ", ", [&](Type const &param_type)
 	{
-		backend << p.type << " " << p.name;
+		backend << param_type << " " << proc->params[param_idx].name;
+		param_idx += 1;
 	});
 	backend << ")";
 }
@@ -9015,9 +9142,12 @@ void _sort_types_by_deps(
 		{
 			return inst->type_deps;
 		},
-		[&](UnionTypeDef const *union_) -> unordered_set<TypeDefInstance> const&
+		[&](UnionType const *union_) -> unordered_set<TypeDefInstance> const&
 		{
-			return mod.try_get_union_info(union_)->type_deps;
+			UnionTypeInfo *info = mod.try_get_union_info(union_);
+			assert(info);
+
+			return info->type_deps;
 		},
 	};
 
@@ -9059,7 +9189,7 @@ struct NewInstanceListener : ModuleListener
 		structs.push_back(inst);
 	}
 
-	virtual void new_union_inst(UnionTypeDef const *def) override
+	virtual void new_union_inst(UnionType const *def) override
 	{
 		unions.push_back(def);
 	}
@@ -9070,8 +9200,8 @@ struct NewInstanceListener : ModuleListener
 	}
 
 	vector<StructDefInstance*> structs;
-	vector<UnionTypeDef const*> unions;
 	vector<ProcDefInstance*> procs;
+	vector<UnionType const*> unions;
 };
 
 struct ConcreteProcInstance
@@ -9107,7 +9237,7 @@ void generate_c(Module &mod, CBackend &backend)
 			[&](ProcDef *def)
 			{
 				// Make sure we have at least one instance
-				if(def->type.type_params.empty())
+				if(def->type_params.empty())
 					instantiate_proc(def, {}, ctx);
 
 				for(auto &[_, inst]: def->instances)
@@ -9121,8 +9251,8 @@ void generate_c(Module &mod, CBackend &backend)
 		};
 	}
 
-	for(UnionTypeDef const &union_: mod.union_types())
-		types.push_back(&union_);
+	for(OwnPtr<UnionType> const &union_: mod.union_types())
+		types.push_back(union_.get());
 
 	while(listener.structs.size() || listener.procs.size())
 	{
@@ -9135,7 +9265,7 @@ void generate_c(Module &mod, CBackend &backend)
 		for(StructDefInstance *new_struct: listener.structs)
 			types.push_back(new_struct);
 
-		for(UnionTypeDef const *new_union: listener.unions)
+		for(UnionType const *new_union: listener.unions)
 			types.push_back(new_union);
 
 		for(ProcDefInstance *new_proc: listener.procs)
@@ -9162,7 +9292,7 @@ void generate_c(Module &mod, CBackend &backend)
 
 				cstructs.emplace(inst, std::move(cstruct));
 			},
-			[&](UnionTypeDef const *union_)
+			[&](UnionType const *union_)
 			{
 				generate_c_union_type(*union_, backend);
 			},
@@ -9179,7 +9309,7 @@ void generate_c(Module &mod, CBackend &backend)
 				generate_c_struct_methods(cstructs.at(inst), backend);
 				backend << LineEnd;
 			},
-			[&](UnionTypeDef const*) {},
+			[&](UnionType const*) {},
 		};
 	}
 
