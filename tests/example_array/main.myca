@@ -1,0 +1,141 @@
+// Lib C
+//--------------------------------------------------------------------
+struct c_void { _: Never }
+struct c_char { _: i8 }
+
+extern proc malloc(size: usize) -> ^mut c_void;
+extern proc free(ptr: ^mut c_void);
+extern proc puts(str: [^]c_char) -> i32;
+extern proc fatal(msg: [^]c_char);
+
+
+// Main
+//--------------------------------------------------------------------
+proc main() -> i32
+{
+	let mut arr = Array'i32();
+
+	let mut i = 1;
+	while i <= 10 {
+		push(&mut arr, i);
+		i := i + 1;
+	}
+
+	let result = sum(&arr);
+	destroy(&mut arr);
+
+	return result;
+}
+
+proc sum(arr: ^Array'i32) -> i32
+{
+	let mut sum = 0;
+	let mut i: usize = 0;
+	while i < arr^.length {
+		sum := sum + get(arr, i);
+		i := i + 1;
+	}
+
+	return sum;
+}
+
+
+// Array
+//--------------------------------------------------------------------
+struct Array'T
+{
+	items: ?[^]mut T = None,
+	length: usize = 0,
+	capacity: usize = 0,
+}
+
+
+proc length'T (arr: ^Array'T) -> usize
+{
+	return arr^.length;
+}
+
+proc push'T (arr: ^mut Array'T, val: T)
+{
+	if arr^.length + 1 > arr^.capacity {
+		let new_cap = max(arr^.capacity * 2, 1);
+		grow_capacity(arr, new_cap);
+	}
+
+	unwrap(arr^.items)[arr^.length] := val;
+	arr^.length := arr^.length + 1;
+}
+
+proc grow_capacity'T (arr: ^mut Array'T, target_cap: usize)
+{
+	let new_items = malloc(target_cap * size_of(T)) as [^]mut T;
+	let mut i: usize = 0;
+	while i < arr^.length {
+		new_items[i] := unwrap(arr^.items)[i];
+		i := i + 1;
+	}
+
+	_free_items(arr);
+	arr^.items := new_items;
+	arr^.capacity := target_cap;
+}
+
+proc get'T (arr: ^Array'T, i: usize) -> T
+{
+	return unwrap(arr^.items)[i];
+}
+
+proc destroy'T (arr: ^mut Array'T)
+{
+	_free_items(arr);
+	arr^.length := 0;
+	arr^.capacity := 0;
+}
+
+proc _free_items'T (arr: ^mut Array'T)
+{
+	match arr^.items {
+		case Some(let items) { free(items as ^mut c_void); }
+		case None {}
+	}
+}
+
+
+proc max(a: usize, b: usize) -> usize
+{
+	if a < b {
+		return b;
+	}
+
+	return a;
+}
+
+
+// Option
+//--------------------------------------------------------------------
+struct Option'T
+{
+	case implicit Some{value: T},
+	case None,
+}
+
+typealias Some'T = Option'(T).Some;
+typealias None'T = Option'(T).None;
+
+proc unwrap'T(opt: ?T) -> T
+{
+	match opt
+	{
+		case Some(let value) { return value; }
+		case None { fatal(c"empty option\n"); }
+	}
+}
+
+proc unwrap_or'T(opt: ?T, fallback: T) -> T
+{
+	match opt
+	{
+		case Some(let value) { return value; }
+		case None { return fallback; }
+	}
+}
