@@ -1,65 +1,106 @@
 #pragma once
 
 #include <iterator>
+#include <ranges>
+#include <sstream>
 #include <string>
 #include <string_view>
-#include <sstream>
-#include <memory>
 #include <type_traits>
 #include <utility>
 #include <variant>
 #include <cassert>
+#include <unordered_map>
+#include <generator>
+
+
+using namespace std::string_literals;
+
+
+#define NULLABLE
+
+#ifdef __clang__
+	#define NO_DANGLING
+#elif __GNUC__
+	#define NO_DANGLING [[gnu::no_dangling]]
+#endif
 
 
 #define UNREACHABLE assert(!"unreachable")
 #define TODO(MSG) throw std::runtime_error("TODO: "s + (MSG))
 
-using namespace std::string_literals;
 
-
-// Smart pointers
 //==============================================================================
-// Couldn't get `using` to work
-template<class T, class Deleter = std::default_delete<T>>
-class NullableOwnPtr : public std::unique_ptr<T, Deleter>
+// Memory management
+//==============================================================================
+
+// Adapted from https://nullprogram.com/blog/2023/09/27/
+class Arena
 {
 public:
-	using std::unique_ptr<T, Deleter>::unique_ptr;
-	using std::unique_ptr<T, Deleter>::operator=;
+	explicit Arena(void *memory, ptrdiff_t size)
+	{
+		m_begin = (char*)memory;
+		m_end = m_begin ? m_begin + size : nullptr;
+	}
 
-	NullableOwnPtr(std::unique_ptr<T, Deleter> p) :
-		std::unique_ptr<T, Deleter>(std::move(p)) {}
+	template<typename T, typename ...Args>
+	T* alloc(Args &&...args)
+	{
+		static_assert(std::is_trivially_destructible_v<T>, "Arena: Allocated type not trivially destructible");
+
+		void *mem = alloc_raw(sizeof(T), alignof(T), 1);
+		return new (mem) T(std::forward<Args>(args)...);
+	}
+
+	template<typename T, typename ...Args>
+	T* alloc_n(size_t n, Args &&...args)
+	{
+		static_assert(std::is_trivially_destructible_v<T>, "Arena: Allocated type not trivially destructible");
+
+		void *mem = alloc_raw(sizeof(T), alignof(T), n);
+		return new (mem) T[n](std::forward<Args>(args)...);
+	}
+
+	void *alloc_raw(ptrdiff_t size, ptrdiff_t align, ptrdiff_t count)
+	{
+		ptrdiff_t padding = -(uintptr_t)m_begin & (align - 1);
+		ptrdiff_t available = m_end - m_begin - padding;
+		if (available < 0 || count > available/size) {
+			throw std::bad_alloc();
+		}
+		void *p = m_begin + padding;
+		m_begin += padding + count*size;
+		return p;
+	}
+
+	void* current_ptr() { return (void*)m_begin; }
+	void set_current_ptr(void *ptr) { m_begin = (char*)ptr; }
+
+private:
+	char *m_begin;
+	char *m_end;
 };
 
-// Supposed to be a non-null owning ptr. Even though it is not entirely true
-// (because of non-destructive moves) it's good enough to communicate the intention
-template<class T, class Deleter = std::default_delete<T>>
-class OwnPtr : public std::unique_ptr<T, Deleter>
+
+// Pass this to functions that need to allocate memory.
+// Pass by value so the temp allocator is automatically cleared upon return.
+struct Memory
 {
-public:
-	OwnPtr(T *p) :
-		std::unique_ptr<T, Deleter>(p)
-	{
-		assert(this->get() && "OwnPtr initialized with null pointer");
-	}
-
-	template<typename S>
-	OwnPtr(std::unique_ptr<S, std::default_delete<S>> p) :
-		std::unique_ptr<T, Deleter>(std::move(p))
-	{
-		assert(this->get() && "OwnPtr initialized with null pointer");
-	}
+	Arena *main;
+	Arena temp;
 };
 
 
+//==============================================================================
 // Strings and output formatting
 //==============================================================================
+
+// Why is this not part of the standard library?
 inline std::string operator + (std::string str, std::string_view view)
 {
 	str.append(view.begin(), view.end());
 	return str;
 }
-
 
 constexpr auto deref = [](auto *p) -> const decltype(*p)& { return *p; };
 
@@ -105,17 +146,11 @@ inline std::ostream& operator << (std::ostream &os, RangeFmt<RangeT, FuncT> cons
 	return os;
 }
 
-template<typename T>
-std::string str(T const &r)
-{
-	std::ostringstream os;
-	os << r;
-	return std::move(os).str();
-}
 
-
+//==============================================================================
 // Variant matching
 //==============================================================================
+
 // The following is taken from https://github.com/AVasK/vx to make std::visit more ergonomic.
 // Example:
 //
@@ -129,6 +164,7 @@ template<class... Ts>
 struct match : Ts...  {
 	using Ts::operator()...;
 };
+
 // explicit deduction guide (not needed as of C++20)
 template<class... Ts>
 match(Ts...) -> match<Ts...>;
@@ -155,52 +191,19 @@ bool is(std::variant<Ss...> const &v)
 }
 
 
-// Iterators/ranges
 //==============================================================================
-template<typename Iterator>
-class PairValueIterator {
-public:
-    using iterator_type = Iterator;
-    using value_type = typename Iterator::value_type::second_type;
-    using reference = value_type&;
-    using pointer = value_type*;
-    using difference_type = typename std::iterator_traits<Iterator>::difference_type;
-    using iterator_category = typename std::iterator_traits<Iterator>::iterator_category;
+// Ranges/containers
+//==============================================================================
 
-    PairValueIterator(iterator_type it) : it(it) {}
-
-    reference operator*() const {
-        return it->second;
-    }
-
-    pointer operator->() const {
-        return &(it->second);
-    }
-
-    PairValueIterator& operator++() {
-        ++it;
-        return *this;
-    }
-
-    PairValueIterator operator++(int) {
-        PairValueIterator tmp = *this;
-        ++it;
-        return tmp;
-    }
-
-    bool operator==(const PairValueIterator& other) const {
-        return it == other.it;
-    }
-
-    bool operator!=(const PairValueIterator& other) const {
-        return it != other.it;
-    }
-
-private:
-    iterator_type it;
-};
+// Segment array: https://danielchasehooper.com/posts/segment_array/
+// - Dynamic array with stable pointers, can be used with arena allocators
 
 
+//--------------------------------------------------------------------
+// Range
+//--------------------------------------------------------------------
+
+// A simple pair of iterators
 template<typename It>
 struct Range
 {
@@ -229,8 +232,165 @@ decltype(auto) reversed(RangeT const &r)
 }
 
 
-// Misc
+//--------------------------------------------------------------------
+// FixedArray
+//--------------------------------------------------------------------
+
+// Disable warning to allow flexible array members.
+// Unfortunately, it seems there is no specific warning flag for flexible array members, so we
+// disable all pedantic warnings.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored  "-Wpedantic"
+
+// A dynamically allocated array with a fixed size
+template<typename T>
+struct FixedArray
+{
+	size_t count = 0;
+	T items[];
+
+	T& head()
+	{
+		assert(count > 0);
+		return items[0];
+	}
+
+	T const& head() const
+	{
+		assert(count > 0);
+		return items[0];
+	}
+
+	Range<T*> tail()
+	{
+		assert(count > 0);
+		return {items + 1, items + count};
+	}
+
+	Range<T const*> tail() const
+	{
+		assert(count > 0);
+		return {items + 1, items + count};
+	}
+
+	T* begin() { return items; }
+	T* end() { return items + count; }
+};
+
+#pragma GCC diagnostic pop
+
+
+template<typename T>
+FixedArray<T>* alloc_fixed_array(size_t count, Arena &arena)
+{
+	FixedArray<T> *arr = (FixedArray<T>*)arena.alloc_raw(
+		sizeof(FixedArray<T>) + sizeof(T) * count,
+		alignof(FixedArray<T>),
+		1
+	);
+	arr->count = count;
+	return arr;
+}
+
+template<typename T>
+FixedArray<T>* clone(FixedArray<T> const *arr, Arena &arena)
+{
+	FixedArray<T> *result = alloc_fixed_array<T>(arr->count, arena);
+	for(size_t i = 0; i < arr->count; ++i)
+		result->items[i] = clone(arr->items[i], arena);
+
+	return result;
+}
+
+
+//--------------------------------------------------------------------
+template<typename T>
+struct List
+{
+	T value;
+	List<T> *NULLABLE next = nullptr;
+};
+
+template<typename T>
+std::generator<T&> to_range(List<T> *list)
+{
+	for(List<T> *item = list; item; item = item->next)
+		co_yield item->value;
+}
+
+
+template<typename T>
+class ListBuilder
+{
+public:
+	explicit ListBuilder(Arena &arena) :
+		arena(&arena) {}
+
+	T* append(T t)
+	{
+		List<T> *item = arena->alloc<List<T>>(t);
+		*tail = item;
+		tail = &(*tail)->next;
+		m_count += 1;
+
+		return &item->value;
+	}
+
+	List<T>* list() { return head; }
+
+	FixedArray<T>* to_array(Arena &arr_arena)
+	{
+		FixedArray<T> *arr = alloc_fixed_array<T>(m_count, arr_arena);
+		for(auto const &[idx, val]: to_range(list()) | std::views::enumerate)
+			arr->items[idx] = val;
+
+		return arr;
+	}
+
+	bool empty() const { return head == nullptr; }
+	size_t count() const { return m_count; }
+
+private:
+	Arena *arena;
+	List<T> *head = nullptr;
+	List<T> **tail = &head;
+	size_t m_count = 0;
+};
+
+
+//--------------------------------------------------------------------
+struct TransparentStringHash
+{
+	using is_transparent = void;
+
+	size_t operator () (std::string const &s) const
+	{
+		return std::hash<std::string>()(s);
+	}
+
+	size_t operator () (std::string_view const &s) const
+	{
+		return std::hash<std::string_view>()(s);
+	}
+};
+
+template<typename TValue>
+using UnorderedStringMap = std::unordered_map<
+	std::string,
+	TValue,
+	TransparentStringHash,
+	// By default, unordered_map would use std::equal_to<string> which isn't transparent.
+	// However, std::equal_to<> is!
+	std::equal_to<>
+>;
+
+
 //==============================================================================
+// Hashing
+//==============================================================================
+
+// According to https://stackoverflow.com/a/50978188/3491462 this is not how Boost does it anymore
+// but it will do for now.
 inline void combine_hashes(size_t &seed, size_t hash)
 {
     seed ^= hash + 0x9e3779b9 + (seed<<6) + (seed>>2);
@@ -243,133 +403,54 @@ inline size_t compute_hash(T const &t)
 }
 
 
-template<typename EnumT>
-class Flags
+
+//==============================================================================
+// Int128
+//==============================================================================
+using Int128 = __int128_t;
+
+
+template<>
+struct std::hash<Int128>
 {
-public:
-	using EnumType = EnumT;
-	using ValueType = std::underlying_type_t<EnumT>;
-
-	Flags() = default;
-	Flags(EnumType f) :
-		m_value{static_cast<ValueType>(f)} {}
-
-	bool isset(EnumType f) const
+	size_t operator () (Int128 value) const
 	{
-		return m_value & static_cast<ValueType>(f);
-	}
+		__uint128_t u = value;
+		uint64_t low = uint64_t(u);
+		uint64_t high = uint64_t(u >> 64);
 
-	bool set(EnumType f) const
-	{
-		return m_value |= static_cast<ValueType>(f);
-	}
+		size_t h = compute_hash(low);
+		combine_hashes(h, compute_hash(high));
 
-private:
-	ValueType m_value{};
+		return h;
+	}
 };
 
-
-class XInt64
+inline std::ostream& operator << (std::ostream &os, Int128 value)
 {
-public:
-	XInt64() :
-		m_is_negative(false),
-		m_value(0) {}
+	constexpr size_t MAX_RESULT_LENGTH = sizeof("-170141183460469231731687303715884105728") - 1;
+	char buffer[MAX_RESULT_LENGTH];
+	char *pos = std::end(buffer);
 
-	explicit XInt64(int64_t value) :
-		m_is_negative(value < 0),
-		m_value(std::abs(value)) {}
-
-	explicit XInt64(uint64_t value) :
-		m_is_negative(false),
-		m_value(value) {}
-
-	explicit XInt64(bool is_negative, uint64_t value) :
-		m_is_negative(is_negative),
-		m_value(value) {}
-
-	int64_t as_signed() const
+	__uint128_t abs_value = value < 0 ? -__uint128_t(value) : value;
+	do
 	{
-		return m_is_negative ? -int64_t(m_value) : int64_t(m_value);
+		--pos;
+		*pos = '0' + (abs_value % 10);
+		abs_value /= 10;
 	}
+	while(pos != std::begin(buffer) and abs_value != 0);
 
-	uint64_t as_unsigned() const
-	{
-		assert(!m_is_negative);
-		return m_value;
-	}
+	if(value < 0)
+		*(--pos) = '-';
 
-	bool is_negative() const { return m_is_negative; }
+	os.write(pos, std::end(buffer) - pos);
+	return os;
+}
 
-	XInt64 operator - () const
-	{
-		return XInt64(not m_is_negative, m_value);
-	}
-
-	friend XInt64 operator + (XInt64 a, XInt64 b)
-	{
-		if(a.is_negative() == b.is_negative())
-			return XInt64(a.is_negative(), a.m_value + b.m_value);
-		else
-		{
-			if(b.is_negative())
-				std::swap(a, b);
-
-			assert(a.is_negative());
-			assert(not b.is_negative());
-
-			if(a.m_value < b.m_value)
-				return XInt64(false, b.m_value - a.m_value);
-			else
-				return XInt64(true, a.m_value - b.m_value);
-		}
-	}
-
-	friend XInt64 operator - (XInt64 a, XInt64 b)
-	{
-		return a + (-b);
-	}
-
-	uint64_t raw() const { return m_value; }
-
-	friend bool operator == (XInt64 a, XInt64 b)
-	{
-		if(a.m_value == 0 && b.m_value == 0)
-			return true;
-
-		return a.m_value == b.m_value && a.m_is_negative == b.m_is_negative;
-	}
-
-	friend bool operator < (XInt64 a, XInt64 b)
-	{
-		if(a.is_negative())
-		{
-			if(b.is_negative())
-				return a.as_signed() < b.as_signed();
-
-			return true;
-		}
-		else
-		{
-			if(b.is_negative())
-				return false;
-
-			return a.as_unsigned() < b.as_unsigned();
-		}
-	}
-
-	friend bool operator <= (XInt64 a, XInt64 b)
-	{
-		return a == b || a < b;
-	}
-
-	friend bool operator > (XInt64 a, XInt64 b)
-	{
-		return b < a;
-	}
-
-private:
-	bool m_is_negative;
-	uint64_t m_value;
-};
-
+inline std::string str(Int128 xint)
+{
+	std::stringstream ss;
+	ss << xint;
+	return std::move(ss).str();
+}

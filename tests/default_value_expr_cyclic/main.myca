@@ -1,0 +1,31 @@
+struct Foo
+{
+	x: i32 = 23,
+
+	// If you expand the default value expression, one can easily see that this would result in an
+	// infinite recursion:
+	//
+	// Bar(
+	//     .y = Foo(
+	//         .x = 23,
+	//         .z = Bar(
+	//             .y = Foo(.x = 23, .z = Bar(<INFINITE RECURSION>...).w).x,
+	//             .w = 99
+	//         ).w
+	//     ).x,
+	//     .w = 99
+	// ).w
+	z: i32 = Bar().w,
+}
+
+struct Bar
+{
+	y: i32 = Foo().x,
+	w: i32 = 99,
+}
+
+proc main() -> i32
+{
+	let b = Bar();
+	return b.y;
+}

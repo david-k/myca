@@ -1,0 +1,47 @@
+struct Expr
+{
+	case Bool{value: bool},
+	case Int{value: i32},
+	case Binary{left: ^Expr, right: ^Expr, op: BinaryOp},
+	
+	// `type` is automatically added to the constructors of the above cases
+	type: ?Type = None,
+}
+
+struct BinaryOp
+{
+	case Add,
+	case Sub,
+	case Mul,
+	case Div,
+
+	case And,
+	case Or,
+}
+
+struct Type
+{
+	case Bool,
+	case Int,
+}
+
+
+//------------------------------------------------------------------------------
+proc main() -> i32
+{
+	let int_expr = Expr.Int(7);
+	let typed_int_expr = Expr.Int(99, Type.Int);
+
+	return int_expr.value + typed_int_expr.value;
+}
+
+
+//------------------------------------------------------------------------------
+struct Option'T
+{
+	case implicit Some{value: T},
+	case None,
+}
+
+typealias Some'T = Option'(T).Some;
+typealias None'T = Option'(T).None;

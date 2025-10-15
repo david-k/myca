@@ -1,0 +1,21 @@
+struct Foo
+{
+	x: i32 = 23,
+
+	// This test is similar to default_value_expr_cyclic, but here we prevent the infinite recursion
+	// by explicitly providing a value for `y`:
+	z: i32 = Bar(.y = 0).w,
+}
+
+struct Bar
+{
+	y: i32 = Foo().x,
+	w: i32 = 99,
+}
+
+
+proc main() -> i32
+{
+	let b = Bar();
+	return b.y; // 23
+}

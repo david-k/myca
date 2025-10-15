@@ -1,0 +1,10 @@
+struct BinaryOp
+{
+	dummy: i32,
+
+	// Since all cases will have `dummy` has a constructor parameter they must have braces
+	case Add,
+	case Sub,
+	case Mul,
+	case Div,
+}
