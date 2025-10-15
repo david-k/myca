@@ -3843,7 +3843,10 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 		},
 		[&](AsExpr &e)
 		{
-			typecheck_subexpr(*e.src_expr, hint.with_type(e.target_type), ctx);
+			// See test `casting_and_type_hinting` for the reason we do not pass e.target_type as a
+			// type hint
+			typecheck_subexpr(*e.src_expr, hint.without_type(), ctx);
+
 			if(not is_cast_ok(*e.target_type, *e.src_expr, ctx))
 				throw_sem_error("Invalid cast", e.range.first, ctx.mod);
 

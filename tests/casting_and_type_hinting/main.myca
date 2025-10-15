@@ -1,0 +1,50 @@
+// Lib C
+//--------------------------------------------------------------------
+struct c_char { _: i8 }
+extern proc fatal(msg: [^]c_char);
+
+
+// Main
+//--------------------------------------------------------------------
+proc main() -> i32
+{
+	let opt: Option'isize = 3;
+
+	// It is important that the typechecker does not propagate the target type of a `as` expression
+	// (here: i32) as a hint to the source expression. If it did, then the type parameter T of
+	// unwrap() would be deduced as i32 (because the return type is unified with i32), which would
+	// then cause an error because opt cannot be unified with ?i32.
+	let i = unwrap(opt) as i32;
+
+	return i;
+}
+
+
+// Option
+//--------------------------------------------------------------------
+struct Option'T
+{
+	case implicit Some{value: T},
+	case None,
+}
+
+typealias Some'T = Option'(T).Some;
+typealias None'T = Option'(T).None;
+
+proc unwrap'T(opt: ?T) -> T
+{
+	match opt
+	{
+		case Some(let value) { return value; }
+		case None { fatal(c"empty option"); }
+	}
+}
+
+proc unwrap_or'T(opt: ?T, fallback: T) -> T
+{
+	match opt
+	{
+		case Some(let value) { return value; }
+		case None { return fallback; }
+	}
+}
