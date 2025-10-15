@@ -67,5 +67,4 @@ private:
 //==============================================================================
 // C code generation
 //==============================================================================
-void generate_c(Type const &type, CBackend &backend);
 void generate_c(Module &mod, CBackend &backend);

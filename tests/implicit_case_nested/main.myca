@@ -6,7 +6,7 @@ proc set(object: ^mut i32, value: ??i32)
 proc main() -> i32
 {
 	let mut object = 0;
-	set(&mut object, 23); // `23` internally needs to be rewritten to `Some(Some(23))`
+	set(&mut object, 23);
 
 	return object;
 }
@@ -26,7 +26,7 @@ proc unwrap_or'T(opt: ?T, fallback: T) -> T
 {
 	match opt
 	{
-		case Option.Some(let value) { return value; }
-		case Option.None { return fallback; }
+		case Some(let value) { return value; }
+		case None { return fallback; }
 	}
 }

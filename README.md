@@ -9,6 +9,7 @@ Currently implemented:
 - generic procedures
 - generic type aliases
 - type inference for generics
+- order-independent type/procedure declarations (no forward-declarations needed)
 - pattern matching
 - basic control flow
 
@@ -116,5 +117,5 @@ $ cmake --build build
 $ ./build/myca hello.myca -o hello.c && gcc hello.c -o hello
 
 # Running the tests
-$ cd build && make test
+$ make test -C build/
 ```

@@ -4,6 +4,8 @@
 
 
 //==============================================================================
+static void generate_c(Type const &type, CBackend &backend);
+
 CBackend::CBackend(std::ostream &os) :
 	os(os)
 {
@@ -364,7 +366,7 @@ static string generate_c_to_str(Type const &type)
 	};
 }
 
-void generate_c(Type const &type, CBackend &backend)
+static void generate_c(Type const &type, CBackend &backend)
 {
 	backend << generate_c_to_str(type);
 }
