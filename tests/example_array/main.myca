@@ -88,6 +88,7 @@ proc get'T (arr: ^Array'T, i: usize) -> T
 proc destroy'T (arr: ^mut Array'T)
 {
 	_free_items(arr);
+	arr^.items := None;
 	arr^.length := 0;
 	arr^.capacity := 0;
 }
