@@ -1682,9 +1682,10 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
+			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, scope, ctx);
 			TypeEnv env;
 			size_t arg_idx = 0;
-			for(Type const &arg: *path.type_args)
+			for(Type const &arg: *resolved_type_args)
 			{
 				env.add(alias->sema->type_params->items[arg_idx], clone(arg, &ctx.mod->sema->insts));
 				arg_idx += 1;
