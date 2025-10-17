@@ -1,0 +1,256 @@
+// Simple struct
+//--------------------------------------------------------------------
+struct Foo
+{
+	value: i32,
+}
+
+proc Foo.get(self) -> i32
+{
+	return self.value;
+}
+
+/*proc Foo.set(self &mut, new_value: i32)
+{
+	self^.value := new_value;
+}*/
+
+
+// Generic struct (1)
+//--------------------------------------------------------------------
+/*struct Bar'T
+{
+	value: T,
+}
+
+proc Bar.get(self) -> Self.T
+{
+	return self.value;
+}
+
+proc Bar.set(self &mut, new_value: Self.T)
+{
+	self^.value := new_value;
+}
+
+proc Bar.to_string(self &) if Self.T : ToString
+{
+	return self.value.to_string();
+}
+
+
+trait ToString
+{
+	proc to_string(self &) -> [^]c_char;
+}
+
+impl Bar: ToString;
+
+
+// Generic struct (2)
+//--------------------------------------------------------------------
+struct Bar'T
+{
+	value: T,
+}
+
+
+impl Bar
+{
+	proc get(self) -> Self.T
+	{
+		return self.value;
+	}
+
+	proc set(self &mut, new_value: Self.T)
+	{
+		self^.value := new_value;
+	}
+
+	proc to_string(self &) if Self.T : ToString
+	{
+		return self.value.to_string();
+	}
+}
+
+
+trait ToString
+{
+	proc to_string(self &) -> [^]c_char;
+}
+
+impl Bar: ToString if Bar.T: ToString
+{
+	proc to_string(self &)
+	{
+		return self.value.to_string();
+	}
+}
+
+
+// Generic struct (3)
+//--------------------------------------------------------------------
+struct Bar'T
+{
+	value: T,
+}
+
+
+impl Bar
+{
+	proc get(self) -> Self.T
+	{
+		return self.value;
+	}
+
+	proc set(self &mut, new_value: Self.T)
+	{
+		self^.value := new_value;
+	}
+}
+
+impl Bar if Bar.T : ToString
+{
+	proc to_string(self &)
+	{
+		return self.value.to_string();
+	}
+}
+
+
+trait ToString
+{
+	proc to_string(self &) -> [^]c_char;
+}
+
+impl Bar: ToString;
+
+
+// Generic trait (1)
+//--------------------------------------------------------------------
+struct Array'T
+{
+	buf: ?[^]mut T = None,
+	length: usize = 0,
+	capacity: usize = 0,
+}
+
+
+impl Array
+{
+	proc length(self &) -> usize
+	{
+		return self^.length;
+	}
+
+	proc add(self &mut, val: Self.T)
+	{
+		if self^.length + 1 > self^.capacity {
+			let new_cap = max(self^.capacity * 2, 1);
+			grow_capacity(self, new_cap);
+		}
+
+		unwrap(self^.buf)[self^.length] := val;
+		self^.length := self^.length + 1;
+	}
+
+	proc grow_capacity(self &mut, target_cap: usize)
+	{
+		let new_buf = malloc(target_cap * size_of(Self.T)) as [^]mut Self.T;
+		let mut i: usize = 0;
+		while i < self^.length {
+			new_buf[i] := unwrap(self^.buf)[i];
+			i := i + 1;
+		}
+
+		self^.buf := new_buf;
+		self^.capacity := target_cap;
+	}
+}
+
+
+proc max(a: usize, b: usize) -> usize
+{
+	if a < b {
+		return b;
+	}
+
+	return a;
+}
+
+
+
+trait Container'T
+{
+	proc add(self &mut, value: T);
+}
+
+impl Array : Container'Self.T;
+
+
+// Generic trait (2)
+//--------------------------------------------------------------------
+struct Array'T
+{
+	buf: ?[^]mut T = None,
+	length: usize = 0,
+	capacity: usize = 0,
+}
+
+
+proc Array.length(self &) -> usize
+{
+	return self^.length;
+}
+
+proc Array.add(self &mut, val: Self.T)
+{
+	if self^.length + 1 > self^.capacity {
+		let new_cap = max(self^.capacity * 2, 1);
+		grow_capacity(self, new_cap);
+	}
+
+	unwrap(self^.buf)[self^.length] := val;
+	self^.length := self^.length + 1;
+}
+
+proc Array.grow_capacity(self &mut, target_cap: usize)
+{
+	let new_buf = malloc(target_cap * size_of(Self.T)) as [^]mut Self.T;
+	let mut i: usize = 0;
+	while i < self^.length {
+		new_buf[i] := unwrap(self^.buf)[i];
+		i := i + 1;
+	}
+
+	self^.buf := new_buf;
+	self^.capacity := target_cap;
+}
+
+
+proc max(a: usize, b: usize) -> usize
+{
+	if a < b {
+		return b;
+	}
+
+	return a;
+}
+
+
+trait Container'T
+{
+	proc add(self &mut, value: T);
+}
+
+impl Array : Container'Self.T;*/
+
+
+// Main
+//--------------------------------------------------------------------
+proc main() -> i32
+{
+	let foo = Foo(34);
+
+	return foo.get();
+}

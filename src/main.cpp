@@ -20,6 +20,11 @@ using namespace std::string_literals;
 using namespace std::string_view_literals;
 
 
+// Resources:
+// - "Compiling Swift Generics" – Slava Pestov
+//   - https://download.swift.org/docs/assets/generics.pdf
+
+
 //==============================================================================
 // Main
 //==============================================================================

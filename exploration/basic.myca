@@ -1,0 +1,83 @@
+// ^i32       : Pointer to single element (supports dereferencing but not indexing)
+// []i32      : Slice (ptr + count)
+// [^]i32     : Pointer to multiple elements (mostly for C interop) (supports indexing but not dereferencing)
+// [N]i32     : Static array of length N
+// Array'i32 : Dynamic array (ptr + count + capacity): struct Array'T { [^]T elements, USize count, USize capacity }
+//
+// HashMap'(String, Person)
+// HashSet'((String, i32))
+// Option'String
+
+
+//==============================================================================
+struct c_void { _: Never }
+struct c_char { _: i8 }
+
+extern proc malloc(size: usize) -> ^mut c_void;
+extern proc free(ptr: ^mut c_void);
+extern proc puts(str: [^]c_char) -> i32;
+
+
+//==============================================================================
+proc add(a: i32, b: i32) -> i32
+{
+	return a + b;
+}
+
+proc foo() -> i32
+{
+	let p = Player(
+		.pos = Vector2(23, 64),
+	);
+
+	return add(p.pos.x, p.health);
+}
+
+
+// Order-independent struct definitions
+struct Player
+{
+	pos: Vector2,
+	health: MyOtherInt = 100,
+}
+
+struct Vector2
+{
+	x: i32,
+	y: i32,
+}
+
+
+// Order-independent alias definitions
+typealias MyOtherInt = MyInt;
+typealias MyInt = i32;
+
+
+
+//==============================================================================
+proc main() -> i32
+{
+	test_hallo();
+
+	let msg = c"Hello, World!";
+	puts(msg);
+
+	return 0;
+}
+
+// Order-independent function definitions
+proc test_hallo()
+{
+	let data = malloc(6) as [^]mut c_char;
+	data[0] := c_char(72);
+	data[1] := c_char(97);
+	data[2] := c_char(108);
+	data[3] := c_char(108);
+	data[4] := c_char(111);
+	data[5] := c_char(0);
+
+	let ptr = &mut data[3];
+	ptr^ := c_char(65);
+
+	puts(data);
+}

@@ -1,0 +1,69 @@
+
+// TODO
+// This produces an infinite type name (should be rejected)
+/*struct ListNode'(T, S)
+{
+    v: T,
+    w: S,
+
+	// Substitution (inner ListNode):
+	//
+	//   T ==> S
+	//   S ==> i32
+	//
+	// Substitution (outer ListNode):
+	//
+	//   T ==> ListNode'(S, i32)
+	//   S ==> T
+	//
+	// You can see the substitution chain S ==> T ==> ListNode'(S, i32). This is equivalent to
+	// S ==> ListNode'(S, i32) which grows indefinitely.
+    next: ^ListNode'(ListNode'(S, i32), T),
+}
+
+
+// TODO
+// However, this does *not* produce an infinite type name (should be allowed)
+struct ListNode'(T, S)
+{
+    v: T,
+    w: S,
+
+	// Substitution (inner ListNode):
+	//
+	//   T ==> S
+	//   S ==> i32
+	//
+	// Substitution (outer ListNode):
+	//
+	//   T ==> ListNode'(S, i32)
+	//   S ==> S
+    next: ^ListNode'(ListNode'(S, i32), S),
+}*/
+
+
+// TODO
+// This also does not produce an infinite type name and should thus be allowed
+struct Foo'(S, T)
+{
+	// Substitution:
+	//
+	//   S ==> T
+	//   T ==> S
+	f: ^Foo'(T, S)
+}
+
+
+proc main() -> i32
+{
+	return 0;
+}
+
+
+//==================================================================================================
+// TODO Calling the constructor like `Foo()` causes an assertion failure because T has not been deduced
+//==================================================================================================
+/*struct Foo'T
+{
+	x: i32,
+}*/

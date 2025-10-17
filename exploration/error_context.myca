@@ -1,0 +1,250 @@
+//----------------------------------------------------------------------
+// Lib C
+//----------------------------------------------------------------------
+struct c_void { _: Never }
+struct c_char { value: i8 }
+extern struct FILE;
+
+extern proc get_errno() -> i32;
+extern proc fatal(msg: [^]c_char);
+
+extern proc malloc(size: usize) -> ^mut c_void;
+extern proc free(ptr: ^mut c_void);
+
+extern proc puts(text: [^]c_char) -> i32;
+extern proc fopen(filename: [^]c_char, mode: [^]c_char) -> ?^mut FILE;
+
+
+//----------------------------------------------------------------------
+// Stdlib
+//----------------------------------------------------------------------
+
+// Option/Result
+//----------------------------------------------------------
+struct Option'T
+{
+	case implicit Some{value: T},
+	case None,
+}
+
+typealias Some'T = Option'T.Some;
+typealias None'T = Option'T.None;
+
+
+struct Result'(TOk, TError)
+{
+	case implicit Ok{value: TOk},
+	case Err{value: TError},
+}
+
+
+typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
+typealias Err'(TOk, TError) = Result'(TOk, TError).Err;
+
+
+proc unwrap'T(opt: ?T) -> T
+{
+	match opt
+	{
+		case Some(let value) { return value; }
+		case None { fatal(c"empty option"); }
+	}
+}
+
+
+// When propagating errors up the call stack, two kinds of tranformations seem useful:
+// 1. Adding additional context to the error
+// 2. Converting a lower-level error to a higher-level one while remembering the original cause
+/*interface IToString
+{
+	proc to_string() -> [^]c_char;
+}
+
+interface IError: IToString
+{
+	proc cause() -> ?^IError;
+}*/
+
+// Wrapps an error with context information
+struct ctx'TErr
+{
+	err: TErr,
+	info: Array'[^]c_char = Array(),
+	cause: ?^c_void = None, // Replace c_void with Error trait
+}
+
+proc with_ctx'(TOk, TErr)(err: TErr, msg: [^]c_char) -> Err'(TOk, ctx'TErr)
+{
+	let mut c = ctx(err);
+	add(&mut c.info, msg);
+	return Err(c);
+}
+
+
+// Array
+//----------------------------------------------------------
+struct Array'T
+{
+	buf: ?[^]mut T = None,
+	length: usize = 0,
+	capacity: usize = 0,
+}
+
+
+proc length'T (arr: ^Array'T) -> usize
+{
+	return arr^.length;
+}
+
+proc add'T (arr: ^mut Array'T, val: T)
+{
+	if arr^.length + 1 > arr^.capacity {
+		let new_cap = max(arr^.capacity * 2, 1);
+		grow_capacity(arr, new_cap);
+	}
+
+	unwrap(arr^.buf)[arr^.length] := val;
+	arr^.length := arr^.length + 1;
+}
+
+proc grow_capacity'T (arr: ^mut Array'T, target_cap: usize)
+{
+	// assert(arr^.length <= target_cap);
+
+	let new_buf = malloc(target_cap * size_of(T)) as [^]mut T;
+	let mut i: usize = 0;
+	while i < arr^.length {
+		new_buf[i] := unwrap(arr^.buf)[i];
+		i := i + 1;
+	}
+
+	arr^.buf := new_buf;
+	arr^.capacity := target_cap;
+}
+
+
+proc max(a: usize, b: usize) -> usize
+{
+	if a < b {
+		return b;
+	}
+
+	return a;
+}
+
+
+// IO
+//----------------------------------------------------------
+struct IOError
+{
+	os_error: i32,
+
+	case NotFound{},
+	case NoPermission{},
+	case Other{},
+}
+
+
+proc file_open(filename: [^]c_char) -> ^mut FILE ! IOError
+{
+	let file = fopen(filename, c"r")? else {
+		return Err(IOError.Other(get_errno()));
+	}
+
+	return file;
+}
+
+
+proc error_str(err: AnyError) -> [^]c_char
+{
+	match err
+	{
+		case DivisionByZero { return c"division by zero"; }
+		case Overflow { return c"overflow"; }
+		case let io_err: IOError
+		{
+			match io_err
+			{
+				case IOError.NotFound     { return c"not found"; }
+				case IOError.NoPermission { return c"no permission"; }
+				case IOError.Other        { return c"unknown IO error"; }
+			}
+		}
+	}
+}
+
+
+proc main() -> i32
+{
+	match myca_main()
+	{
+		case Ok {
+			return 0;
+		}
+		case Err(let err) {
+			let mut i: usize = err.info.length;
+			while i > 0 {
+				i := i - 1;
+				puts(unwrap(err.info.buf)[i]);
+			}
+			puts(error_str(err.err));
+			return 1;
+		}
+	}
+}
+
+
+//----------------------------------------------------------------------
+// Main
+//----------------------------------------------------------------------
+typealias ArithError = struct DivisionByZero
+                     | struct Overflow;
+
+typealias AnyError = IOError | ArithError;
+
+
+proc safe_div(a: i32, b: i32) -> i32!ArithError
+{
+	if b == 0 {
+		return Err(DivisionByZero);
+	}
+
+	return a / b;
+}
+
+proc do_stuff() -> !ctx'AnyError
+{
+	let d = safe_div(23, 0)? else let e {
+		//return with_ctx(e, c"division by ziero");
+		return with_ctx(DivisionByZero, c"safe_div failed");
+	}
+
+
+	let file = file_open(c"test.txt")? else let err {
+		return with_ctx(err, c"Opening 'test.txt' failed");
+		//return err.with_ctx(c"Opening 'test.txt' failed");
+	}
+
+	puts(c"file opened");
+
+	// return Ok(); TODO Automatically insert `return Ok()`
+}
+
+proc myca_main() -> !ctx'AnyError
+{
+	do_stuff()? else let mut e {
+		add(&mut e.info, c"do_stuff() failed");
+		return Err(e);
+	}
+}
+
+// Features:
+// - If U and S are union types such that U is a superset of S, then insert automatic type
+//   conversions from S to U when needed
+//
+// Fixes:
+// - Fix how typecheck_pattern() checks fallible patterns (should not use unify())
+// - Expression `foo()? else let err ...` should declare `err` in a new scope
+// - For functions returning `Result'(Unit, SomeError)`, automatically add `return Ok(unit)` at the
+//   end if this is not already the case
+// - For expression `foo()? else { ... }`, check that the else block exits the function

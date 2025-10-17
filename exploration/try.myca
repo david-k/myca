@@ -1,0 +1,104 @@
+struct c_char { _: i8 }
+extern proc fatal(msg: [^]c_char);
+extern proc puts(msg: [^]c_char) -> i32;
+
+struct Option'T
+{
+	case implicit Some{value: T},
+	case None,
+}
+
+typealias Some'T = Option'T.Some;
+typealias None'T = Option'T.None;
+
+struct Result'(TOk, TError)
+{
+	case implicit Ok{value: TOk},
+	case Err{value: TError},
+}
+
+
+typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
+typealias Err'(TOk, TError) = Result'(TOk, TError).Err;
+
+
+
+typealias ArithError = struct DivisionByZero
+                     | struct Overflow;
+
+
+typealias IOError = struct FileNotFound
+                  | struct NoPermission;
+
+typealias Error = ArithError | IOError;
+
+
+proc error_str(err: Error) -> [^]c_char
+{
+	match err
+	{
+		case DivisionByZero { return c"division by zero\n"; }
+		case Overflow       { return c"overflow\n"; }
+		case FileNotFound   { return c"file not found\n"; }
+		case NoPermission   { return c"no permission\n"; }
+	}
+}
+
+proc safe_div(a: i32, b: i32) -> i32!Error
+{
+	if b == 0 {
+		return Err(DivisionByZero);
+	}
+
+	return a / b;
+}
+
+proc result_main() -> i32!Error
+{
+	let x = safe_div(23, 3)? + 1;
+
+	return x * 2;
+}
+
+proc option_main() -> ?i32
+{
+	let a = try_get(true)? + 5;
+	return (a as i32) + 1;
+}
+
+proc opt_fails() -> i32
+{
+	try_get(false)? else {
+		return 99;
+	}
+
+	return 0;
+}
+
+proc main() -> i32
+{
+	let mut opt_res = option_main()? else {
+		puts(c"option_main() failed");
+		return 1;
+	}
+
+	opt_res := opt_res + opt_fails(); // 110
+
+	let result = result_main()? else let err {
+		puts(c"execution failed:");
+		fatal(error_str(err));
+	}
+
+	return opt_res + result; // 126
+}
+
+
+
+proc try_get(b: bool) -> ?isize
+{
+	if b {
+		return 5;
+	}
+
+	return None;
+}
