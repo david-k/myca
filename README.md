@@ -43,8 +43,9 @@ struct Option'T
 }
 
 // In contrast to Rust, the different variants of a sum type are represented by
-// their own type. Since `Option'(T).Some` and `Option'(T).None` are used so
-// often, we create type aliases for them.
+// their own type.
+// Since Option'(T).Some and Option'(T).None are used so often, we create type
+// aliases for them:
 typealias Some'T = Option'(T).Some;
 typealias None'T = Option'(T).None;
 
@@ -108,14 +109,14 @@ The only dependencies are CMake and a C++23 compiler (tested with GCC and
 clang). Additionally, Python is needed to run the tests.
 
 ```sh
-$ git clone https://github.com/david-k/myca/
-$ cd myca
-$ cmake -B build
-$ cmake --build build
+git clone https://github.com/david-k/myca/
+cd myca
+cmake -B build
+cmake --build build
 
 # Compiling a *.myca file
-$ ./build/myca hello.myca -o hello.c && gcc hello.c -o hello
+./build/myca hello.myca -o hello.c && gcc hello.c -o hello
 
 # Running the tests
-$ make test -C build/
+make test -C build/
 ```

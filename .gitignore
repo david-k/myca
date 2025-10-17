@@ -1,2 +1,5 @@
 build/
 tags
+compile_flags.txt
+Makefile
+project.vim
