@@ -1,0 +1,18 @@
+// Foo contains Bar which contains Baz which contains Foo again
+
+struct Foo'T
+{
+	b: Bar'T,
+}
+
+struct Baz'T
+{
+	f: Foo'T,
+}
+
+struct Bar'T
+{
+	z: BazAlias'T,
+}
+
+typealias BazAlias'T = Baz'T;

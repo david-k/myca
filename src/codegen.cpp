@@ -1031,7 +1031,7 @@ void generate_c(Module &mod, CBackend &backend)
 				// ProcInstances are only created for procedures that are actually referenced in the
 				// code. But we want to generate code for all procedures (especially for main()), so
 				// we explicitly create ProcInstances if they are missing.
-				if(proc.body and proc.sema->type_params->count == 0)
+				if(proc.body and proc.type_params->count == 0)
 					mod.sema->insts.get_proc_instance(&proc, nullptr);
 			},
 			[&](StructItem&) {},

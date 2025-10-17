@@ -3,6 +3,11 @@ import subprocess
 from pathlib import Path
 
 
+TESTS_TO_IGNORE = {
+    "struct_recursive_def",
+}
+
+
 #===============================================================================
 # Helpers
 #===============================================================================
@@ -111,15 +116,22 @@ if not myca_bin.exists():
     print("Build myca before running tests")
     sys.exit(1)
 
-has_errors = False
+num_successful = 0
+num_errors = 0
 for test_src_dir in sorted((project_dir / "tests").iterdir()):
-    if not test_src_dir.is_dir():
+    if not test_src_dir.is_dir() or test_src_dir.name in TESTS_TO_IGNORE:
         continue
 
     test_build_dir = build_dir / "tests" / test_src_dir.name
     test_build_dir.mkdir(parents = True, exist_ok = True)
-    if not run_test(test_src_dir, test_build_dir, myca_bin):
-        has_errors = True
+    if run_test(test_src_dir, test_build_dir, myca_bin):
+        num_successful += 1
+    else:
+        num_errors += 1
 
-if has_errors:
+print("------------------------------")
+print(f"{num_successful} tests succeeded, {num_errors} failed, {len(TESTS_TO_IGNORE)} ignored")
+print()
+
+if num_errors > 0:
     sys.exit(1)

@@ -1,0 +1,4 @@
+struct Foo'T {}
+
+typealias B = A;
+typealias A = Foo'B;

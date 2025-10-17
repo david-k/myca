@@ -1,0 +1,15 @@
+// There once was a bug that caused an assertion failure during codegen because
+// the default value for Foo::x had not been typechecked (i.e., the type of the
+// default_value expr was still nullptr).  However, if Foo was defined before
+// main() it worked.
+
+proc main() -> i32
+{
+	let v = Foo();
+	return v.x;
+}
+
+struct Foo
+{
+	x: i32 = 29,
+}

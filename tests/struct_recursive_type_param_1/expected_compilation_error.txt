@@ -1,0 +1,1 @@
+|4:15| error: The type argument Node'(T) causes causes the type term to grow indefinitely

@@ -1,0 +1,39 @@
+// This also uses type parameters recursively but does *not* produce an infinite type name and
+// should therefore be allowed
+struct Foo'(S, T)
+{
+	s: S,
+	t: T,
+
+	// Substitution:
+	//
+	//   S ==> T
+	//   T ==> S
+	f: ?^Foo'(T, S)
+}
+
+proc main() -> i32
+{
+	let f = Foo(true, 63, None);
+	return f.t;
+}
+
+
+//------------------------------------------------------------------------------
+struct Option'T
+{
+    case implicit Some{value: T},
+    case None,
+}
+
+typealias Some'T = Option'(T).Some;
+typealias None'T = Option'(T).None;
+
+proc unwrap_or'T(opt: ?T, fallback: T) -> T
+{
+	match opt
+	{
+		case Some(let value) { return value; }
+		case None { return fallback; }
+	}
+}

@@ -1,0 +1,5 @@
+// This type cannot be instantiated because the type of `next` gets infinitely long.
+struct Node'T
+{
+	next: ^Node'(Node'T),
+}

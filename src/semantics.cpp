@@ -590,10 +590,9 @@ Var* Scope::declare_var(string_view name, IsMutable mutability, TokenRange sloc)
 	return &std::get<Var>(item);
 }
 
-TypeParameterVar Scope::declare_type_var(TypeParameter const *def)
+void Scope::declare_type_var(TypeParameter *def)
 {
-	ScopeItem &item = declare(def->name, TypeParameterVar(def), def->range);
-	return std::get<TypeParameterVar>(item);
+	declare(def->name, def, def->range);
 }
 
 void Scope::declare_struct(StructItem *struct_)
@@ -926,15 +925,41 @@ void InstanceRegistry::remove_listener(InstanceRegistryListener *l)
 
 
 static void create_type_env(
-	FixedArray<TypeParameterVar> const *type_params,
-	TypeArgList const &type_args,
-	TypeEnv &result)
+	FixedArray<TypeParameter> const *type_params,
+	FixedArray<Type> const *type_args,
+	TypeEnv &result,
+	InstanceRegistry &registry)
 {
 	for(size_t i = 0; i < type_params->count; ++i)
 	{
-		TypeParameterVar type_param = type_params->items[i];
-		result.add(type_param, type_args.args->items[i]);
+		TypeParameterVar type_param(UNKNOWN_TOKEN_RANGE, &type_params->items[i]);
+		Type cloned = type_args->items[i];
+
+		// See tests struct_recursive_type_param_<N> for why we call substitute() and perform the
+		// type_var_occurs_in() check
+		substitute(cloned, result, registry);
+		if(not equiv(type_param, cloned))
+		{
+			if(type_var_occurs_in(type_param, cloned))
+				throw_sem_error(
+					"The type argument " + str(type_args->items[i], registry.mod()) + " causes causes the type term to grow indefinitely",
+					token_range_of(type_args->items[i]).first,
+					&registry.mod()
+				);
+
+			result.add(type_param, cloned);
+		}
 	}
+}
+
+static TypeEnv create_type_env(
+	FixedArray<TypeParameter> const *type_params,
+	FixedArray<Type> const *type_args,
+	InstanceRegistry &registry)
+{
+	TypeEnv env;
+	create_type_env(type_params, type_args, env, registry);
+	return env;
 }
 
 
@@ -959,7 +984,7 @@ TypeEnv StructInstance::create_type_env() const
 	if(m_parent)
 		env = m_parent->create_type_env();
 
-	::create_type_env(m_struct->sema->type_params, m_type_args, env);
+	::create_type_env(m_struct->type_params, m_type_args.args, env, *m_registry);
 
 	return env;
 }
@@ -1293,19 +1318,13 @@ static Type* create_proc_type(ProcInstance *proc, TypeEnv const &env, InstanceRe
 TypeEnv ProcInstance::create_type_env() const
 {
 	TypeEnv env;
-	::create_type_env(m_proc->sema->type_params, m_type_args, env);
+	::create_type_env(m_proc->type_params, m_type_args.args, env, *m_registry);
 	return env;
 }
 
 void ProcInstance::compute_dependent_properties()
 {
-	TypeEnv env;
-	for(size_t i = 0; i < m_proc->type_params->count; ++i)
-	{
-		TypeParameterVar type_param = m_proc->sema->type_params->items[i];
-		env.add(type_param, m_type_args.args->items[i]);
-	}
-
+	TypeEnv env = create_type_env();
 	m_type = create_proc_type(this, env, *m_registry);
 }
 
@@ -1425,13 +1444,11 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 
 	// Declare type parameters
 	size_t num_type_params = struct_->type_params->count;
-	struct_->sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, ctx.arena);
 	for(size_t i = 0; i < num_type_params; ++i)
 	{
-		TypeParameter const &type_param = struct_->type_params->items[i];
+		TypeParameter &type_param = struct_->type_params->items[i];
 		// TODO Produce error if the type parameter has the same name as the struct
-		TypeParameterVar type_var = struct_->sema->type_scope->declare_type_var(&type_param);
-		struct_->sema->type_params->items[i] = type_var;
+		struct_->sema->type_scope->declare_type_var(&type_param);
 	}
 
 	// Perform some checks on variable and case members:
@@ -1517,12 +1534,10 @@ static void declare_items(SemaContext &ctx)
 				}
 
 				size_t num_type_params = proc.type_params->count;
-				proc.sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, ctx.arena);
 				for(size_t i = 0; i < num_type_params; ++i)
 				{
-					TypeParameter const &type_param = proc.type_params->items[i];
-					TypeParameterVar type_var = proc.sema->scope->declare_type_var(&type_param);
-					proc.sema->type_params->items[i] = type_var;
+					TypeParameter &type_param = proc.type_params->items[i];
+					proc.sema->scope->declare_type_var(&type_param);
 				}
 
 				mod->sema->globals->declare_proc(&proc);
@@ -1536,12 +1551,10 @@ static void declare_items(SemaContext &ctx)
 				alias.sema = ctx.arena.alloc<Alias>(mod->sema->globals->new_child());
 
 				size_t num_type_params = alias.type_params->count;
-				alias.sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, ctx.arena);
 				for(size_t i = 0; i < num_type_params; ++i)
 				{
-					TypeParameter const &type_param = alias.type_params->items[i];
-					TypeParameterVar type_var = alias.sema->scope->declare_type_var(&type_param);
-					alias.sema->type_params->items[i] = type_var;
+					TypeParameter &type_param = alias.type_params->items[i];
+					alias.sema->scope->declare_type_var(&type_param);
 				}
 
 				mod->sema->globals->declare_alias(&alias);
@@ -1624,7 +1637,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 	{
 		[&](StructItem *struct_) -> variant<Expr, Type>
 		{
-			size_t num_type_params = struct_->sema->type_params->count;
+			size_t num_type_params = struct_->type_params->count;
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
@@ -1641,7 +1654,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			if(path.child)
 				throw_sem_error("Procedures cannot have any members", path.range.first, ctx.mod);
 
-			size_t num_type_params = proc->sema->type_params->count;
+			size_t num_type_params = proc->type_params->count;
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
@@ -1656,23 +1669,12 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 
 			resolve_alias(*alias, ctx);
 
-			size_t num_type_params = alias->sema->type_params->count;
+			size_t num_type_params = alias->type_params->count;
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
 			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, scope, ctx);
-			TypeEnv env;
-			size_t arg_idx = 0;
-			for(Type const &arg: *resolved_type_args)
-			{
-				env.add(alias->sema->type_params->items[arg_idx], clone(arg, ctx.arena));
-				arg_idx += 1;
-			}
-			while(arg_idx < num_type_params)
-			{
-				env.add(alias->sema->type_params->items[arg_idx], ctx.new_type_deduction_var());
-				arg_idx += 1;
-			}
+			TypeEnv env = create_type_env(alias->type_params, resolved_type_args, ctx.mod->sema->insts);
 
 			Type type = clone(*alias->aliased_type, ctx.arena);
 			substitute(type, env, ctx.mod->sema->insts);
@@ -1688,7 +1690,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 
 			return type;
 		},
-		[&](TypeParameterVar const &type_var) -> variant<Expr, Type>
+		[&](TypeParameter *type_var) -> variant<Expr, Type>
 		{
 			if(path.type_args->count)
 				throw_sem_error("Cannot apply type arguments to type variable", path.range.first, ctx.mod);
@@ -1696,7 +1698,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			if(path.child)
 				throw_sem_error("Member selection of type parameters not supported", path.child->range.first, ctx.mod);
 
-			return VarType(type_var);
+			return VarType(TypeParameterVar(path.range, type_var));
 		},
 		[&](Var const &var) -> variant<Expr, Type>
 		{
@@ -2605,7 +2607,6 @@ BuiltinTypeDef smallest_int_type_for(Int128 value)
 {
 	return smallest_int_type_for(value, value);
 }
-
 
 bool equiv(Type const &a, Type const &b)
 {
@@ -3793,7 +3794,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			Type const *object_type = typecheck_subexpr(*e.object, hint.without_type(), ctx);
 			StructType const *struct_type = std::get_if<StructType>(object_type);
 			if(not struct_type)
-				throw_sem_error("Expected object of struct type for member access", e.range.first, ctx.mod);
+				throw_sem_error("Expected object of struct type for member access, got " + str(*object_type, *ctx.mod), e.range.first, ctx.mod);
 
 			Parameter const *var_member = find_var_member(struct_type->inst, e.member);
 			if(not var_member)

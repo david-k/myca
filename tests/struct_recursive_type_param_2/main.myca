@@ -1,0 +1,20 @@
+// Similar to struct_recursive_type_param_1, but uses two type parameters
+struct ListNode'(T, S)
+{
+    v: T,
+    w: S,
+
+	// Substitution (inner ListNode):
+	//
+	//   T ==> S
+	//   S ==> i32
+	//
+	// Substitution (outer ListNode):
+	//
+	//   T ==> ListNode'(S, i32)
+	//   S ==> T
+	//
+	// You can see the substitution chain S ==> T ==> ListNode'(S, i32). This is equivalent to
+	// S ==> ListNode'(S, i32) which grows indefinitely.
+    next: ^ListNode'(ListNode'(S, i32), T),
+}

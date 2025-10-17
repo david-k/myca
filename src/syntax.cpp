@@ -741,7 +741,7 @@ TokenRange token_range_of(Type const &type)
 		{
 			return t | match
 			{
-				[](TypeParameterVar var) { return var.def->range; },
+				[](TypeParameterVar var) { return var.range; },
 				[](TypeDeductionVar) { return UNKNOWN_TOKEN_RANGE; },
 			};
 		},

@@ -29,7 +29,6 @@ struct Struct
 {
 	StructItem *parent;
 	Scope *type_scope;
-	FixedArray<TypeParameterVar> *type_params = nullptr;
 	FixedArray<Parameter const*> *NULLABLE ctor_params = nullptr;
 	int num_initial_var_members = 0;
 };
@@ -37,7 +36,6 @@ struct Struct
 struct Proc
 {
 	Scope *scope;
-	FixedArray<TypeParameterVar> *type_params = nullptr;
 	FixedArray<Var*> *param_vars = nullptr;
 };
 
@@ -51,7 +49,6 @@ enum class ResolutionState
 struct Alias
 {
 	Scope *scope; // Only contains type params
-	FixedArray<TypeParameterVar> *type_params = nullptr;
 	ResolutionState resolution_state = ResolutionState::PENDING;
 };
 
@@ -612,7 +609,7 @@ void for_each_instance(InstanceRegistry &registry, Func &&func)
 //==============================================================================
 struct Module;
 
-using ScopeItem = variant<Var, TypeParameterVar, ProcItem*, StructItem*, AliasItem*>;
+using ScopeItem = variant<Var, TypeParameter*, ProcItem*, StructItem*, AliasItem*>;
 
 struct Scope
 {
@@ -631,7 +628,7 @@ struct Scope
 
 	// Declaring items
 	Var* declare_var(string_view name, IsMutable mutability, TokenRange sloc);
-	TypeParameterVar declare_type_var(TypeParameter const *def);
+	void declare_type_var(TypeParameter *def);
 	void declare_struct(StructItem *struct_);
 	void declare_proc(ProcItem *proc);
 	void declare_alias(AliasItem *alias);

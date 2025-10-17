@@ -160,16 +160,13 @@ struct Expr;
 
 struct TypeParameterVar
 {
+	TokenRange range;
 	TypeParameter const *def;
-
-	friend bool operator == (TypeParameterVar a, TypeParameterVar b) = default;
 };
 
 struct TypeDeductionVar
 {
 	uint32_t id;
-
-	friend bool operator == (TypeDeductionVar a, TypeDeductionVar b) = default;
 };
 
 using VarType = variant<TypeParameterVar, TypeDeductionVar>;
@@ -354,6 +351,18 @@ struct std::hash<::VarType>
 		return h;
 	}
 };
+
+inline bool operator == (VarType const &a, VarType const &b)
+{
+	if(a.index() != b.index())
+		return false;
+
+	return a | match
+	{
+		[&](TypeParameterVar const &p) { return p.def == std::get<TypeParameterVar>(b).def; },
+		[&](TypeDeductionVar const &d) { return d.id == std::get<TypeDeductionVar>(b).id; },
+	};
+}
 
 template<>
 struct std::hash<Type>
