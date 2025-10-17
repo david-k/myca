@@ -1011,7 +1011,7 @@ struct ConcreteProcInstance
 		assert(proc->is_concrete());
 		if(proc->proc()->body)
 		{
-			body = clone(*proc->proc()->body, proc->registry());
+			body = clone(*proc->proc()->body, proc->registry()->arena());
 			substitute_types_in_stmt(*body, proc->create_type_env(), *proc->registry());
 		}
 	}

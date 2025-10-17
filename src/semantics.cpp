@@ -25,17 +25,17 @@
 	}
 }
 
-Expr clone(Expr const &expr, InstanceRegistry *registry);
+Expr clone(Expr const &expr, Arena &arena);
 
-Expr* clone_ptr(Expr const *expr, InstanceRegistry *registry)
+Expr* clone_ptr(Expr const *expr, Arena &arena)
 {
 	if(not expr)
 		return nullptr;
 
-	return registry->arena().alloc<Expr>(clone(*expr, registry));
+	return arena.alloc<Expr>(clone(*expr, arena));
 }
 
-DefaultValueExpr DefaultValueExpr::clone(InstanceRegistry *registry) const
+DefaultValueExpr DefaultValueExpr::clone(Arena &arena) const
 {
 	return *this | match
 	{
@@ -43,51 +43,51 @@ DefaultValueExpr DefaultValueExpr::clone(InstanceRegistry *registry) const
 		[&](ExprPending) -> DefaultValueExpr { return ExprPending(); },
 		[&](Expr *expr) -> DefaultValueExpr
 		{
-			return clone_ptr(expr, registry);
+			return clone_ptr(expr, arena);
 		},
 	};
 }
 
-ProcTypeParamAux clone(ProcTypeParamAux const &param_aux, InstanceRegistry *registry)
+ProcTypeParamAux clone(ProcTypeParamAux const &param_aux, Arena &arena)
 {
 	return ProcTypeParamAux{
 		.name = param_aux.name,
-		.default_value = param_aux.default_value.clone(registry),
+		.default_value = param_aux.default_value.clone(arena),
 	};
 }
 
-FixedArray<ProcTypeParamAux>* clone(FixedArray<ProcTypeParamAux> const *param_aux, InstanceRegistry *registry)
+FixedArray<ProcTypeParamAux>* clone(FixedArray<ProcTypeParamAux> const *param_aux, Arena &arena)
 {
-	FixedArray<ProcTypeParamAux> *result = alloc_fixed_array<ProcTypeParamAux>(param_aux->count, registry->arena());
+	FixedArray<ProcTypeParamAux> *result = alloc_fixed_array<ProcTypeParamAux>(param_aux->count, arena);
 	for(size_t i = 0; i < param_aux->count; ++i)
-		result->items[i] = clone(param_aux->items[i], registry);
+		result->items[i] = clone(param_aux->items[i], arena);
 
 	return result;
 }
 
-Type clone(Type const &type, InstanceRegistry *registry);
+Type clone(Type const &type, Arena &arena);
 
-FixedArray<Type>* clone(FixedArray<Type> const *types, InstanceRegistry *registry)
+FixedArray<Type>* clone(FixedArray<Type> const *types, Arena &arena)
 {
-	FixedArray<Type> *result = alloc_fixed_array<Type>(types->count, registry->arena());
+	FixedArray<Type> *result = alloc_fixed_array<Type>(types->count, arena);
 	for(size_t i = 0; i < types->count; ++i)
-		result->items[i] = clone(types->items[i], registry);
+		result->items[i] = clone(types->items[i], arena);
 
 	return result;
 }
 
 
-Type* clone_ptr(Type const *type, InstanceRegistry *registry)
+Type* clone_ptr(Type const *type, Arena &arena)
 {
 	if(not type)
 		return nullptr;
 
-	return registry->arena().alloc<Type>(clone(*type, registry));
+	return arena.alloc<Type>(clone(*type, arena));
 }
 
-TypeArgList clone(TypeArgList const &args, InstanceRegistry *registry);
+TypeArgList clone(TypeArgList const &args, Arena &arena);
 
-Type clone(Type const &type, InstanceRegistry *registry)
+Type clone(Type const &type, Arena &arena)
 {
 	return type | match
 	{
@@ -103,7 +103,7 @@ Type clone(Type const &type, InstanceRegistry *registry)
 		{
 			return PointerType{
 				.range = t.range,
-				.pointee = clone_ptr(t.pointee, registry),
+				.pointee = clone_ptr(t.pointee, arena),
 				.mutability = t.mutability,
 			};
 		},
@@ -111,7 +111,7 @@ Type clone(Type const &type, InstanceRegistry *registry)
 		{
 			return ManyPointerType{
 				.range = t.range,
-				.pointee = clone_ptr(t.pointee, registry),
+				.pointee = clone_ptr(t.pointee, arena),
 				.mutability = t.mutability,
 			};
 		},
@@ -123,26 +123,13 @@ Type clone(Type const &type, InstanceRegistry *registry)
 		{
 			return ProcTypeUnresolved{
 				.range = t.range,
-				.ret = clone_ptr(t.ret, registry),
-				.params = clone(t.params, registry),
+				.ret = clone_ptr(t.ret, arena),
+				.params = clone(t.params, arena),
 			};
 		},
 		[&](ProcType const &t) -> Type
 		{
-			ProcTypeInstance *new_inst = t.inst;
-			if(t.inst->has_type_deduction_vars)
-			{
-				new_inst = registry->get_proc_type_instance(
-					clone(t.inst->params, registry),
-					clone_ptr(t.inst->ret, registry)
-				);
-			}
-
-			return ProcType{
-				.range = t.range,
-				.inst = new_inst,
-				.callable = t.callable
-			};
+			return t;
 		},
 		[&](UnionTypeUnresolved const &) -> Type
 		{
@@ -160,27 +147,27 @@ Type clone(Type const &type, InstanceRegistry *registry)
 	};
 }
 
-TypeArgList clone(TypeArgList const &args, InstanceRegistry *registry)
+TypeArgList clone(TypeArgList const &args, Arena &arena)
 {
 	return TypeArgList{
-		.args = clone(args.args, registry),
+		.args = clone(args.args, arena),
 		.occurring_vars = args.occurring_vars,
 		.has_type_deduction_vars = args.has_type_deduction_vars,
 	};
 }
 
-Argument clone(Argument const &arg, InstanceRegistry *registry);
+Argument clone(Argument const &arg, Arena &arena);
 
-FixedArray<Argument>* clone(FixedArray<Argument> const *args, InstanceRegistry *registry)
+FixedArray<Argument>* clone(FixedArray<Argument> const *args, Arena &arena)
 {
-	FixedArray<Argument> *result = alloc_fixed_array<Argument>(args->count, registry->arena());
+	FixedArray<Argument> *result = alloc_fixed_array<Argument>(args->count, arena);
 	for(size_t i = 0; i < args->count; ++i)
-		result->items[i] = clone(args->items[i], registry);
+		result->items[i] = clone(args->items[i], arena);
 
 	return result;
 }
 
-Expr clone(Expr const &expr, InstanceRegistry *registry)
+Expr clone(Expr const &expr, Arena &arena)
 {
 	return expr | match
 	{
@@ -189,7 +176,7 @@ Expr clone(Expr const &expr, InstanceRegistry *registry)
 			return IntLiteralExpr{
 				.range = e.range,
 				.value = e.value,
-				.type = clone_ptr(e.type, registry),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](BoolLiteralExpr const &e) -> Expr
@@ -197,7 +184,7 @@ Expr clone(Expr const &expr, InstanceRegistry *registry)
 			return BoolLiteralExpr{
 				.range = e.range,
 				.value = e.value,
-				.type = clone_ptr(e.type, registry),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](StringLiteralExpr const &e) -> Expr
@@ -206,87 +193,87 @@ Expr clone(Expr const &expr, InstanceRegistry *registry)
 				.range = e.range,
 				.kind = e.kind,
 				.value = e.value,
-				.type = clone_ptr(e.type, registry),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](UnaryExpr const &e) -> Expr
 		{
 			return UnaryExpr{
 				.range = e.range,
-				.sub = clone_ptr(e.sub, registry),
+				.sub = clone_ptr(e.sub, arena),
 				.op = e.op,
-				.type = clone_ptr(e.type, registry),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](BinaryExpr const &e) -> Expr
 		{
 			return BinaryExpr{
 				.range = e.range,
-				.left = clone_ptr(e.left, registry),
-				.right = clone_ptr(e.right, registry),
+				.left = clone_ptr(e.left, arena),
+				.right = clone_ptr(e.right, arena),
 				.op = e.op,
-				.type = clone_ptr(e.type, registry),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](AddressOfExpr const &e) -> Expr
 		{
 			return AddressOfExpr{
 				.range = e.range,
-				.object = clone_ptr(e.object, registry),
+				.object = clone_ptr(e.object, arena),
 				.mutability = e.mutability,
-				.type = clone_ptr(e.type, registry),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](DerefExpr const &e) -> Expr
 		{
 			return DerefExpr{
 				.range = e.range,
-				.addr = clone_ptr(e.addr, registry),
-				.type = clone_ptr(e.type, registry),
+				.addr = clone_ptr(e.addr, arena),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](IndexExpr const &e) -> Expr
 		{
 			return IndexExpr{
 				.range = e.range,
-				.addr = clone_ptr(e.addr, registry),
-				.index = clone_ptr(e.index, registry),
-				.type = clone_ptr(e.type, registry),
+				.addr = clone_ptr(e.addr, arena),
+				.index = clone_ptr(e.index, arena),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](MemberAccessExpr const &e) -> Expr
 		{
 			return MemberAccessExpr{
 				.range = e.range,
-				.object = clone_ptr(e.object, registry),
+				.object = clone_ptr(e.object, arena),
 				.member = e.member,
-				.type = clone_ptr(e.type, registry),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](AssignmentExpr const &e) -> Expr
 		{
 			return AssignmentExpr{
 				.range = e.range,
-				.lhs = clone_ptr(e.lhs, registry),
-				.rhs = clone_ptr(e.rhs, registry),
-				.type = clone_ptr(e.type, registry),
+				.lhs = clone_ptr(e.lhs, arena),
+				.rhs = clone_ptr(e.rhs, arena),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](AsExpr const &e) -> Expr
 		{
 			return AsExpr{
 				.range = e.range,
-				.src_expr = clone_ptr(e.src_expr, registry),
-				.target_type = clone_ptr(e.target_type, registry),
-				.type = clone_ptr(e.type, registry),
+				.src_expr = clone_ptr(e.src_expr, arena),
+				.target_type = clone_ptr(e.target_type, arena),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](ConstructorExpr const &e) -> Expr
 		{
 			return ConstructorExpr{
 				.range = e.range,
-				.ctor = clone_ptr(e.ctor, registry),
-				.type = clone_ptr(e.type, registry),
+				.ctor = clone_ptr(e.ctor, arena),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](ProcExpr const &e) -> Expr
@@ -297,33 +284,33 @@ Expr clone(Expr const &expr, InstanceRegistry *registry)
 			return ProcExpr{
 				.range = e.range,
 				.inst = e.inst, // TODO May need to be cloned
-				.type = clone_ptr(e.type, registry),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](CallExpr const &e) -> Expr
 		{
 			return CallExpr{
 				.range = e.range,
-				.callable = clone_ptr(e.callable, registry),
-				.args = clone(e.args, registry),
-				.type = clone_ptr(e.type, registry),
+				.callable = clone_ptr(e.callable, arena),
+				.args = clone(e.args, arena),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](SizeOfExpr const &e) -> Expr
 		{
 			return SizeOfExpr{
 				.range = e.range,
-				.subject = clone_ptr(e.subject, registry),
-				.type = clone_ptr(e.type, registry),
+				.subject = clone_ptr(e.subject, arena),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](MakeExpr const &e) -> Expr
 		{
 			return MakeExpr{
 				.range = e.range,
-				.init = clone_ptr(e.init, registry),
-				.addr = clone_ptr(e.addr, registry),
-				.type = clone_ptr(e.type, registry),
+				.init = clone_ptr(e.init, arena),
+				.addr = clone_ptr(e.addr, arena),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 		[&](Path const&) -> Expr
@@ -335,35 +322,35 @@ Expr clone(Expr const &expr, InstanceRegistry *registry)
 			return VarExpr{
 				.range = e.range,
 				.var = e.var,
-				.type = clone_ptr(e.type, registry),
+				.type = clone_ptr(e.type, arena),
 			};
 		},
 	};
 }
 
-Argument clone(Argument const &arg, InstanceRegistry *registry)
+Argument clone(Argument const &arg, Arena &arena)
 {
 	return Argument{
 		.range = arg.range,
-		.expr = clone(arg.expr, registry),
+		.expr = clone(arg.expr, arena),
 		.name = arg.name,
 		.param_idx = arg.param_idx,
 	};
 }
 
-Parameter clone(Parameter const &param, InstanceRegistry *registry)
+Parameter clone(Parameter const &param, Arena &arena)
 {
 	return Parameter{
 		.range = param.range,
-		.type = clone_ptr(param.type, registry),
-		.default_value = param.default_value.clone(registry),
+		.type = clone_ptr(param.type, arena),
+		.default_value = param.default_value.clone(arena),
 	};
 }
 
-Pattern* clone_ptr(Pattern const *pattern, InstanceRegistry *registry);
-FixedArray<PatternArgument>* clone(FixedArray<PatternArgument> const *args, InstanceRegistry *registry);
+Pattern* clone_ptr(Pattern const *pattern, Arena &arena);
+FixedArray<PatternArgument>* clone(FixedArray<PatternArgument> const *args, Arena &arena);
 
-Pattern clone(Pattern const &pattern, InstanceRegistry *registry)
+Pattern clone(Pattern const &pattern, Arena &arena)
 {
 	return pattern | match
 	{
@@ -371,21 +358,21 @@ Pattern clone(Pattern const &pattern, InstanceRegistry *registry)
 		{
 			return Pattern(
 				VarPatternUnresolved(p.range, p.name, p.mutability),
-				clone_ptr(pattern.provided_type, registry)
+				clone_ptr(pattern.provided_type, arena)
 			);
 		},
 		[&](VarPattern const &p)
 		{
 			return Pattern(
-				VarPattern(p.range, p.var, clone_ptr(p.type, registry)),
-				clone_ptr(pattern.provided_type, registry)
+				VarPattern(p.range, p.var, clone_ptr(p.type, arena)),
+				clone_ptr(pattern.provided_type, arena)
 			);
 		},
 		[&](DerefPattern const &p)
 		{
 			return Pattern(
-				DerefPattern(p.range, clone_ptr(p.sub, registry), clone_ptr(p.type, registry)),
-				clone_ptr(pattern.provided_type, registry)
+				DerefPattern(p.range, clone_ptr(p.sub, arena), clone_ptr(p.type, arena)),
+				clone_ptr(pattern.provided_type, arena)
 			);
 		},
 		[&](AddressOfPattern const &p)
@@ -393,11 +380,11 @@ Pattern clone(Pattern const &pattern, InstanceRegistry *registry)
 			return Pattern(
 				AddressOfPattern(
 					p.range,
-					clone_ptr(p.sub, registry),
+					clone_ptr(p.sub, arena),
 					p.mutability,
-					clone_ptr(p.type, registry)
+					clone_ptr(p.type, arena)
 				),
-				clone_ptr(pattern.provided_type, registry)
+				clone_ptr(pattern.provided_type, arena)
 			);
 		},
 		[&](ConstructorPattern const &p)
@@ -405,56 +392,56 @@ Pattern clone(Pattern const &pattern, InstanceRegistry *registry)
 			return Pattern(
 				ConstructorPattern(
 					p.range,
-					clone_ptr(p.ctor, registry),
-					clone(p.args, registry),
+					clone_ptr(p.ctor, arena),
+					clone(p.args, arena),
 					p.has_parens,
-					clone_ptr(p.type, registry)
+					clone_ptr(p.type, arena)
 				),
-				clone_ptr(pattern.provided_type, registry)
+				clone_ptr(pattern.provided_type, arena)
 			);
 		},
 		[&](WildcardPattern const &p)
 		{
 			return Pattern(
-				WildcardPattern(p.range, clone_ptr(p.type, registry)),
-				clone_ptr(pattern.provided_type, registry)
+				WildcardPattern(p.range, clone_ptr(p.type, arena)),
+				clone_ptr(pattern.provided_type, arena)
 			);
 		}
 	};
 }
 
-Pattern* clone_ptr(Pattern const *pattern, InstanceRegistry *registry)
+Pattern* clone_ptr(Pattern const *pattern, Arena &arena)
 {
 	if(not pattern)
 		return nullptr;
 
-	return registry->arena().alloc<Pattern>(clone(*pattern, registry));
+	return arena.alloc<Pattern>(clone(*pattern, arena));
 }
 
-PatternArgument clone(PatternArgument const &pat_arg, InstanceRegistry *registry)
+PatternArgument clone(PatternArgument const &pat_arg, Arena &arena)
 {
 	return PatternArgument{
-		.pattern = clone(pat_arg.pattern, registry),
+		.pattern = clone(pat_arg.pattern, arena),
 		.param_name = pat_arg.param_name,
 		.param_idx = pat_arg.param_idx,
 	};
 }
 
-FixedArray<PatternArgument>* clone(FixedArray<PatternArgument> const *args, InstanceRegistry *registry)
+FixedArray<PatternArgument>* clone(FixedArray<PatternArgument> const *args, Arena &arena)
 {
-	FixedArray<PatternArgument> *result = alloc_fixed_array<PatternArgument>(args->count, registry->arena());
+	FixedArray<PatternArgument> *result = alloc_fixed_array<PatternArgument>(args->count, arena);
 	for(size_t i = 0; i < args->count; ++i)
-		result->items[i] = clone(args->items[i], registry);
+		result->items[i] = clone(args->items[i], arena);
 
 	return result;
 }
 
-Stmt* clone_ptr(Stmt const *stmt, InstanceRegistry *registry);
-FixedArray<Stmt>* clone(FixedArray<Stmt> const *stmts, InstanceRegistry *registry);
+Stmt* clone_ptr(Stmt const *stmt, Arena &arena);
+FixedArray<Stmt>* clone(FixedArray<Stmt> const *stmts, Arena &arena);
 
-FixedArray<MatchArm>* clone(FixedArray<MatchArm> const *arms, InstanceRegistry *registry);
+FixedArray<MatchArm>* clone(FixedArray<MatchArm> const *arms, Arena &arena);
 
-Stmt clone(Stmt const &stmt, InstanceRegistry *registry)
+Stmt clone(Stmt const &stmt, Arena &arena)
 {
 	return stmt | match
 	{
@@ -462,81 +449,81 @@ Stmt clone(Stmt const &stmt, InstanceRegistry *registry)
 		{
 			return LetStmt{
 				.range = s.range,
-				.lhs = clone_ptr(s.lhs, registry),
-				.init_expr = clone_ptr(s.init_expr, registry),
+				.lhs = clone_ptr(s.lhs, arena),
+				.init_expr = clone_ptr(s.init_expr, arena),
 			};
 		},
 		[&](ExprStmt const &s) -> Stmt
 		{
-			return ExprStmt(s.range, clone_ptr(s.expr, registry));
+			return ExprStmt(s.range, clone_ptr(s.expr, arena));
 		},
 		[&](BlockStmt const &s) -> Stmt
 		{
-			return BlockStmt(s.range, clone(s.stmts, registry));
+			return BlockStmt(s.range, clone(s.stmts, arena));
 		},
 		[&](ReturnStmt const &s) -> Stmt
 		{
-			return ReturnStmt(s.range, clone_ptr(s.ret_expr, registry));
+			return ReturnStmt(s.range, clone_ptr(s.ret_expr, arena));
 		},
 		[&](IfStmt const &s) -> Stmt
 		{
 			return IfStmt(
 				s.range,
-				clone_ptr(s.condition, registry),
-				clone_ptr(s.then, registry),
-				clone_ptr(s.else_, registry)
+				clone_ptr(s.condition, arena),
+				clone_ptr(s.then, arena),
+				clone_ptr(s.else_, arena)
 			);
 		},
 		[&](WhileStmt const &s) -> Stmt
 		{
 			return WhileStmt(
 				s.range,
-				clone_ptr(s.condition, registry),
-				clone_ptr(s.body, registry)
+				clone_ptr(s.condition, arena),
+				clone_ptr(s.body, arena)
 			);
 		},
 		[&](MatchStmt const &s) -> Stmt
 		{
 			return MatchStmt(
 				s.range,
-				clone_ptr(s.expr, registry),
-				clone(s.arms, registry)
+				clone_ptr(s.expr, arena),
+				clone(s.arms, arena)
 			);
 		},
 	};
 }
 
-Stmt* clone_ptr(Stmt const *stmt, InstanceRegistry *registry)
+Stmt* clone_ptr(Stmt const *stmt, Arena &arena)
 {
 	if(not stmt)
 		return nullptr;
 
-	return registry->arena().alloc<Stmt>(clone(*stmt, registry));
+	return arena.alloc<Stmt>(clone(*stmt, arena));
 }
 
-FixedArray<Stmt>* clone(FixedArray<Stmt> const *stmts, InstanceRegistry *registry)
+FixedArray<Stmt>* clone(FixedArray<Stmt> const *stmts, Arena &arena)
 {
-	FixedArray<Stmt> *result = alloc_fixed_array<Stmt>(stmts->count, registry->arena());
+	FixedArray<Stmt> *result = alloc_fixed_array<Stmt>(stmts->count, arena);
 	for(size_t i = 0; i < stmts->count; ++i)
-		result->items[i] = clone(stmts->items[i], registry);
+		result->items[i] = clone(stmts->items[i], arena);
 
 	return result;
 }
 
-MatchArm clone(MatchArm const &arm, InstanceRegistry *registry)
+MatchArm clone(MatchArm const &arm, Arena &arena)
 {
 	return MatchArm{
-		.capture = clone(arm.capture, registry),
-		.stmt = clone(arm.stmt, registry),
+		.capture = clone(arm.capture, arena),
+		.stmt = clone(arm.stmt, arena),
 		.discr = arm.discr,
 	};
 }
 
-FixedArray<MatchArm>* clone(FixedArray<MatchArm> const *arms, InstanceRegistry *registry)
+FixedArray<MatchArm>* clone(FixedArray<MatchArm> const *arms, Arena &arena)
 {
-	FixedArray<MatchArm> *result = alloc_fixed_array<MatchArm>(arms->count, registry->arena());
+	FixedArray<MatchArm> *result = alloc_fixed_array<MatchArm>(arms->count, arena);
 	for(size_t i = 0; i < arms->count; ++i)
-		result->items[i] = clone(arms->items[i], registry);
+		result->items[i] = clone(arms->items[i], arena);
 
 	return result;
 }
@@ -768,7 +755,7 @@ StructInstance* InstanceRegistry::get_struct_instance(
 )
 {
 	void *original_mem_pos = m_arena.current_ptr();
-	TypeArgList new_args = clone(type_args, this);
+	TypeArgList new_args = clone(type_args, m_arena);
 	substitute(new_args, subst, *this);
 
 	auto it = m_struct_instances.find(StructInstanceKey(struct_, new_args.args, parent));
@@ -834,7 +821,7 @@ ProcInstance* InstanceRegistry::get_proc_instance(
 )
 {
 	void *original_mem_pos = m_arena.current_ptr();
-	TypeArgList new_args = clone(type_args, this);
+	TypeArgList new_args = clone(type_args, m_arena);
 	substitute(new_args, subst, *this);
 
 	auto it = m_proc_instances.find(ProcInstanceKey(proc, new_args.args));
@@ -881,12 +868,12 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
 	void *original_mem_pos = m_arena.current_ptr();
 
 	// Substitute params
-	FixedArray<Type> *new_params = clone(params, this);
+	FixedArray<Type> *new_params = clone(params, m_arena);
 	for(Type &new_param: *new_params)
 		substitute(new_param, subst, *this);
 
 	// Substitute return type
-	Type *new_ret = clone_ptr(ret, this);
+	Type *new_ret = clone_ptr(ret, m_arena);
 	substitute(*new_ret, subst, *this);
 
 	auto it = m_proc_type_instances.find(ProcTypeInstanceKey(new_params, new_ret));
@@ -954,10 +941,9 @@ static void create_type_env(
 //--------------------------------------------------------------------
 // StructInstance
 //--------------------------------------------------------------------
-static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registry);
 static void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceRegistry &registry);
 
-static Type* mk_builtin_type(BuiltinTypeDef builtin, Arena *arena);
+static Type* mk_builtin_type(BuiltinTypeDef builtin, Arena &arena);
 static MemoryLayout get_layout(BuiltinTypeDef type);
 MemoryLayout compute_layout(Type const &type, unordered_set<TypeInstance> *parent_type_deps);
 
@@ -1084,7 +1070,7 @@ void StructInstance::compute_dependent_properties()
 			{
 				Parameter inst_var_member{
 					.range = var_member.range,
-					.type = clone_ptr(var_member.type, m_registry),
+					.type = clone_ptr(var_member.type, m_registry->arena()),
 					// Why ExprPending?
 					// - First, when typechecking the *usage* of a struct, we only need to know
 					//   whether a member *has* a default value, but it doesn't matter what that
@@ -1125,7 +1111,7 @@ void StructInstance::compute_dependent_properties()
 
 		for(auto const &[idx, var_member]: all_var_members() | std::views::enumerate)
 		{
-			ctor_param_types->items[idx] = clone(*var_member.type, m_registry);
+			ctor_param_types->items[idx] = clone(*var_member.type, m_registry->arena());
 			m_ctor_params->items[idx] = &var_member;
 		}
 
@@ -1190,7 +1176,7 @@ MemoryLayout StructInstance::compute_own_layout()
 	if(m_struct->num_case_members > 0)
 	{
 		BuiltinTypeDef discriminator_type = smallest_int_type_for(m_struct->num_case_members);
-		m_discriminator_type = mk_builtin_type(discriminator_type, &m_registry->arena());
+		m_discriminator_type = mk_builtin_type(discriminator_type, m_registry->arena());
 		m_own_layout->extend(get_layout(discriminator_type));
 	}
 
@@ -1253,7 +1239,7 @@ void StructInstance::finalize_typechecking()
 			Parameter &inst_var_member = std::get<Parameter>(m_members->items[i]);
 			if(Expr *default_value = var_member->default_value.try_get_expr())
 			{
-				default_value = clone_ptr(default_value, m_registry);
+				default_value = clone_ptr(default_value, m_registry->arena());
 				substitute_types_in_expr(*default_value, env, *m_registry);
 				inst_var_member.default_value = default_value;
 			}
@@ -1350,7 +1336,7 @@ static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRe
 	FixedArray<Type> *ctor_params = alloc_fixed_array<Type>(proc->params->count, instances.arena());
 	for(auto const &[idx, param]: *proc->params | std::views::enumerate)
 	{
-		Parameter new_param = clone(param, &instances);
+		Parameter new_param = clone(param, instances.arena());
 		substitute(*new_param.type, env, instances);
 		if(Expr *default_value = new_param.default_value.try_get_expr())
 			substitute_types_in_expr(*default_value, env, instances);
@@ -1358,7 +1344,7 @@ static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRe
 		ctor_params->items[idx] = *new_param.type;
 	}
 
-	Type *new_ret = clone_ptr(proc->ret_type, &instances);
+	Type *new_ret = clone_ptr(proc->ret_type, instances.arena());
 	substitute(*new_ret, env, instances);
 
 	ProcTypeInstance *proc_type_inst = instances.get_proc_type_instance(ctor_params, new_ret);
@@ -1379,10 +1365,10 @@ struct SemaContext
 {
 	SemaContext(Module &mod, Arena &arena) :
 		mod(&mod),
-		arena(&arena) {}
+		arena(arena) {}
 
 	Module *mod;
-	Arena *arena;
+	Arena &arena;
 	ProcItem *NULLABLE proc = nullptr; // The current procedure being analyzed
 
 	TypeDeductionVar new_type_deduction_var()
@@ -1435,11 +1421,11 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 	assert(not struct_->ctor_without_parens or struct_->members->count == 0);
 
 	scope->declare_struct(struct_);
-	struct_->sema = ctx.arena->alloc<Struct>(parent, scope->new_child());
+	struct_->sema = ctx.arena.alloc<Struct>(parent, scope->new_child());
 
 	// Declare type parameters
 	size_t num_type_params = struct_->type_params->count;
-	struct_->sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, *ctx.arena);
+	struct_->sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, ctx.arena);
 	for(size_t i = 0; i < num_type_params; ++i)
 	{
 		TypeParameter const &type_param = struct_->type_params->items[i];
@@ -1505,7 +1491,7 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 		for(StructItem *cur_item = struct_; cur_item; cur_item = cur_item->sema->parent)
 			param_count += cur_item->num_var_members();
 
-		struct_->sema->ctor_params = alloc_fixed_array<Parameter const*>(param_count, *ctx.arena);
+		struct_->sema->ctor_params = alloc_fixed_array<Parameter const*>(param_count, ctx.arena);
 		for(auto const &[idx, var_member]: all_var_members(struct_) | std::views::enumerate)
 			struct_->sema->ctor_params->items[idx] = &var_member;
 	}
@@ -1514,7 +1500,7 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 static void declare_items(SemaContext &ctx)
 {
 	Module *mod = ctx.mod;
-	mod->sema = std::make_unique<SemaModule>(std::make_unique<Scope>(ctx.mod), *ctx.arena);
+	mod->sema = std::make_unique<SemaModule>(std::make_unique<Scope>(ctx.mod), ctx.arena);
 
 	for(TopLevelItem &item: to_range(ctx.mod->items))
 	{
@@ -1522,8 +1508,8 @@ static void declare_items(SemaContext &ctx)
 		{
 			[&](ProcItem &proc)
 			{
-				proc.sema = ctx.arena->alloc<Proc>(mod->sema->globals->new_child());
-				proc.sema->param_vars = alloc_fixed_array<Var*>(proc.params->count, *ctx.arena);
+				proc.sema = ctx.arena.alloc<Proc>(mod->sema->globals->new_child());
+				proc.sema->param_vars = alloc_fixed_array<Var*>(proc.params->count, ctx.arena);
 				for(auto const& [idx, param]: *proc.params | std::views::enumerate)
 				{
 					Var *param_var = proc.sema->scope->declare_var(name_of(param, mod), IsMutable::NO, param.range);
@@ -1531,7 +1517,7 @@ static void declare_items(SemaContext &ctx)
 				}
 
 				size_t num_type_params = proc.type_params->count;
-				proc.sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, *ctx.arena);
+				proc.sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, ctx.arena);
 				for(size_t i = 0; i < num_type_params; ++i)
 				{
 					TypeParameter const &type_param = proc.type_params->items[i];
@@ -1547,10 +1533,10 @@ static void declare_items(SemaContext &ctx)
 			},
 			[&](AliasItem &alias)
 			{
-				alias.sema = ctx.arena->alloc<Alias>(mod->sema->globals->new_child());
+				alias.sema = ctx.arena.alloc<Alias>(mod->sema->globals->new_child());
 
 				size_t num_type_params = alias.type_params->count;
-				alias.sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, *ctx.arena);
+				alias.sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, ctx.arena);
 				for(size_t i = 0; i < num_type_params; ++i)
 				{
 					TypeParameter const &type_param = alias.type_params->items[i];
@@ -1584,7 +1570,7 @@ static FixedArray<Type>* resolve_type_args(
 	SemaContext &ctx
 )
 {
-	FixedArray<Type> *resolved_type_args = alloc_fixed_array<Type>(num_type_params, *ctx.arena);
+	FixedArray<Type> *resolved_type_args = alloc_fixed_array<Type>(num_type_params, ctx.arena);
 	size_t cur_idx = 0;
 	for(Type const &arg: *args)
 	{
@@ -1679,7 +1665,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			size_t arg_idx = 0;
 			for(Type const &arg: *resolved_type_args)
 			{
-				env.add(alias->sema->type_params->items[arg_idx], clone(arg, &ctx.mod->sema->insts));
+				env.add(alias->sema->type_params->items[arg_idx], clone(arg, ctx.arena));
 				arg_idx += 1;
 			}
 			while(arg_idx < num_type_params)
@@ -1688,7 +1674,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 				arg_idx += 1;
 			}
 
-			Type type = clone(*alias->aliased_type, &ctx.mod->sema->insts);
+			Type type = clone(*alias->aliased_type, ctx.arena);
 			substitute(type, env, ctx.mod->sema->insts);
 
 			if(path.child)
@@ -1728,7 +1714,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 
 				result = MemberAccessExpr{
 					.range = {token_range_of(result).first, child->range.last},
-					.object = ctx.arena->alloc<Expr>(result),
+					.object = ctx.arena.alloc<Expr>(result),
 					.member = name_of(*child, ctx.mod)
 				};
 
@@ -1765,7 +1751,7 @@ static Expr resolve_path_to_expr(Path const &path, Scope *scope, SemaContext &ct
 		{
 			Expr expr = ConstructorExpr{
 				.range = path.range,
-				.ctor = ctx.arena->alloc<Type>(type),
+				.ctor = ctx.arena.alloc<Type>(type),
 			};
 
 			if(StructType const *struct_type = std::get_if<StructType>(&type))
@@ -1774,8 +1760,8 @@ static Expr resolve_path_to_expr(Path const &path, Scope *scope, SemaContext &ct
 				{
 					expr = CallExpr{
 						.range = token_range_of(expr),
-						.callable = ctx.arena->alloc<Expr>(expr),
-						.args = alloc_fixed_array<Argument>(0, *ctx.arena),
+						.callable = ctx.arena.alloc<Expr>(expr),
+						.args = alloc_fixed_array<Argument>(0, ctx.arena),
 					};
 				}
 			}
@@ -2143,6 +2129,7 @@ static ProcTypeInstance* substitute_types_in_proc_type(
 	return inst;
 }
 
+
 static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registry)
 {
 	type | match
@@ -2184,7 +2171,7 @@ static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registr
 		{
 			if(Type const *mapped_type = env.try_lookup(t))
 			{
-				type = clone(*mapped_type, &registry);
+				type = clone(*mapped_type, registry.arena());
 
 				// Apply substitution recursively.
 				// This is not how substitution is traditionally defined for e.g. first-order logic,
@@ -2696,14 +2683,14 @@ static bool is_bool(Type const &type)
 	return is_builtin_type(type, BuiltinTypeDef::BOOL);
 }
 
-static Type* mk_builtin_type(BuiltinTypeDef builtin, Arena *arena)
+static Type* mk_builtin_type(BuiltinTypeDef builtin, Arena &arena)
 {
-	return arena->alloc<Type>(BuiltinType(UNKNOWN_TOKEN_RANGE, builtin));
+	return arena.alloc<Type>(BuiltinType(UNKNOWN_TOKEN_RANGE, builtin));
 }
 
-static Type* mk_known_int_type(Int128 low, Int128 high, Arena *arena)
+static Type* mk_known_int_type(Int128 low, Int128 high, Arena &arena)
 {
-	return arena->alloc<Type>(KnownIntType(low, high));
+	return arena.alloc<Type>(KnownIntType(low, high));
 }
 
 Type materialize_known_int(KnownIntType known_int)
@@ -2714,9 +2701,9 @@ Type materialize_known_int(KnownIntType known_int)
 		return BuiltinType(UNKNOWN_TOKEN_RANGE, smallest_int_type_for(known_int.low, known_int.high));
 }
 
-static Type* mk_pointer_type(Type *pointee, IsMutable mutability, Arena *arena)
+static Type* mk_pointer_type(Type *pointee, IsMutable mutability, Arena &arena)
 {
-	return arena->alloc<Type>(PointerType{
+	return arena.alloc<Type>(PointerType{
 		.range = UNKNOWN_TOKEN_RANGE,
 		.pointee = pointee,
 		.mutability = mutability,
@@ -2909,7 +2896,7 @@ static bool try_unify_type_deduction_vars(
 					update_type_var(*left_var, *right_existing, subst);
 			}
 			else
-				subst.add(*left_var, clone(right, &ctx.mod->sema->insts));
+				subst.add(*left_var, clone(right, ctx.arena));
 
 		}
 
@@ -2931,7 +2918,7 @@ static bool try_unify_type_deduction_vars(
 				unify(*existing_type, *type, subst, mode, ctx, right_expr);
 		}
 		else
-			subst.add(var, clone(*type, &ctx.mod->sema->insts));
+			subst.add(var, clone(*type, ctx.arena));
 
 		update_type_var(var, *type, subst);
 
@@ -3045,23 +3032,23 @@ static bool try_unify_structs(
 
 					if(right_expr)
 					{
-						Expr *ctor_expr = ctx.arena->alloc<Expr>(ConstructorExpr{
+						Expr *ctor_expr = ctx.arena.alloc<Expr>(ConstructorExpr{
 							.range = UNKNOWN_TOKEN_RANGE,
-							.ctor = ctx.arena->alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, implicit_case)),
+							.ctor = ctx.arena.alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, implicit_case)),
 							.type = implicit_case->try_get_ctor_type(),
 						});
 
-						FixedArray<Argument> *ctor_args = alloc_fixed_array<Argument>(1, *ctx.arena);
+						FixedArray<Argument> *ctor_args = alloc_fixed_array<Argument>(1, ctx.arena);
 						ctor_args->items[0] = Argument{
 							.range = UNKNOWN_TOKEN_RANGE,
 							.expr = *right_expr,
 						};
 
-						Expr *call_expr = ctx.arena->alloc<Expr>(CallExpr{
+						Expr *call_expr = ctx.arena.alloc<Expr>(CallExpr{
 							.range = UNKNOWN_TOKEN_RANGE,
 							.callable = ctor_expr,
 							.args = ctor_args,
-							.type = ctx.arena->alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, implicit_case)),
+							.type = ctx.arena.alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, implicit_case)),
 						});
 
 						*right_expr = *call_expr;
@@ -3618,7 +3605,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 	{
 		[&](IntLiteralExpr &e)
 		{
-			return e.type = ctx.arena->alloc<Type>(KnownIntType(e.value, e.value));
+			return e.type = ctx.arena.alloc<Type>(KnownIntType(e.value, e.value));
 		},
 		[&](BoolLiteralExpr &e)
 		{
@@ -3629,9 +3616,9 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			ScopeItem &c_char_item = ctx.mod->sema->globals->lookup("c_char", INVALID_TOKEN_IDX);
 			StructInstance *c_char = ctx.mod->sema->insts.get_struct_instance(std::get<StructItem*>(c_char_item), nullptr, nullptr);
 
-			return e.type = ctx.arena->alloc<Type>(ManyPointerType{
+			return e.type = ctx.arena.alloc<Type>(ManyPointerType{
 				.range = UNKNOWN_TOKEN_RANGE,
-				.pointee = ctx.arena->alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, c_char)),
+				.pointee = ctx.arena.alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, c_char)),
 				.mutability = IsMutable::NO,
 			});
 		},
@@ -3654,7 +3641,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 					if(KnownIntType const *known_int = std::get_if<KnownIntType>(sub_type))
 						e.type = mk_known_int_type(-known_int->high, -known_int->low, ctx.arena);
 					else if(is_integer_type(*sub_type))
-						e.type = ctx.arena->alloc<Type>(clone(*sub_type, &ctx.mod->sema->insts));
+						e.type = ctx.arena.alloc<Type>(clone(*sub_type, ctx.arena));
 					else
 						throw_sem_error("Expected integer type", e.range.first, ctx.mod);
 				}
@@ -3712,7 +3699,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 							);
 						}
 
-						e.type = ctx.arena->alloc<Type>(*result_type);
+						e.type = ctx.arena.alloc<Type>(*result_type);
 					}
 					else
 					{
@@ -3776,7 +3763,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			if(e.mutability == IsMutable::YES and object_mutability == IsMutable::NO)
 				throw_sem_error("Cannot make mutable reference to const object", e.range.first, ctx.mod);
 
-			return e.type = mk_pointer_type(clone_ptr(object_type, &ctx.mod->sema->insts), e.mutability, ctx.arena);
+			return e.type = mk_pointer_type(clone_ptr(object_type, ctx.arena), e.mutability, ctx.arena);
 		},
 		[&](DerefExpr &e)
 		{
@@ -3785,7 +3772,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			if(not addr_ptr_type)
 				throw_sem_error("Expected pointer type", e.range.first, ctx.mod);
 
-			return e.type = clone_ptr(addr_ptr_type->pointee, &ctx.mod->sema->insts);
+			return e.type = clone_ptr(addr_ptr_type->pointee, ctx.arena);
 		},
 		[&](IndexExpr &e)
 		{
@@ -3799,7 +3786,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			if(not is_integer_type(*index_type))
 				throw_sem_error("Index expression must be of integer type", token_range_of(*e.index).first, ctx.mod);
 
-			return e.type = clone_ptr(addr_ptr_type->pointee, &ctx.mod->sema->insts);
+			return e.type = clone_ptr(addr_ptr_type->pointee, ctx.arena);
 		},
 		[&](MemberAccessExpr &e)
 		{
@@ -3812,7 +3799,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			if(not var_member)
 				throw_sem_error("`"s + struct_type->inst->struct_()->name + "` has no field named `"s + e.member + "`", e.range.first, ctx.mod);
 
-			return e.type = clone_ptr(var_member->type, &ctx.mod->sema->insts);
+			return e.type = clone_ptr(var_member->type, ctx.arena);
 		},
 		[&](AssignmentExpr &e)
 		{
@@ -3829,7 +3816,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			if(is_lvalue_expr(*e.lhs) != IsMutable::YES)
 				throw_sem_error("LHS must denote a mutable lvalue", e.range.first, ctx.mod);
 
-			return e.type = clone_ptr(lhs_type, &ctx.mod->sema->insts);
+			return e.type = clone_ptr(lhs_type, ctx.arena);
 		},
 		[&](AsExpr &e)
 		{
@@ -3840,7 +3827,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			if(not is_cast_ok(*e.target_type, *e.src_expr, ctx))
 				throw_sem_error("Invalid cast", e.range.first, ctx.mod);
 
-			return e.type = clone_ptr(e.target_type, &ctx.mod->sema->insts);
+			return e.type = clone_ptr(e.target_type, ctx.arena);
 		},
 		[&](ConstructorExpr &e)
 		{
@@ -3852,11 +3839,11 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			if(not ctor_type)
 				throw_sem_error("Struct does not provide a constructor", e.range.first, ctx.mod);
 
-			return e.type = clone_ptr(ctor_type, &ctx.mod->sema->insts);
+			return e.type = clone_ptr(ctor_type, ctx.arena);
 		},
 		[&](ProcExpr &e)
 		{
-			return e.type = clone_ptr(e.inst->get_type(), &ctx.mod->sema->insts);
+			return e.type = clone_ptr(e.inst->get_type(), ctx.arena);
 		},
 		[&](CallExpr &e)
 		{
@@ -3927,7 +3914,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 				}
 			}
 
-			e.type = clone_ptr(callable_proc_type->inst->ret, &ctx.mod->sema->insts);
+			e.type = clone_ptr(callable_proc_type->inst->ret, ctx.arena);
 
 			// The only kinds of expressions that can introduve TypeDeductionVars are
 			// ConstructorExprs and ProcExprs, which at the moment can only occur as subexpressions
@@ -3949,7 +3936,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 		[&](VarExpr &e)
 		{
 			assert(e.var->type && "typecheck_subexpr: VarExpr: Var::type is null");
-			return e.type = clone_ptr(e.var->type, &ctx.mod->sema->insts);
+			return e.type = clone_ptr(e.var->type, ctx.arena);
 		},
 		[&](Path&) -> Type* { assert(!"typecheck_subexpr: Path"); },
 	};
@@ -4008,11 +3995,11 @@ static Type const* typecheck_pattern(
 		[&](VarPattern &p)
 		{
 			if(KnownIntType const *known_int = std::get_if<KnownIntType>(expected_type))
-				p.var->type = ctx.arena->alloc<Type>(materialize_known_int(*known_int));
+				p.var->type = ctx.arena.alloc<Type>(materialize_known_int(*known_int));
 			else
-				p.var->type = clone_ptr(expected_type, &ctx.mod->sema->insts);
+				p.var->type = clone_ptr(expected_type, ctx.arena);
 
-			return p.type = clone_ptr(p.var->type, &ctx.mod->sema->insts);
+			return p.type = clone_ptr(p.var->type, ctx.arena);
 		},
 		[&](DerefPattern &p)
 		{
@@ -4028,7 +4015,7 @@ static Type const* typecheck_pattern(
 				subst,
 				ctx
 			);
-			return p.type = clone_ptr(sub_type, &ctx.mod->sema->insts);
+			return p.type = clone_ptr(sub_type, ctx.arena);
 		},
 		[&](AddressOfPattern &p)
 		{
@@ -4040,7 +4027,7 @@ static Type const* typecheck_pattern(
 
 			Type sub_rhs_type(PointerType{
 				.range = UNKNOWN_TOKEN_RANGE,
-				.pointee = clone_ptr(expected_type, &ctx.mod->sema->insts),
+				.pointee = clone_ptr(expected_type, ctx.arena),
 				.mutability = p.mutability,
 			});
 
@@ -4053,7 +4040,7 @@ static Type const* typecheck_pattern(
 				ctx
 			);
 
-			return p.type = clone_ptr(sub_type, &ctx.mod->sema->insts);
+			return p.type = clone_ptr(sub_type, ctx.arena);
 		},
 		[&](ConstructorPattern &p) -> Type*
 		{
@@ -4092,7 +4079,7 @@ static Type const* typecheck_pattern(
 					{
 						PatternArgument &arg = p.args->items[i];
 
-						Type param_type = clone(ctor_proc_type.inst->params->items[i], &ctx.mod->sema->insts);
+						Type param_type = clone(ctor_proc_type.inst->params->items[i], ctx.arena);
 
 						if(arg.param_name.size())
 							throw_sem_error("TODO: Support named arguments in constructor pattern", p.range.first, ctx.mod);
@@ -4110,7 +4097,7 @@ static Type const* typecheck_pattern(
 				}
 			}
 
-			return p.type = clone_ptr(p.ctor, &ctx.mod->sema->insts);
+			return p.type = clone_ptr(p.ctor, ctx.arena);
 		},
 		[&](WildcardPattern &) -> Type*
 		{

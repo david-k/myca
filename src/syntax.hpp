@@ -294,7 +294,7 @@ struct DefaultValueExpr : variant<NoDefaultValue, ExprPending, Expr*>
 		};
 	}
 
-	DefaultValueExpr clone(class InstanceRegistry *registry) const;
+	DefaultValueExpr clone(Arena &arena) const;
 };
 
 struct ProcTypeParamAux

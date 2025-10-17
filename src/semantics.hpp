@@ -666,7 +666,7 @@ Type const* is_optional_ptr(StructInstance const *struct_);
 Type const* is_optional_ptr(Type const &type);
 bool is_builtin_type(Type const &type, BuiltinTypeDef builtin);
 
-Stmt clone(Stmt const &stmt, InstanceRegistry *registry);
+Stmt clone(Stmt const &stmt, Arena &arena);
 void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry);
 
 MemoryLayout compute_layout(Type const &type);
