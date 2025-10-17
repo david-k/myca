@@ -29,7 +29,7 @@ struct Struct
 {
 	StructItem *parent;
 	Scope *type_scope;
-	FixedArray<TypeParameterVar*> *type_params = nullptr;
+	FixedArray<TypeParameterVar> *type_params = nullptr;
 	FixedArray<Parameter const*> *NULLABLE ctor_params = nullptr;
 	int num_initial_var_members = 0;
 };
@@ -37,7 +37,7 @@ struct Struct
 struct Proc
 {
 	Scope *scope;
-	FixedArray<TypeParameterVar*> *type_params = nullptr;
+	FixedArray<TypeParameterVar> *type_params = nullptr;
 	FixedArray<Var*> *param_vars = nullptr;
 };
 
@@ -51,8 +51,8 @@ enum class ResolutionState
 struct Alias
 {
 	Scope *scope; // Only contains type params
+	FixedArray<TypeParameterVar> *type_params = nullptr;
 	ResolutionState resolution_state = ResolutionState::PENDING;
-	FixedArray<TypeParameterVar*> *type_params = nullptr;
 };
 
 struct Var
@@ -71,24 +71,6 @@ class InstanceRegistry;
 
 Type materialize_known_int(KnownIntType known_int);
 
-
-template<>
-struct std::hash<::VarType>
-{
-	size_t operator () (::VarType var) const
-	{
-		size_t h = ::compute_hash(var.index());
-		var | ::match
-		{
-			[&](auto const *v)
-			{
-				::combine_hashes(h, ::compute_hash(v));
-			},
-		};
-
-		return h;
-	}
-};
 
 struct TypeArgList
 {
@@ -118,6 +100,7 @@ struct MemoryLayout
 	}
 };
 
+bool type_var_occurs_in(VarType var, Type const &type);
 
 class TypeEnv
 {
@@ -141,6 +124,9 @@ public:
 
 	void add(VarType var, Type const &type)
 	{
+		// Required by unification and would lead to infinite recursion in substitute()
+		assert(not type_var_occurs_in(var, type));
+
 		auto res = m_env.emplace(var, type);
 		assert(res.second);
 	}
@@ -645,7 +631,7 @@ struct Scope
 
 	// Declaring items
 	Var* declare_var(string_view name, IsMutable mutability, TokenRange sloc);
-	TypeParameterVar* declare_type_var(string_view name, TokenRange sloc);
+	TypeParameterVar declare_type_var(TypeParameter const *def);
 	void declare_struct(StructItem *struct_);
 	void declare_proc(ProcItem *proc);
 	void declare_alias(AliasItem *alias);

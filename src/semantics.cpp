@@ -603,10 +603,10 @@ Var* Scope::declare_var(string_view name, IsMutable mutability, TokenRange sloc)
 	return &std::get<Var>(item);
 }
 
-TypeParameterVar* Scope::declare_type_var(string_view name, TokenRange sloc)
+TypeParameterVar Scope::declare_type_var(TypeParameter const *def)
 {
-	ScopeItem &item = declare(name, TypeParameterVar(sloc, name), sloc);
-	return &std::get<TypeParameterVar>(item);
+	ScopeItem &item = declare(def->name, TypeParameterVar(def), def->range);
+	return std::get<TypeParameterVar>(item);
 }
 
 void Scope::declare_struct(StructItem *struct_)
@@ -708,7 +708,7 @@ static bool gather_type_vars(Type const &type, unordered_set<VarType> &type_vars
 		[&](VarType const &t)
 		{
 			type_vars.insert(t);
-			return std::holds_alternative<TypeDeductionVar const*>(t);
+			return std::holds_alternative<TypeDeductionVar>(t);
 		},
 		[&](ProcTypeUnresolved const&) -> bool { assert(!"gather_type_vars: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> bool { assert(!"gather_type_vars: UnionTypeUnresolved"); },
@@ -939,13 +939,13 @@ void InstanceRegistry::remove_listener(InstanceRegistryListener *l)
 
 
 static void create_type_env(
-	FixedArray<TypeParameterVar*> const *type_params,
+	FixedArray<TypeParameterVar> const *type_params,
 	TypeArgList const &type_args,
 	TypeEnv &result)
 {
 	for(size_t i = 0; i < type_params->count; ++i)
 	{
-		TypeParameterVar const *type_param = type_params->items[i];
+		TypeParameterVar type_param = type_params->items[i];
 		result.add(type_param, type_args.args->items[i]);
 	}
 }
@@ -1316,7 +1316,7 @@ void ProcInstance::compute_dependent_properties()
 	TypeEnv env;
 	for(size_t i = 0; i < m_proc->type_params->count; ++i)
 	{
-		TypeParameterVar const *type_param = m_proc->sema->type_params->items[i];
+		TypeParameterVar type_param = m_proc->sema->type_params->items[i];
 		env.add(type_param, m_type_args.args->items[i]);
 	}
 
@@ -1373,32 +1373,24 @@ static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRe
 //==============================================================================
 // Sema context
 //==============================================================================
-struct DeductionContext
-{
-	explicit DeductionContext(Arena &arena) :
-		vars(arena) {}
-
-	TypeDeductionVar const* new_type_deduction_var()
-	{
-		return vars.append(TypeDeductionVar(vars.count()));
-	}
-
-	ListBuilder<TypeDeductionVar> vars;
-};
 
 // Holds all the state needed during semantic analysis
 struct SemaContext
 {
 	SemaContext(Module &mod, Arena &arena) :
 		mod(&mod),
-		dc(arena),
 		arena(&arena) {}
 
 	Module *mod;
+	Arena *arena;
 	ProcItem *NULLABLE proc = nullptr; // The current procedure being analyzed
 
-	DeductionContext dc;
-	Arena *arena;
+	TypeDeductionVar new_type_deduction_var()
+	{
+		return TypeDeductionVar(next_deduction_id++);
+	}
+
+	uint32_t next_deduction_id = 0;
 };
 
 
@@ -1447,12 +1439,12 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 
 	// Declare type parameters
 	size_t num_type_params = struct_->type_params->count;
-	struct_->sema->type_params = alloc_fixed_array<TypeParameterVar*>(num_type_params, *ctx.arena);
+	struct_->sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, *ctx.arena);
 	for(size_t i = 0; i < num_type_params; ++i)
 	{
 		TypeParameter const &type_param = struct_->type_params->items[i];
 		// TODO Produce error if the type parameter has the same name as the struct
-		TypeParameterVar *type_var = struct_->sema->type_scope->declare_type_var(type_param.name, type_param.range);
+		TypeParameterVar type_var = struct_->sema->type_scope->declare_type_var(&type_param);
 		struct_->sema->type_params->items[i] = type_var;
 	}
 
@@ -1539,11 +1531,11 @@ static void declare_items(SemaContext &ctx)
 				}
 
 				size_t num_type_params = proc.type_params->count;
-				proc.sema->type_params = alloc_fixed_array<TypeParameterVar*>(num_type_params, *ctx.arena);
+				proc.sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, *ctx.arena);
 				for(size_t i = 0; i < num_type_params; ++i)
 				{
 					TypeParameter const &type_param = proc.type_params->items[i];
-					TypeParameterVar *type_var = proc.sema->scope->declare_type_var(type_param.name, type_param.range);
+					TypeParameterVar type_var = proc.sema->scope->declare_type_var(&type_param);
 					proc.sema->type_params->items[i] = type_var;
 				}
 
@@ -1558,11 +1550,11 @@ static void declare_items(SemaContext &ctx)
 				alias.sema = ctx.arena->alloc<Alias>(mod->sema->globals->new_child());
 
 				size_t num_type_params = alias.type_params->count;
-				alias.sema->type_params = alloc_fixed_array<TypeParameterVar*>(num_type_params, *ctx.arena);
+				alias.sema->type_params = alloc_fixed_array<TypeParameterVar>(num_type_params, *ctx.arena);
 				for(size_t i = 0; i < num_type_params; ++i)
 				{
 					TypeParameter const &type_param = alias.type_params->items[i];
-					TypeParameterVar *type_var = alias.sema->scope->declare_type_var(type_param.name, type_param.range);
+					TypeParameterVar type_var = alias.sema->scope->declare_type_var(&type_param);
 					alias.sema->type_params->items[i] = type_var;
 				}
 
@@ -1604,7 +1596,7 @@ static FixedArray<Type>* resolve_type_args(
 	assert(args->count <= num_type_params);
 	size_t num_missing_args = num_type_params - args->count;
 	while(num_missing_args--)
-		new (&resolved_type_args->items[cur_idx++]) Type(VarType(ctx.dc.new_type_deduction_var()));
+		new (&resolved_type_args->items[cur_idx++]) Type(VarType(ctx.new_type_deduction_var()));
 
 	return resolved_type_args;
 }
@@ -1692,7 +1684,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			}
 			while(arg_idx < num_type_params)
 			{
-				env.add(alias->sema->type_params->items[arg_idx], ctx.dc.new_type_deduction_var());
+				env.add(alias->sema->type_params->items[arg_idx], ctx.new_type_deduction_var());
 				arg_idx += 1;
 			}
 
@@ -1718,7 +1710,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			if(path.child)
 				throw_sem_error("Member selection of type parameters not supported", path.child->range.first, ctx.mod);
 
-			return VarType(&type_var);
+			return VarType(type_var);
 		},
 		[&](Var const &var) -> variant<Expr, Type>
 		{
@@ -2829,7 +2821,7 @@ static bool try_unify_integer_types(Type const &left, Type const &right, Unifica
 
 // Unification of type deduction variables
 //--------------------------------------------------------------------
-bool type_var_occurs_in(TypeDeductionVar const *var, Type const &type)
+bool type_var_occurs_in(VarType var, Type const &type)
 {
 	return type | match
 	{
@@ -2837,10 +2829,7 @@ bool type_var_occurs_in(TypeDeductionVar const *var, Type const &type)
 		[&](KnownIntType const&) { return false; },
 		[&](VarType const &t)
 		{
-			if(TypeDeductionVar const* const* dv = std::get_if<TypeDeductionVar const*>(&t))
-				return *dv == var;
-
-			return false;
+			return t == var;
 		},
 		[&](PointerType const &t)
 		{
@@ -2870,20 +2859,20 @@ bool type_var_occurs_in(TypeDeductionVar const *var, Type const &type)
 	};
 }
 
-static TypeDeductionVar const* get_if_type_deduction_var(Type const &type)
+static optional<TypeDeductionVar> get_if_type_deduction_var(Type const &type)
 {
 	VarType const *var_type = std::get_if<VarType>(&type);
 	if(not var_type)
-		return nullptr;
+		return nullopt;
 
-	TypeDeductionVar const* const* type_deduction_var = std::get_if<TypeDeductionVar const*>(var_type);
+	TypeDeductionVar const* type_deduction_var = std::get_if<TypeDeductionVar>(var_type);
 	if(not type_deduction_var)
-		return nullptr;
+		return nullopt;
 
 	return *type_deduction_var;
 }
 
-static void update_type_var(TypeDeductionVar const *var, Type const &type, TypeEnv &subst)
+static void update_type_var(TypeDeductionVar var, Type const &type, TypeEnv &subst)
 {
 	if(Type const *existing_type = subst.try_lookup(var))
 	{
@@ -2904,23 +2893,23 @@ static bool try_unify_type_deduction_vars(
 	Expr *right_expr
 )
 {
-	TypeDeductionVar const *left_var = get_if_type_deduction_var(left);
-	TypeDeductionVar const *right_var = get_if_type_deduction_var(right);
+	optional<TypeDeductionVar> left_var = get_if_type_deduction_var(left);
+	optional<TypeDeductionVar> right_var = get_if_type_deduction_var(right);
 
 	if(left_var and right_var)
 	{
 		if(left_var != right_var)
 		{
-			if(Type const *left_existing = subst.try_lookup(left_var))
+			if(Type const *left_existing = subst.try_lookup(*left_var))
 			{
 				unify(*left_existing, right, subst, mode, ctx, right_expr);
 
 				// Here we update `left_var`. The above call to unify() will update `right_var`
-				if(Type const *right_existing = subst.try_lookup(right_var))
-					update_type_var(left_var, *right_existing, subst);
+				if(Type const *right_existing = subst.try_lookup(*right_var))
+					update_type_var(*left_var, *right_existing, subst);
 			}
 			else
-				subst.add(left_var, clone(right, &ctx.mod->sema->insts));
+				subst.add(*left_var, clone(right, &ctx.mod->sema->insts));
 
 		}
 
@@ -2929,7 +2918,7 @@ static bool try_unify_type_deduction_vars(
 
 	if(left_var or right_var)
 	{
-		TypeDeductionVar const *var = left_var ? left_var : right_var;
+		TypeDeductionVar var = left_var ? *left_var : *right_var;
 		Type const *type = left_var ? &right : &left;
 
 		assert(not type_var_occurs_in(var, *type));

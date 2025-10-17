@@ -255,13 +255,13 @@ void print(Type const &type, Module const &mod, std::ostream &os)
 		{
 			t | match
 			{
-				[&](TypeParameterVar const *v)
+				[&](TypeParameterVar v)
 				{
-					os << v->name;
+					os << v.def->name;
 				},
-				[&](TypeDeductionVar const *v)
+				[&](TypeDeductionVar v)
 				{
-					os << "$_" << v->id;
+					os << "?_" << v.id;
 				},
 			};
 		},
@@ -741,8 +741,8 @@ TokenRange token_range_of(Type const &type)
 		{
 			return t | match
 			{
-				[](TypeParameterVar const *var) { return var->sloc; },
-				[](TypeDeductionVar const*) { return UNKNOWN_TOKEN_RANGE; },
+				[](TypeParameterVar var) { return var.def->range; },
+				[](TypeDeductionVar) { return UNKNOWN_TOKEN_RANGE; },
 			};
 		},
 		[](KnownIntType const&) { return UNKNOWN_TOKEN_RANGE; },

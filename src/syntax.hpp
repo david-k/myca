@@ -151,25 +151,28 @@ static constexpr TokenRange UNKNOWN_TOKEN_RANGE = TokenRange(INVALID_TOKEN_IDX, 
 //--------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------
-struct ProcTypeInstance;
 class StructInstance;
 struct UnionInstance;
-struct TypeDeductionVar;
+struct ProcTypeInstance;
+struct TypeParameter;
 struct Expr;
 
 
 struct TypeParameterVar
 {
-	TokenRange sloc;
-	string_view name;
+	TypeParameter const *def;
+
+	friend bool operator == (TypeParameterVar a, TypeParameterVar b) = default;
 };
 
 struct TypeDeductionVar
 {
 	uint32_t id;
+
+	friend bool operator == (TypeDeductionVar a, TypeDeductionVar b) = default;
 };
 
-using VarType = variant<TypeParameterVar const*, TypeDeductionVar const*>;
+using VarType = variant<TypeParameterVar, TypeDeductionVar>;
 
 using Type = variant
 <
@@ -330,6 +333,27 @@ string str(Type const &type, Module const &mod);
 TokenRange token_range_of(Type const &type);
 
 static_assert(sizeof(Type) == 48, "sizeof(Type) is getting larger...");
+template<>
+struct std::hash<::VarType>
+{
+	size_t operator () (::VarType var) const
+	{
+		size_t h = ::compute_hash(var.index());
+		var | ::match
+		{
+			[&](TypeParameterVar v)
+			{
+				::combine_hashes(h, ::compute_hash(v.def));
+			},
+			[&](TypeDeductionVar v)
+			{
+				::combine_hashes(h, ::compute_hash(v.id));
+			},
+		};
+
+		return h;
+	}
+};
 
 template<>
 struct std::hash<Type>
@@ -350,12 +374,7 @@ struct std::hash<Type>
 			},
 			[&](VarType const &t)
 			{
-				::combine_hashes(h, compute_hash(t.index()));
-				t | match
-				{
-					[&](TypeParameterVar const *var) { combine_hashes(h, compute_hash(var)); },
-					[&](TypeDeductionVar const *var) { combine_hashes(h, compute_hash(var)); },
-				};
+				::combine_hashes(h, compute_hash(t));
 			},
 			[&](PointerType const &t)
 			{
