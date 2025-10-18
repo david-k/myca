@@ -1,4 +1,5 @@
-// Foo contains Bar which contains Baz which contains Foo again
+// Foo contains Bar which contains Baz which contains Foo again.
+// This should cause an error even without instantiating any of these types.
 
 struct Foo'T
 {

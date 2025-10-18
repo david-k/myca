@@ -116,8 +116,8 @@ if not myca_bin.exists():
     print("Build myca before running tests")
     sys.exit(1)
 
-num_successful = 0
-num_errors = 0
+num_successes = 0
+num_failures = 0
 for test_src_dir in sorted((project_dir / "tests").iterdir()):
     if not test_src_dir.is_dir() or test_src_dir.name in TESTS_TO_IGNORE:
         continue
@@ -125,13 +125,13 @@ for test_src_dir in sorted((project_dir / "tests").iterdir()):
     test_build_dir = build_dir / "tests" / test_src_dir.name
     test_build_dir.mkdir(parents = True, exist_ok = True)
     if run_test(test_src_dir, test_build_dir, myca_bin):
-        num_successful += 1
+        num_successes += 1
     else:
-        num_errors += 1
+        num_failures += 1
 
 print("------------------------------")
-print(f"{num_successful} tests succeeded, {num_errors} failed, {len(TESTS_TO_IGNORE)} ignored")
+print(f"{num_successes} tests succeeded, {num_failures} failed, {len(TESTS_TO_IGNORE)} ignored")
 print()
 
-if num_errors > 0:
+if num_failures > 0:
     sys.exit(1)

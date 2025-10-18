@@ -278,12 +278,9 @@ Expr clone(Expr const &expr, Arena &arena)
 		},
 		[&](ProcExpr const &e) -> Expr
 		{
-			// TODO If the ProcInstance has type deduction vars we need to clone it
-			assert(not e.inst->type_args().has_type_deduction_vars);
-
 			return ProcExpr{
 				.range = e.range,
-				.inst = e.inst, // TODO May need to be cloned
+				.inst = e.inst,
 				.type = clone_ptr(e.type, arena),
 			};
 		},
@@ -2137,7 +2134,10 @@ static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registr
 	type | match
 	{
 		[&](BuiltinType&) {},
-		[&](KnownIntType&) {},
+		[&](KnownIntType &t)
+		{
+			type = materialize_known_int(t);
+		},
 		[&](PointerType &t)
 		{
 			substitute(*t.pointee, env, registry);
@@ -2179,9 +2179,6 @@ static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registr
 				// This is not how substitution is traditionally defined for e.g. first-order logic,
 				// but is easier to implement. See note for the unify() function.
 				substitute(type, env, registry);
-
-				if(KnownIntType const *known_int = std::get_if<KnownIntType>(&type))
-					type = materialize_known_int(*known_int);
 			}
 		},
 		[&](ProcTypeUnresolved const&) { UNREACHABLE; },
@@ -2721,10 +2718,8 @@ enum class UnificationMode
 
 	POINTER_ASSIGNMENT,
 
-	// Find a common type while treating both sides equally. The common type might differ from both
-	// the left and the right side (e.g., unifying i8 and u8 yields i16).
-	// This is the least-upper bound to which both sides are assignable.
-	COMMON_TYPE,
+	// Either make the LHS equal to the RHS, or the other way around
+	EQUATABLE,
 
 	EQUAL,
 };
@@ -2747,8 +2742,8 @@ static void unify(
 			throw ParseError("Cannot assign " + str(right, *mod) + " to " + str(left, *mod));
 
 		case UnificationMode::EQUAL:
-		case UnificationMode::COMMON_TYPE:
-			throw ParseError("Got " + str(right, *mod) + " and " + str(left, *mod));
+		case UnificationMode::EQUATABLE:
+			throw ParseError("Got " + str(left, *mod) + " and " + str(right, *mod));
 	}
 
 	UNREACHABLE;
@@ -2770,7 +2765,7 @@ static bool try_unify_integer_types(Type const &left, Type const &right, Unifica
 	{
 		case UnificationMode::VALUE_ASSIGNMENT:
 		{
-			if(std::get_if<KnownIntType>(&left)) {
+			if(std::holds_alternative<KnownIntType>(left)) {
 				// Always okay
 			}
 			else
@@ -2780,24 +2775,34 @@ static bool try_unify_integer_types(Type const &left, Type const &right, Unifica
 			}
 		} break;
 
-		case UnificationMode::COMMON_TYPE:
-			// Nothing left to do
-			break;
+		case UnificationMode::EQUATABLE:
+		{
+			if(std::holds_alternative<KnownIntType>(left) and std::holds_alternative<KnownIntType>(right))
+			{
+				// Always okay
+				// TODO Not if they are ISIZE_MIN and ISIZE_MAX
+			}
+			else
+			{
+				if(not equiv(left, *common_type) and not equiv(right, *common_type))
+					throw_unification_error(left, right, mode, ctx.mod);
+			}
+		} break;
 
 		case UnificationMode::POINTER_ASSIGNMENT:
 		case UnificationMode::EQUAL:
 		{
-			if(std::get_if<KnownIntType>(&left) or std::get_if<KnownIntType>(&right))
+			if(std::holds_alternative<KnownIntType>(left) or std::holds_alternative<KnownIntType>(right))
 			{
-				// Two KnownIntTypes always have a common type (TODO not if they are ISIZE_MIN and
-				// ISIZE_MAX)
+				// If either left or right is a KnownIntType, then because they have a common type
+				// we can consider them equal
+
+				// If both left and right are KnownIntTypes then they always have a common type
+				// TODO Not if they are ISIZE_MIN and ISIZE_MAX
 			}
 			else
 			{
-				if(not equiv(left, *common_type))
-					throw_unification_error(left, right, mode, ctx.mod);
-
-				if(not equiv(right, *common_type))
+				if(not equiv(left, right))
 					throw_unification_error(left, right, mode, ctx.mod);
 			}
 		} break;
@@ -3060,9 +3065,9 @@ static bool try_unify_structs(
 			}
 		} break;
 
-		case UnificationMode::COMMON_TYPE:
+		case UnificationMode::EQUATABLE:
 		{
-			assert(!"[TODO] try_unify_structs: COMMON_TYPE");
+			assert(!"[TODO] try_unify_structs: EQUATABLE");
 		} break;
 
 		case UnificationMode::EQUAL:
@@ -3105,9 +3110,9 @@ static void unify_pointers(
 			assert(!"[TODO] unify_pointers: POINTER_ASSIGNMENT");
 		} break;
 
-		case UnificationMode::COMMON_TYPE:
+		case UnificationMode::EQUATABLE:
 		{
-			assert(!"[TODO] unify_pointers: COMMON_TYPE");
+			assert(!"[TODO] unify_pointers: EQUATABLE");
 		} break;
 
 		case UnificationMode::EQUAL:
@@ -3126,7 +3131,8 @@ static void unify_pointers(
 // See
 // - https://eli.thegreenplace.net/2018/unification/
 //   - The presented algorithm seems to be incorrect, or at least does not match the usual
-//     definition for first-order logic. Assume we want to unify the following formulas:
+//     definition for first-order logic. For example, assume we want to unify the following
+//     formulas:
 //
 //       f(x, y)
 //       f(y, c)
@@ -3136,7 +3142,7 @@ static void unify_pointers(
 //
 //       subst_eli = [x ↦ y, y ↦ c]
 //
-//     However, the correct one would be:
+//     However, the traditional algorithm for FOL would result in
 //
 //       subst_fol = [x ↦ c, y ↦ c]
 //
@@ -3151,8 +3157,6 @@ static void unify_pointers(
 //     As one can see, subst_eli did not actually unify the formulas. Eli's algorithm still seems to
 //     work though because he *does* apply substitutions recursively. However, I don't know if this
 //     has any other consequences.
-//
-//     Still, I'm following Eli here because it's easy to implement and seems to work for now.
 //
 // - https://www.cs.cornell.edu/courses/cs3110/2011sp/Lectures/lec26-type-inference/type-inference.htm
 //
@@ -3629,7 +3633,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 			{
 				case UnaryOp::NOT:
 				{
-					Type const *sub_type = typecheck_subexpr(*e.sub, TypingHint(), ctx);
+					Type const *sub_type = typecheck_subexpr(*e.sub, hint.without_type(), ctx);
 					if(not is_bool(*sub_type))
 						throw_sem_error("Expected expression of type bool", e.range.first, ctx.mod);
 
@@ -3659,11 +3663,11 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 				case BinaryOp::MUL:
 				case BinaryOp::DIV:
 				{
-					Type const *left_type = typecheck_subexpr(*e.left, hint.without_type(), ctx);
-					Type const *right_type = typecheck_subexpr(*e.right, hint.without_type(), ctx);
+					Type const *left_type = typecheck_subexpr(*e.left, hint, ctx);
+					Type const *right_type = typecheck_subexpr(*e.right, hint, ctx);
 
 					try { 
-						unify(*left_type, *right_type, *hint.subst, UnificationMode::COMMON_TYPE, ctx);
+						unify(*left_type, *right_type, *hint.subst, UnificationMode::EQUATABLE, ctx);
 					} catch(ParseError const &exc) {
 						throw_sem_error("Invalid arguments for binary operation: "s + exc.what(), e.range.first, ctx.mod);
 					}
@@ -3736,7 +3740,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 					Type const *right_type = typecheck_subexpr(*e.right, hint.without_type(), ctx);
 
 					try {
-						unify(*left_type, *right_type, *hint.subst, UnificationMode::COMMON_TYPE, ctx);
+						unify(*left_type, *right_type, *hint.subst, UnificationMode::EQUATABLE, ctx);
 					}
 					catch(ParseError const &exc) {
 						throw_sem_error("Comparison operator requires compatible types: "s + exc.what(), e.range.first, ctx.mod);
@@ -3782,7 +3786,7 @@ static Type* typecheck_subexpr(Expr &expr, TypingHint hint, SemaContext &ctx)
 
 			ManyPointerType const *addr_ptr_type = std::get_if<ManyPointerType>(addr_type);
 			if(not addr_ptr_type)
-				throw_sem_error("Expected many pointer type for indexing", token_range_of(*e.addr).first, ctx.mod);
+				throw_sem_error("Expected many pointer type for indexing, got " + str(*addr_type, *ctx.mod), token_range_of(*e.addr).first, ctx.mod);
 
 			if(not is_integer_type(*index_type))
 				throw_sem_error("Index expression must be of integer type", token_range_of(*e.index).first, ctx.mod);
@@ -3951,9 +3955,8 @@ static Type const* typecheck_expr(Expr &expr, SemaContext &ctx)
 {
 	TypeEnv subst;
 	Type const *type = typecheck_subexpr(expr, TypingHint(&subst), ctx);
-
-	if(not subst.empty())
-		substitute_types_in_expr(expr, subst, ctx.mod->sema->insts);
+	subst.materialize();
+	substitute_types_in_expr(expr, subst, ctx.mod->sema->insts);
 
 	return type;
 }
@@ -3995,11 +3998,7 @@ static Type const* typecheck_pattern(
 	{
 		[&](VarPattern &p)
 		{
-			if(KnownIntType const *known_int = std::get_if<KnownIntType>(expected_type))
-				p.var->type = ctx.arena.alloc<Type>(materialize_known_int(*known_int));
-			else
-				p.var->type = clone_ptr(expected_type, ctx.arena);
-
+			p.var->type = clone_ptr(expected_type, ctx.arena);
 			return p.type = clone_ptr(p.var->type, ctx.arena);
 		},
 		[&](DerefPattern &p)
@@ -4161,11 +4160,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 		},
 		[&](IfStmt const &s)
 		{
-			TypeEnv subst;
-			Type const *condition_type = typecheck_subexpr(*s.condition, TypingHint(&subst), ctx);
-			subst.materialize();
-			substitute_types_in_expr(*s.condition, subst, ctx.mod->sema->insts);
-
+			Type const *condition_type = typecheck_expr(*s.condition, ctx);
 			if(not is_builtin_type(*condition_type, BuiltinTypeDef::BOOL))
 				throw_sem_error("If-condition must be boolean", s.range.first, ctx.mod);
 
@@ -4175,11 +4170,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 		},
 		[&](WhileStmt const &s)
 		{
-			TypeEnv subst;
-			Type const *condition_type = typecheck_subexpr(*s.condition, TypingHint(&subst), ctx);
-			subst.materialize();
-			substitute_types_in_expr(*s.condition, subst, ctx.mod->sema->insts);
-
+			Type const *condition_type = typecheck_expr(*s.condition, ctx);
 			if(not is_builtin_type(*condition_type, BuiltinTypeDef::BOOL))
 				throw_sem_error("While-condition must be boolean", s.range.first, ctx.mod);
 
@@ -4187,8 +4178,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 		},
 		[&](MatchStmt const &s)
 		{
-			TypeEnv subst;
-			Type const *expr_type = typecheck_subexpr(*s.expr, TypingHint(&subst), ctx);
+			Type const *expr_type = typecheck_expr(*s.expr, ctx);
 			*expr_type | match
 			{
 				[&](StructType const &struct_type)
@@ -4203,9 +4193,9 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 						if(has_wildcard)
 							throw_sem_error("Pattern is following wildcard pattern and is therefore unreachable", token_range_of(arm.capture).first, ctx.mod);
 
-						TypeEnv subst;
-						typecheck_pattern(arm.capture, *type_of(*s.expr), is_lvalue_expr(*s.expr), false, subst, ctx);
-						substitute_types_in_pattern(arm.capture, subst, ctx.mod->sema->insts);
+						TypeEnv subst_arm;
+						typecheck_pattern(arm.capture, *type_of(*s.expr), is_lvalue_expr(*s.expr), false, subst_arm, ctx);
+						substitute_types_in_pattern(arm.capture, subst_arm, ctx.mod->sema->insts);
 
 						if(is<WildcardPattern>(arm.capture))
 							has_wildcard = true;

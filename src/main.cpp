@@ -58,7 +58,7 @@ int main(int, char *argv[])
 			{
 				arg_verbose = true;
 			}
-			else if(*argv == "--log-events"sv)
+			else if(*argv == "--enable-log"sv)
 			{
 				if(!NEXT(argv))
 				{
