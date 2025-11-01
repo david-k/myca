@@ -6,8 +6,8 @@ project(myca)
 	add_compile_options(-Wall -Wextra -Wpedantic -std=c++23)
 
 	if(USE_SANITIZERS)
-		add_link_options(-fsanitize=address -fsanitize=undefined)
-		add_compile_options(-fsanitize=address -fsanitize=undefined)
+		add_link_options(-fsanitize=address,undefined)
+		add_compile_options(-fsanitize=address,undefined)
 	endif()
 
 	add_executable(myca

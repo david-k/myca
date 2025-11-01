@@ -135,12 +135,6 @@ struct Token
 string_view str(Lexeme tok);
 inline string str(SourceLocation loc) { return std::to_string(loc.line) + ":" + std::to_string(loc.col); }
 
-
-//==============================================================================
-// AST
-//==============================================================================
-struct Module;
-
 struct TokenIdx { uint32_t value; };
 struct TokenRange { TokenIdx first{}, last{}; };
 
@@ -148,10 +142,16 @@ static constexpr TokenIdx INVALID_TOKEN_IDX = TokenIdx(-1);
 static constexpr TokenRange UNKNOWN_TOKEN_RANGE = TokenRange(INVALID_TOKEN_IDX, INVALID_TOKEN_IDX);
 
 
+//==============================================================================
+// AST
+//==============================================================================
+
 //--------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------
+struct Module;
 class StructInstance;
+class ProcInstance;
 struct UnionInstance;
 struct ProcTypeInstance;
 struct TypeParameter;
@@ -167,6 +167,8 @@ struct TypeParameterVar
 struct TypeDeductionVar
 {
 	uint32_t id;
+
+	friend bool operator == (TypeDeductionVar, TypeDeductionVar) = default;
 };
 
 using VarType = variant<TypeParameterVar, TypeDeductionVar>;
@@ -176,7 +178,6 @@ using Type = variant
 	struct BuiltinType,
 	struct KnownIntType,
 	struct PointerType,
-	struct ManyPointerType,
 	struct ProcType,
 	struct StructType,
 	struct UnionType,
@@ -228,14 +229,14 @@ enum class IsMutable
 
 struct PointerType
 {
-	TokenRange range;
-	Type *pointee;
-	IsMutable mutability;
-};
+	enum Kind
+	{
+		SINGLE,
+		MANY,
+	};
 
-struct ManyPointerType
-{
 	TokenRange range;
+	Kind kind;
 	Type *pointee;
 	IsMutable mutability;
 };
@@ -290,14 +291,6 @@ struct DefaultValueExpr : variant<NoDefaultValue, ExprPending, Expr*>
 			[](auto) { return true; },
 		};
 	}
-
-	DefaultValueExpr clone(Arena &arena) const;
-};
-
-struct ProcTypeParamAux
-{
-	string_view name;
-	DefaultValueExpr default_value;
 };
 
 struct ProcType
@@ -307,7 +300,7 @@ struct ProcType
 
 	// This is used for typechecking procedure/constructor calls, but is irrelevant for deciding
 	// whether two ProcTypes are equal.
-	variant<class ProcInstance*, class StructInstance*> callable;
+	variant<ProcInstance*, StructInstance*> callable;
 
 	size_t param_count() const;
 	Type* param_type_at(size_t idx) const;
@@ -322,14 +315,16 @@ struct StructType
 	StructInstance *inst;
 };
 
+static_assert(sizeof(Type) == 48, "sizeof(Type) is getting larger...");
 
 string_view name_of(Path const &path, Module const *mod);
 void print(Path const &path, Module const &mod, std::ostream &os);
+void print(VarType const &var, std::ostream &os);
 void print(Type const &type, Module const &mod, std::ostream &os);
 string str(Type const &type, Module const &mod);
 TokenRange token_range_of(Type const &type);
 
-static_assert(sizeof(Type) == 48, "sizeof(Type) is getting larger...");
+
 template<>
 struct std::hash<::VarType>
 {
@@ -387,11 +382,7 @@ struct std::hash<Type>
 			},
 			[&](PointerType const &t)
 			{
-				::combine_hashes(h, compute_hash((int)t.mutability));
-				::combine_hashes(h, compute_hash(*t.pointee));
-			},
-			[&](ManyPointerType const &t)
-			{
+				::combine_hashes(h, compute_hash((int)t.kind));
 				::combine_hashes(h, compute_hash((int)t.mutability));
 				::combine_hashes(h, compute_hash(*t.pointee));
 			},
@@ -846,7 +837,7 @@ struct ProcItem
 	Stmt *NULLABLE body = nullptr;
 	bool is_extern = false;
 
-	Proc *NULLABLE sema = nullptr;
+	Proc *NULLABLE sema = nullptr; // Available after semantic analysis
 };
 
 using Member = variant<Parameter, struct StructItem*>;
@@ -860,12 +851,12 @@ struct StructItem
 	bool is_implicit = false;
 	bool ctor_without_parens = false;
 	bool is_extern = false;
-
 	int num_case_members = 0;
-	Struct *NULLABLE sema = nullptr;
 
 	int num_var_members() const { return members->count - num_case_members; }
 	bool has_constructor() const { return num_case_members == 0; }
+
+	Struct *NULLABLE sema = nullptr; // Available after semantic analysis
 };
 
 struct AliasItem
@@ -875,7 +866,7 @@ struct AliasItem
 	FixedArray<TypeParameter> *type_params = nullptr;
 	Type *aliased_type;
 
-	Alias *NULLABLE sema = nullptr;
+	Alias *NULLABLE sema = nullptr; // Available after semantic analysis
 };
 
 using TopLevelItem = variant<
@@ -930,9 +921,9 @@ struct Module
 	List<TopLevelItem> *items;
 	vector<Token> tokens;
 	string_view source;
+	optional<EventLogger> logger{};
 
-	std::unique_ptr<SemaModule> NULLABLE sema;
-	optional<EventLogger> NULLABLE logger{};
+	std::unique_ptr<SemaModule> NULLABLE sema{}; // Available after semantic analysis
 };
 
 

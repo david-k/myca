@@ -1,0 +1,41 @@
+struct c_char
+{
+    _: i8,
+}
+
+extern proc fatal(msg: [^]c_char) -> Unit;
+
+proc main() -> i32
+{
+    let opt: Option'(isize) = Option'(isize).Some(3);
+    let i: i32 = (unwrap'(isize)(opt) as i32);
+    return i;
+}
+
+struct Option'(T)
+{
+    case Some
+    {
+        value: T,
+    },
+    case None {},
+}
+
+typealias Some'(T) = Option'(T).Some;
+
+typealias None'(T) = Option'(T).None;
+
+proc unwrap'(T)(opt: Option'(T)) -> T
+{
+    match opt
+    {
+        case Option'(T).Some(value: T)
+        {
+            return value;
+        }
+        case Option'(T).None()
+        {
+            fatal(c"empty option");
+        }
+    }
+}

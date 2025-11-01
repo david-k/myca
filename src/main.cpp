@@ -39,7 +39,8 @@ int main(int, char *argv[])
 	optional<string> arg_input_filename;
 	optional<string> arg_output_filename;
 	optional<string> arg_event_log_filename;
-	bool arg_verbose = false;
+	bool arg_print_types = false;
+	bool arg_print_stats = false;
 
 	// Parse arguments
 	{
@@ -54,9 +55,13 @@ int main(int, char *argv[])
 				}
 				arg_output_filename = *argv;
 			}
-			else if(*argv == "-v"sv)
+			else if(*argv == "--print-types"sv)
 			{
-				arg_verbose = true;
+				arg_print_types = true;
+			}
+			else if(*argv == "--print-stats"sv)
+			{
+				arg_print_stats = true;
 			}
 			else if(*argv == "--enable-log"sv)
 			{
@@ -118,7 +123,7 @@ int main(int, char *argv[])
 		}
 
 		sema(mod, main_arena);
-		if(arg_verbose)
+		if(arg_print_types)
 			print(mod, std::cout);
 
 		std::stringstream c_code;
@@ -128,7 +133,7 @@ int main(int, char *argv[])
 		std::ofstream c_file(*arg_output_filename);
 		c_file << c_code.str();
 
-		if(arg_verbose)
+		if(arg_print_stats)
 		{
 			std::cout << "==================================================" << std::endl;
 			std::cout << "Memory usage (arena): " << ((char*)main_arena.current_ptr() - memory.get()) << std::endl;

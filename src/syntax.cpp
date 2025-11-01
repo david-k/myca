@@ -194,6 +194,21 @@ void print_struct_type(StructInstance const *inst, Module const &mod, std::ostre
 	print_type_args(inst->type_args().args, mod, os);
 }
 
+void print(VarType const &var, std::ostream &os)
+{
+	var | match
+	{
+		[&](TypeParameterVar v)
+		{
+			os << v.def->name;
+		},
+		[&](TypeDeductionVar v)
+		{
+			os << "?_" << v.id;
+		},
+	};
+}
+
 void print(Type const &type, Module const &mod, std::ostream &os)
 {
 	type | match
@@ -208,15 +223,11 @@ void print(Type const &type, Module const &mod, std::ostream &os)
 		},
 		[&](PointerType const &t)
 		{
-			os << "^";
-			if(t.mutability == IsMutable::YES)
-				os << "mut ";
+			if(t.kind == PointerType::SINGLE)
+				os << "^";
+			else
+				os << "[^]";
 
-			print(*t.pointee, mod, os);
-		},
-		[&](ManyPointerType const &t)
-		{
-			os << "[^]";
 			if(t.mutability == IsMutable::YES)
 				os << "mut ";
 
@@ -253,17 +264,7 @@ void print(Type const &type, Module const &mod, std::ostream &os)
 		},
 		[&](VarType const &t)
 		{
-			t | match
-			{
-				[&](TypeParameterVar v)
-				{
-					os << v.def->name;
-				},
-				[&](TypeDeductionVar v)
-				{
-					os << "?_" << v.id;
-				},
-			};
+			print(t, os);
 		},
 	};
 }
@@ -772,6 +773,42 @@ TokenRange token_range_from(Expr const &expr, Parser const &parser)
 	return TokenRange{token_range_of(expr).first, parser.prev_tok_idx()};
 }
 
+size_t ProcType::param_count() const
+{
+	return callable | match
+	{
+		[&](ProcInstance *proc) { return proc->get_param_count(); },
+		[&](StructInstance *struct_) { return struct_->get_param_count(); },
+	};
+}
+
+Type* ProcType::param_type_at(size_t idx) const
+{
+	return callable | match
+	{
+		[&](ProcInstance *proc) { return proc->get_param_type_at(idx); },
+		[&](StructInstance *struct_) { return struct_->get_ctor_param_type_at(idx); },
+	};
+}
+
+string_view ProcType::param_name_at(size_t idx) const
+{
+	return callable | match
+	{
+		[&](ProcInstance *proc) { return proc->get_param_name_at(idx); },
+		[&](StructInstance *struct_) { return struct_->get_ctor_param_name_at(idx); },
+	};
+}
+
+DefaultValueExpr ProcType::param_default_value_at(size_t idx) const
+{
+	return callable | match
+	{
+		[&](ProcInstance *proc) { return proc->get_param_default_value(idx); },
+		[&](StructInstance *struct_) { return struct_->get_ctor_param_default_value(idx); },
+	};
+}
+
 
 //==============================================================================
 // Lexing
@@ -1272,6 +1309,7 @@ static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 			Type pointee = parse_prefix_type(parser, M);
 			return PointerType(
 				ranger.get(),
+				PointerType::SINGLE,
 				M.main->alloc<Type>(pointee),
 				mutability
 			);
@@ -1283,8 +1321,9 @@ static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 			consume(parser, Lexeme::RIGHT_BRACKET);
 			IsMutable mutability = try_consume(parser, Lexeme::MUT) ? IsMutable::YES : IsMutable::NO;
 			Type pointee = parse_prefix_type(parser, M);
-			return ManyPointerType(
+			return PointerType(
 				ranger.get(),
+				PointerType::MANY,
 				M.main->alloc<Type>(pointee),
 				mutability
 			);
@@ -1636,6 +1675,8 @@ namespace
 					if(try_consume(parser, Lexeme::DOT))
 					{
 						arg.name = consume_identifier(parser);
+
+						// TODO Let's try switching to `.arg: default_val`
 						consume(parser, Lexeme::EQ);
 					}
 
@@ -1718,98 +1759,94 @@ Expr parse_expr(Parser &parser, Memory M)
 //--------------------------------------------------------------------
 // Patterns
 //--------------------------------------------------------------------
-namespace
-{
-	Pattern parse_pattern(Parser &parser, Memory M);
+static Pattern parse_pattern(Parser &parser, Memory M);
 
-	Pattern parse_primary_pattern(Parser &parser, Memory M)
+static Pattern parse_primary_pattern(Parser &parser, Memory M)
+{
+	TokenRanger ranger(parser);
+	switch(parser.tok().kind)
 	{
-		TokenRanger ranger(parser);
-		switch(parser.tok().kind)
+		case Lexeme::LET:
 		{
-			case Lexeme::LET:
+			parser.next();
+			IsMutable mutability = IsMutable::NO;
+			if(try_consume(parser, Lexeme::MUT))
+				mutability = IsMutable::YES;
+
+			string_view ident = consume_identifier(parser);
+			return Pattern(VarPatternUnresolved(ranger.get(), ident, mutability), nullptr);
+		}
+
+		case Lexeme::IDENTIFIER:
+		{
+			if(text_of(parser.tok(), parser.source) == "_")
 			{
 				parser.next();
-				IsMutable mutability = IsMutable::NO;
-				if(try_consume(parser, Lexeme::MUT))
-					mutability = IsMutable::YES;
-
-				string_view ident = consume_identifier(parser);
-				return Pattern(VarPatternUnresolved(ranger.get(), ident, mutability), nullptr);
+				return Pattern(WildcardPattern(ranger.get()), nullptr);
 			}
 
-			case Lexeme::IDENTIFIER:
+			Type ctor = parse_type(parser, M);
+
+			bool has_parens = false;
+			ListBuilder<PatternArgument> args(M.temp);
+			if(try_consume(parser, Lexeme::LEFT_PAREN))
 			{
-				if(text_of(parser.tok(), parser.source) == "_")
+				has_parens = true;
+				while(parser.peek() != Lexeme::RIGHT_PAREN)
 				{
-					parser.next();
-					return Pattern(WildcardPattern(ranger.get()), nullptr);
+					args.append(PatternArgument{
+						.pattern = parse_pattern(parser, M),
+						.param_name = {},
+					});
+					if(parser.peek() != Lexeme::RIGHT_PAREN)
+						consume(parser, Lexeme::COMMA);
 				}
-
-				Type ctor = parse_type(parser, M);
-
-				bool has_parens = false;
-				ListBuilder<PatternArgument> args(M.temp);
-				if(try_consume(parser, Lexeme::LEFT_PAREN))
-				{
-					has_parens = true;
-					while(parser.peek() != Lexeme::RIGHT_PAREN)
-					{
-						args.append(PatternArgument{
-							.pattern = parse_pattern(parser, M),
-							.param_name = {},
-						});
-						if(parser.peek() != Lexeme::RIGHT_PAREN)
-							consume(parser, Lexeme::COMMA);
-					}
-					consume(parser, Lexeme::RIGHT_PAREN);
-				}
-
-				return Pattern(
-					ConstructorPattern(
-						ranger.get(),
-						M.main->alloc<Type>(ctor),
-						args.to_array(*M.main),
-						has_parens
-					),
-					nullptr
-				);
+				consume(parser, Lexeme::RIGHT_PAREN);
 			}
 
-			default:
-				throw_parse_error("Invalid lexeme while parsing pattern", ranger.first, parser);
+			return Pattern(
+				ConstructorPattern(
+					ranger.get(),
+					M.main->alloc<Type>(ctor),
+					args.to_array(*M.main),
+					has_parens
+				),
+				nullptr
+			);
 		}
-	}
 
-	Pattern parse_pattern(Parser &parser, Memory M)
+		default:
+			throw_parse_error("Invalid lexeme while parsing pattern", ranger.first, parser);
+	}
+}
+
+static Pattern parse_pattern(Parser &parser, Memory M)
+{
+	TokenRanger ranger(parser);
+	Pattern p = parse_primary_pattern(parser, M);
+	for(;;)
 	{
-		TokenRanger ranger(parser);
-		Pattern p = parse_primary_pattern(parser, M);
-		for(;;)
+		if(try_consume(parser, Lexeme::CIRCUMFLEX))
+			p = Pattern(DerefPattern(ranger.get(), M.main->alloc<Pattern>(p)), nullptr);
+	
+		else if(try_consume(parser, Lexeme::AMPERSAND))
 		{
-			if(try_consume(parser, Lexeme::CIRCUMFLEX))
-				p = Pattern(DerefPattern(ranger.get(), M.main->alloc<Pattern>(p)), nullptr);
-		
-			else if(try_consume(parser, Lexeme::AMPERSAND))
-			{
-				IsMutable mutability = IsMutable::NO;
-				if(try_consume(parser, Lexeme::MUT))
-					mutability = IsMutable::YES;
+			IsMutable mutability = IsMutable::NO;
+			if(try_consume(parser, Lexeme::MUT))
+				mutability = IsMutable::YES;
 
-				p = Pattern(AddressOfPattern(ranger.get(), M.main->alloc<Pattern>(p), mutability), nullptr);
-			}
-
-			else if(try_consume(parser, Lexeme::COLON))
-				p.provided_type = M.main->alloc<Type>(parse_type(parser, M));
-
-			else
-				break;
+			p = Pattern(AddressOfPattern(ranger.get(), M.main->alloc<Pattern>(p), mutability), nullptr);
 		}
 
-		return p;
+		else if(try_consume(parser, Lexeme::COLON))
+			p.provided_type = M.main->alloc<Type>(parse_type(parser, M));
+
+		else
+			break;
 	}
 
-} // anonymous namespace
+	return p;
+}
 
 
 //--------------------------------------------------------------------
@@ -2155,5 +2192,5 @@ Module parse_module(string_view source, Memory M)
 		items.append(std::move(item));
 	}
 
-	return Module(items.list(), std::move(tokens), source, nullptr);
+	return Module(items.list(), std::move(tokens), source);
 }

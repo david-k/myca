@@ -232,15 +232,7 @@ static string mangle_type_segment(Type const &type)
 		[&](VarType const&) -> string { assert(!"mangle_type_segment: VarType"); },
 		[&](PointerType const &t)
 		{
-			string mangled = "P";
-			if(t.mutability == IsMutable::YES)
-				mangled += "m";
-
-			return mangled + mangle_type_segment(*t.pointee);
-		},
-		[&](ManyPointerType const &t)
-		{
-			string mangled = "M";
+			string mangled = t.kind == PointerType::SINGLE ? "P" : "M";
 			if(t.mutability == IsMutable::YES)
 				mangled += "m";
 
@@ -325,14 +317,6 @@ static string generate_c_to_str(Type const &type)
 		[&](BuiltinType const &t) { return generate_c_to_str(t.builtin); },
 		[&](VarType const&) -> string { assert(!"generate_c_to_str: VarType"); },
 		[&](PointerType const &t)
-		{
-			string type_str = generate_c_to_str(*t.pointee);
-			if(t.mutability == IsMutable::NO)
-				type_str += " const";
-
-			return type_str + "*";
-		},
-		[&](ManyPointerType const &t)
 		{
 			string type_str = generate_c_to_str(*t.pointee);
 			if(t.mutability == IsMutable::NO)
@@ -602,7 +586,7 @@ void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type
 		[&](AddressOfPattern const &p)
 		{
 			string addr_expr = generate_c_cast(
-				PointerType(UNKNOWN_TOKEN_RANGE, &const_cast<Type&>(rhs_type), p.mutability),
+				PointerType(UNKNOWN_TOKEN_RANGE, PointerType::SINGLE, &const_cast<Type&>(rhs_type), p.mutability),
 				"&(" + rhs_expr + ")",
 				*p.type
 			);

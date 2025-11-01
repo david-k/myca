@@ -1,7 +1,9 @@
-
+//------------------------------------------------------------------------------
+//struct List^T
 struct List'T
 {
 	value: T,
+	//next: ?'List^T = None,
 	next: ?^List'T = None,
 }
 
@@ -28,6 +30,11 @@ proc main() -> i32
 			}
 		}
 	}
+
+	//while cur_opt != None {
+	//	sum := sum + cur!'.value;
+	//	cur := cur!'.next;
+	//}
 
 	return sum;
 }

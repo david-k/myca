@@ -1,0 +1,55 @@
+// This test is rather specific to the current implementation. It checks that certain operations
+// (indexing, dereferencing and member access) work even if the type of the object has not been
+// deduced yet.
+
+struct c_void { _: Never }
+extern proc malloc(size: usize) -> ^mut c_void;
+extern proc free(ptr: ^mut c_void);
+
+proc id'T(v: T) -> T
+{
+	return v;
+}
+
+
+proc test_indexing() -> i32
+{
+	let arr = malloc(size_of(i32) * 1) as [^]mut i32;
+	id(arr)[0] := 54;
+
+	// Here we apply the index operator on `id(arr)` whose type is not yet deduced when the index
+	// operator is type-checked.
+	let val = id(arr)[0];
+	free(arr as ^mut c_void);
+
+	return val;
+}
+
+proc test_dereferencing() -> i32
+{
+	let ptr = malloc(size_of(i32)) as ^mut i32;
+	id(ptr)^ := 23;
+
+	// The same as above, except for the derefence operator
+	let val = id(ptr)^;
+	free(ptr as ^mut c_void);
+
+	return val;
+}
+
+proc test_member_access() -> i32
+{
+	let f = Foo(42);
+
+	// The same as above, except for member access
+	return id(f).i;
+}
+
+
+proc main() -> i32
+{
+	return test_indexing() + test_dereferencing() + test_member_access();
+}
+
+
+struct Foo { i: i32 }

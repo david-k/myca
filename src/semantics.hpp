@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <bits/elements_of.h>
 #include <memory>
+#include <ostream>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -62,42 +64,10 @@ struct Var
 
 
 //==============================================================================
-// Instance registry
+// Type environment
 //==============================================================================
-class InstanceRegistry;
-
-Type materialize_known_int(KnownIntType known_int);
-
-
-struct TypeArgList
-{
-	// Fully resolved and must not contain KnownIntTypes
-	FixedArray<Type> *args;
-
-	unordered_set<VarType> occurring_vars{};
-	bool has_type_deduction_vars = false;
-};
-
-struct MemoryLayout
-{
-	size_t size{};
-	size_t alignment{};
-
-	size_t extend(MemoryLayout other)
-	{
-		// Offset to ensure proper alignment
-		size_t offset = 0;
-		if(other.alignment > 0 && size % other.alignment)
-			offset = other.alignment - (size % other.alignment); 
-
-		size += offset + other.size;
-		alignment = std::max(alignment, other.alignment);
-
-		return size - other.size;
-	}
-};
-
 bool type_var_occurs_in(VarType var, Type const &type);
+Type materialize_known_int(KnownIntType known_int);
 
 class TypeEnv
 {
@@ -137,19 +107,81 @@ public:
 
 	bool empty() const { return m_env.empty(); }
 
-	void materialize()
+	unordered_map<VarType, Type> const& env() const { return m_env; }
+
+	void print(std::ostream &os, Module const &mod)
 	{
-		for(auto &[_, type]: m_env)
+		vector<std::pair<VarType, Type const*>> sorted;
+		for(auto const &[var, type]: m_env)
+			sorted.push_back({var, &type});
+
+		std::ranges::sort(sorted, [](auto const &a, auto const &b)
 		{
-			if(KnownIntType const *known_int = std::get_if<KnownIntType>(&type))
-				type = materialize_known_int(*known_int);
+			VarType va = a.first;
+			VarType vb = b.first;
+
+			if(va.index() < vb.index())
+				return true;
+
+			return va | match
+			{
+				[&](TypeParameterVar p)
+				{
+					return p.def->name < std::get<TypeParameterVar>(vb).def->name;
+				},
+				[&](TypeDeductionVar d)
+				{
+					return d.id < std::get<TypeDeductionVar>(vb).id;
+				}
+			};
+		});
+
+		for(auto const &[var, type]: sorted)
+		{
+			::print(var, os);
+			os << " ==> ";
+			::print(*type, mod, os);
+			os << std::endl;
 		}
 	}
 
-	unordered_map<VarType, Type> const& env() const { return m_env; }
-
 private:
 	unordered_map<VarType, Type> m_env;
+};
+
+
+//==============================================================================
+// Instance registry
+//==============================================================================
+class InstanceRegistry;
+
+
+struct TypeArgList
+{
+	// Fully resolved and must not contain KnownIntTypes
+	FixedArray<Type> *args;
+
+	unordered_set<VarType> occurring_vars{};
+	bool has_type_deduction_vars = false;
+};
+
+struct MemoryLayout
+{
+	size_t size{};
+	size_t alignment{};
+
+	size_t extend(MemoryLayout other)
+	{
+		// Offset to ensure proper alignment
+		size_t offset = 0;
+		if(other.alignment > 0 && size % other.alignment)
+			offset = other.alignment - (size % other.alignment); 
+
+		size += offset + other.size;
+		alignment = std::max(alignment, other.alignment);
+
+		return size - other.size;
+	}
 };
 
 
@@ -299,14 +331,13 @@ private:
 	// Memory layout
 	LayoutComputationState m_layout_state = LayoutComputationState::PENDING;
 	optional<MemoryLayout> m_own_layout{};
-	Type *NULLABLE m_discriminator_type = nullptr; // if `num_cases > 0`
-	optional<CaseMemberRegion> m_cases_layout{}; // if `num_cases > 0`
+	Type *NULLABLE m_discriminator_type = nullptr; // if `m_struct->num_case_members > 0`
+	optional<CaseMemberRegion> m_cases_layout{}; // if `m_struct->num_case_members > 0`
 	unordered_set<TypeInstance> m_type_deps{};
 
 
 	void compute_dependent_properties();
 };
-
 
 
 bool operator == (StructInstanceKey const &a, StructInstanceKey const &b);
@@ -655,13 +686,13 @@ struct SemaModule
 };
 
 
+bool equiv(Type const &a, Type const &b);
+bool is_builtin_type(Type const &type, BuiltinTypeDef builtin);
 BuiltinTypeDef smallest_int_type_for(Int128 low, Int128 high);
 BuiltinTypeDef smallest_int_type_for(Int128 value);
-Type const* is_optional_ptr(StructInstance const *struct_);
-bool equiv(Type const &a, Type const &b);
+
 Type const* is_optional_ptr(StructInstance const *struct_);
 Type const* is_optional_ptr(Type const &type);
-bool is_builtin_type(Type const &type, BuiltinTypeDef builtin);
 
 Stmt clone(Stmt const &stmt, Arena &arena);
 void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry);

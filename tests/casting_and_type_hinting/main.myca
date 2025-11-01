@@ -8,9 +8,9 @@ extern proc fatal(msg: [^]c_char);
 //--------------------------------------------------------------------
 proc main() -> i32
 {
-	let opt: Option'isize = 3;
+	let opt: ?isize = 3;
 
-	// It is important that the typechecker does not propagate the target type of a `as` expression
+	// It is important that the typechecker does not propagate the target type of an `as` expression
 	// (here: i32) as a hint to the source expression. If it did, then the type parameter T of
 	// unwrap() would be deduced as i32 (because the return type is unified with i32), which would
 	// then cause an error because opt cannot be unified with ?i32.
@@ -37,14 +37,5 @@ proc unwrap'T(opt: ?T) -> T
 	{
 		case Some(let value) { return value; }
 		case None { fatal(c"empty option"); }
-	}
-}
-
-proc unwrap_or'T(opt: ?T, fallback: T) -> T
-{
-	match opt
-	{
-		case Some(let value) { return value; }
-		case None { return fallback; }
 	}
 }
