@@ -11,6 +11,7 @@ proc main() -> i32
 	let c = List(3, &b);
 	let d = List(4, &c);
 
+	// This is way to verbose and will definitely change
 	let mut cur: Option = &d;
 	let mut done = false;
 	let mut sum = 0;

@@ -89,6 +89,14 @@ public:
 		return it->second;
 	}
 
+	Type& lookup(VarType var)
+	{
+		auto it = m_env.find(var);
+		assert(it != m_env.end());
+
+		return it->second;
+	}
+
 	void add(VarType var, Type const &type)
 	{
 		// Required by unification and would lead to infinite recursion in substitute()
@@ -98,16 +106,18 @@ public:
 		assert(res.second);
 	}
 
-	void replace(VarType var, Type const &new_type)
-	{
-		auto it = m_env.find(var);
-		assert(it != m_env.end());
-		it->second = new_type;
-	}
-
 	bool empty() const { return m_env.empty(); }
 
 	unordered_map<VarType, Type> const& env() const { return m_env; }
+
+	void materialize()
+	{
+		for(auto &[_, type]: m_env)
+		{
+			if(KnownIntType *known_int = std::get_if<KnownIntType>(&type))
+				type = materialize_known_int(*known_int);
+		}
+	}
 
 	void print(std::ostream &os, Module const &mod)
 	{

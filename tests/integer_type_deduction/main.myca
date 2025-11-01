@@ -35,7 +35,9 @@ proc main() -> i32
 	// let p = max'i8(3, 220); // Should fail
 	let q = max'u8(3, 220); // u8
 	let r: u8 = max(3, 220); // u8
-	let s = max(max(1, 2), 220 as u8); // u8
+
+	let s1 = max(max(1, 2), 220 as u8); // u8
+	let s2 = max(max(1, 2), Bar(220 as u8).i); // u8
 
 	let t = 2 < 3; // bool
 	let u = 2 < 3 + (4 as u8); // bool
@@ -46,4 +48,10 @@ proc main() -> i32
 	let z = (1 as i8) + (2 as i32); // i32
 
 	return 0;
+}
+
+
+struct Bar'T
+{
+	i: T
 }

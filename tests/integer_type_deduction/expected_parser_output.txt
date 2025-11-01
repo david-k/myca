@@ -29,11 +29,17 @@ proc main() -> i32
     let o: u8 = max'(u8)(3, (220 as u8));
     let q: u8 = max'(u8)(3, 220);
     let r: u8 = max'(u8)(3, 220);
-    let s: u8 = max'(u8)(max'(i32)(1, 2), (220 as u8));
+    let s1: u8 = max'(u8)(max'(u8)(1, 2), (220 as u8));
+    let s2: u8 = max'(u8)(max'(u8)(1, 2), Bar'(u8)((220 as u8)).i);
     let t: bool = (2 < 3);
     let u: bool = (2 < (3 + (4 as u8)));
     let w: i32 = (id'(i32)(2) + 3);
     let x: u8 = (id'(u8)(2) + (3 as u8));
     let z: i32 = ((1 as i8) + (2 as i32));
     return 0;
+}
+
+struct Bar'(T)
+{
+    i: T,
 }

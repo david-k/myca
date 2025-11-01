@@ -1,0 +1,15 @@
+struct Foo'T
+{
+	i: T
+}
+
+proc max'T (a: T, b: T) -> T {}
+
+proc main() -> i32
+{
+	// This should result in a compilation error because Foo(220 as u8).i is of type u8, but
+	// that is too small for max(1, 300)
+	let t = max(max(1, 300), Foo(220 as u8).i);
+
+	return 0;
+}

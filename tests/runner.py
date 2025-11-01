@@ -22,25 +22,18 @@ class Outcome(Enum):
 @dataclass
 class MycaStep:
     expected_outcome: Outcome
-    expected_output: str|None
+    expected_output: Path|None
 
 @dataclass
 class RunStep:
     expected_return_code: int
 
 
-# Steps:
-# - myca:
-#   - success or failure
-# - gcc
-# - ./main: return code
-
-
 class TestExecutionPlan:
     myca_step: MycaStep|None = None
     run_step: RunStep|None = None
 
-    def expect_compilation_success(self, parser_output: str|None = None):
+    def expect_compilation_success(self, parser_output: Path|None = None):
         if self.myca_step is None:
             self.myca_step = MycaStep(
                 expected_outcome = Outcome.SUCCESS,
@@ -57,7 +50,7 @@ class TestExecutionPlan:
                 self.myca_step.expected_output = parser_output
 
 
-    def expect_compilation_failure(self, error_output: str):
+    def expect_compilation_failure(self, error_output: Path):
         if self.run_step is not None:
             raise Exception("Invalid test execution plan")
 
@@ -91,20 +84,22 @@ class TestExecutionPlan:
 
     def execute(self, test_src_dir: Path, test_build_dir: Path) -> bool:
         if self.myca_step is not None:
-            myca_result = subprocess.run(
+            stdout_filename = test_build_dir / "stdout.txt"
+            stderr_filename = test_build_dir / "stderr.txt"
+            return_code = self._run_and_save_output(
                 [myca_bin, test_src_dir / "main.myca", "-o", test_build_dir / "main.c", "--print-types"],
-                capture_output = True,
-                text = True
+                stdout_filename,
+                stderr_filename,
             )
 
-            if myca_result.returncode == 0:
-                if not self._handle_myca_compilation_success(myca_result.stdout.strip()):
+            if return_code == 0:
+                if not self._handle_myca_compilation_success(stdout_filename):
                     return False
             else:
-                if not self._handle_myca_compilation_failure(myca_result.stderr.strip()):
+                if not self._handle_myca_compilation_failure(stderr_filename):
                     return False
 
-        if self.run_step:
+        if self.run_step is not None:
             cc_result = subprocess.run(
                 [CC, "-fsanitize=undefined", "-fsanitize=address", test_build_dir / "main.c", "-o", test_build_dir / "main"],
                 capture_output = True,
@@ -115,6 +110,7 @@ class TestExecutionPlan:
                 print("ERROR")
                 print("C compilation error")
                 print(cc_result.stderr)
+                print()
                 return False
 
             run_result = subprocess.run(
@@ -135,49 +131,64 @@ class TestExecutionPlan:
         return True
 
 
-    def _handle_myca_compilation_failure(self, actual_output: str) -> bool:
+    def _handle_myca_compilation_failure(self, stderr_filename: Path) -> bool:
         assert self.myca_step is not None
+
+        actual_output = stderr_filename.read_text().strip()
         if self.myca_step.expected_outcome == Outcome.SUCCESS:
             print("ERROR")
             print("Compilation failed")
             print(actual_output)
+            print()
             return False
         else:
             if self.myca_step.expected_output is not None:
-                if self.myca_step.expected_output != actual_output:
+                expected_output = self.myca_step.expected_output.read_text().strip()
+                if expected_output != actual_output:
                     print("ERROR")
-                    print("Expected:")
-                    print(self.myca_step.expected_output)
-                    print()
-                    print("Actual:")
-                    print(actual_output)
+                    self._show_diff(self.myca_step.expected_output, stderr_filename)
                     print()
                     return False
 
         return True
 
 
-    def _handle_myca_compilation_success(self, actual_output: str) -> bool:
+    def _handle_myca_compilation_success(self, stdout_filename: Path) -> bool:
         assert self.myca_step is not None
+
+        actual_output = stdout_filename.read_text().strip()
         if self.myca_step.expected_outcome == Outcome.SUCCESS:
             if self.myca_step.expected_output is not None:
-                if self.myca_step.expected_output != actual_output:
+                expected_output = self.myca_step.expected_output.read_text().strip()
+                if expected_output != actual_output:
                     print("ERROR")
-                    print("Expected:")
-                    print(self.myca_step.expected_output)
-                    print()
-                    print("Actual:")
-                    print(actual_output)
+                    self._show_diff(self.myca_step.expected_output, stdout_filename)
                     print()
                     return False
         else:
             print("ERROR")
             print("Compilation should have failed but succeeded")
+            print()
             return False
 
         return True
 
 
+    def _run_and_save_output(self, cmd: list, stdout_filename: Path, stderr_filename: Path) -> int:
+        with (
+            open(stdout_filename, "w+") as stdout_file,
+            open(stderr_filename, "w+") as stderr_file
+        ):
+            result = subprocess.run(cmd, stdout = stdout_file, stderr = stderr_file)
+            return result.returncode
+
+
+    def _show_diff(self, expected_output: Path, actual_output: Path):
+        subprocess.run([
+            "diff", "--color", "-C", "1",
+            "--label", "expected", expected_output,
+            "--label", "actual", actual_output
+        ])
 
 
 def run_test(test_src_dir: Path, test_build_dir: Path, myca_bin: Path) -> bool:
@@ -187,12 +198,10 @@ def run_test(test_src_dir: Path, test_build_dir: Path, myca_bin: Path) -> bool:
 
     plan = TestExecutionPlan()
     if expected_parser_output_filepath.exists():
-        expected_parser_output = expected_parser_output_filepath.read_text().strip()
-        plan.expect_compilation_success(expected_parser_output)
+        plan.expect_compilation_success(expected_parser_output_filepath)
 
     if expected_compilation_error_filepath.exists():
-        expected_compilation_error = expected_compilation_error_filepath.read_text().strip()
-        plan.expect_compilation_failure(expected_compilation_error)
+        plan.expect_compilation_failure(expected_compilation_error_filepath)
 
     if expected_return_code_filepath.exists():
         expected_return_code = int(expected_return_code_filepath.read_text().strip())

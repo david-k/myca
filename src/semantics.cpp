@@ -636,7 +636,7 @@ bool operator == (ProcTypeInstanceKey const &a, ProcTypeInstanceKey const &b)
 }
 
 
-static bool gather_type_vars(Type const &type, unordered_set<VarType> &type_vars)
+static bool gather_type_vars(Type const &type, unordered_set<VarType> &type_vars, bool deduction_vars_only = false)
 {
 	return type | match
 	{
@@ -644,7 +644,7 @@ static bool gather_type_vars(Type const &type, unordered_set<VarType> &type_vars
 		[&](KnownIntType const&) { return false; },
 		[&](PointerType const &t)
 		{
-			return gather_type_vars(*t.pointee, type_vars);
+			return gather_type_vars(*t.pointee, type_vars, deduction_vars_only);
 		},
 		[&](ProcType const&) -> bool
 		{
@@ -654,9 +654,11 @@ static bool gather_type_vars(Type const &type, unordered_set<VarType> &type_vars
 		{
 			bool parent_has_type_deduction_vars = false;
 			if(t.inst->parent())
-				parent_has_type_deduction_vars = gather_type_vars(Type(StructType(UNKNOWN_TOKEN_RANGE, t.inst->parent())), type_vars);
+				parent_has_type_deduction_vars = gather_type_vars(Type(StructType(UNKNOWN_TOKEN_RANGE, t.inst->parent())), type_vars, deduction_vars_only);
 
-			type_vars.insert(t.inst->type_args().occurring_vars.begin(), t.inst->type_args().occurring_vars.end());
+			for(VarType v: t.inst->type_args().occurring_vars)
+				gather_type_vars(v, type_vars, deduction_vars_only);
+
 			return parent_has_type_deduction_vars || t.inst->type_args().has_type_deduction_vars;
 		},
 		[&](UnionType const&) -> bool
@@ -665,13 +667,20 @@ static bool gather_type_vars(Type const &type, unordered_set<VarType> &type_vars
 		},
 		[&](VarType const &t)
 		{
-			type_vars.insert(t);
+			if(std::holds_alternative<TypeDeductionVar>(t) or not deduction_vars_only)
+				type_vars.insert(t);
+
 			return std::holds_alternative<TypeDeductionVar>(t);
 		},
 		[&](ProcTypeUnresolved const&) -> bool { assert(!"gather_type_vars: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> bool { assert(!"gather_type_vars: UnionTypeUnresolved"); },
 		[&](Path const&) -> bool { assert(!"gather_type_vars: Path"); },
 	};
+}
+
+static void gather_type_deduction_vars(Type const &type, unordered_set<VarType> &type_vars)
+{
+	gather_type_vars(type, type_vars, true);
 }
 
 static TypeArgList create_type_arg_list(FixedArray<Type> *NULLABLE type_args, Arena &arena)
@@ -2729,24 +2738,40 @@ using UnificationPhase = variant<
 	TypeEnv const*
 >;
 
-using ThrowErrorFn = void (*)(Expr const &expr, string const &reason, Module const &mod);
+using ThrowExprErrorFn = void (*)(Expr const &expr, string const &reason, Module const &mod);
+using ThrowPatternErrorFn = void (*)(Pattern const &pattern, string const &reason, Module const &mod);
 
 class LazyErrorMsg
 {
 public:
-	LazyErrorMsg(Expr const *expr, ThrowErrorFn fn) :
-		m_expr(expr),
-		m_generator(fn) {}
+	LazyErrorMsg(Expr const *expr, ThrowExprErrorFn fn) :
+		m_error_fns(std::pair(expr, fn)) {}
+
+	LazyErrorMsg(Pattern const *pattern, ThrowPatternErrorFn fn) :
+		m_error_fns(std::pair(pattern, fn)) {}
 
 	[[noreturn]] void throw_error(string const &reason, Module const &mod) const
 	{
-		m_generator(*m_expr, reason, mod);
+		m_error_fns | match
+		{
+			[&](std::pair<Expr const*, ThrowExprErrorFn> expr_fn)
+			{
+				expr_fn.second(*expr_fn.first, reason, mod);
+			},
+			[&](std::pair<Pattern const*, ThrowPatternErrorFn> pattern_fn)
+			{
+				pattern_fn.second(*pattern_fn.first, reason, mod);
+			},
+		};
+
 		assert(!"ThrowErrorFn returned");
 	}
 
 private:
-	Expr const *m_expr;
-	ThrowErrorFn m_generator;
+	variant <
+		std::pair<Expr const*, ThrowExprErrorFn>,
+		std::pair<Pattern const*, ThrowPatternErrorFn>
+	> m_error_fns;
 
 };
 
@@ -2757,7 +2782,7 @@ static void unify(
 	UnificationPhase phase,
 	UnifyOutput out,
 	SemaContext const &ctx,
-	optional<LazyErrorMsg> err = nullopt
+	optional<LazyErrorMsg> err
 );
 
 [[noreturn]] static void throw_unification_error(
@@ -2827,9 +2852,13 @@ struct UnificationConstraint
 	Expr *right_expr;
 	optional<LazyErrorMsg> error_msg;
 
+	void compute_dependencies(unordered_set<VarType> &deps) const
+	{
+		gather_type_deduction_vars(*type, deps);
+	}
+
 	Type combine(
 		Type const *NULLABLE current_result,
-		ConstraintSystem &constraints,
 		TypeEnv &env,
 		SemaContext const &ctx
 	) const;
@@ -2839,9 +2868,13 @@ struct ElementTypeConstraint
 {
 	TypeDeductionVar array_var;
 
+	void compute_dependencies(unordered_set<VarType> &deps) const
+	{
+		deps.insert(array_var);
+	}
+
 	Type combine(
 		Type const *NULLABLE current_result,
-		ConstraintSystem &constraints,
 		TypeEnv &env,
 		SemaContext const &ctx
 	) const;
@@ -2851,9 +2884,13 @@ struct PointeeTypeConstraint
 {
 	TypeDeductionVar pointer_var;
 
+	void compute_dependencies(unordered_set<VarType> &deps) const
+	{
+		deps.insert(pointer_var);
+	}
+
 	Type combine(
 		Type const *NULLABLE current_result,
-		ConstraintSystem &constraints,
 		TypeEnv &env,
 		SemaContext const &ctx
 	) const;
@@ -2864,9 +2901,13 @@ struct MemberTypeConstraint
 	TypeDeductionVar object_var;
 	string_view member;
 
+	void compute_dependencies(unordered_set<VarType> &deps) const
+	{
+		deps.insert(object_var);
+	}
+
 	Type combine(
 		Type const *NULLABLE current_result,
-		ConstraintSystem &constraints,
 		TypeEnv &env,
 		SemaContext const &ctx
 	) const;
@@ -2881,11 +2922,19 @@ struct RelationalConstraint : variant<
 {
 	using variant::variant;
 
-	Type combine(Type const *NULLABLE current_result, ConstraintSystem &constraints, TypeEnv &env, SemaContext const &ctx) const
+	void compute_dependencies(unordered_set<VarType> &deps) const
+	{
+		*this | match
+		{
+			[&](auto const c) { return c.compute_dependencies(deps); }
+		};
+	}
+
+	Type combine(Type const *NULLABLE current_result, TypeEnv &env, SemaContext const &ctx) const
 	{
 		return *this | match
 		{
-			[&](auto const c) { return c.combine(current_result, constraints, env, ctx); }
+			[&](auto const c) { return c.combine(current_result, env, ctx); }
 		};
 	}
 };
@@ -2894,14 +2943,16 @@ struct VarConstraintSet
 {
 	vector<RelationalConstraint> constraints;
 
+	// Only used during constraint checking
 	enum State
 	{
 		PENDING,
 		IN_PROGRESS,
 		DONE,
 	};
-
 	State state = PENDING;
+	unordered_set<VarType> deps{};
+	unordered_set<VarType> reverse_deps{};
 };
 
 static optional<TypeDeductionVar> get_if_type_deduction_var(Type const &type);
@@ -3059,6 +3110,7 @@ struct ConstraintSystem
 			return a.first.id < b.first.id;
 		});
 
+		std::cout << "Constraints:" << std::endl;
 		for(auto const &[var, constr]: list)
 		{
 			Type var_type{VarType(var)};
@@ -3121,7 +3173,7 @@ struct ConstraintSystem
 
 		if(checks.size())
 		{
-			std::cout << std::endl;
+			std::cout << "\nChecks:" << std::endl;
 			for(TypeCheck const &check: checks)
 			{
 				check | match
@@ -3158,54 +3210,88 @@ struct ConstraintSystem
 };
 
 
-static void reduce(TypeDeductionVar var, ConstraintSystem &constraints, TypeEnv &env, SemaContext const &ctx);
-
-static void visit_deps(Type const &type, ConstraintSystem &constraints, TypeEnv &env, SemaContext const &ctx)
+// Information flows bottom-up
+static void reduce(TypeDeductionVar var, ConstraintSystem &sys, TypeEnv &env, SemaContext const &ctx)
 {
-	unordered_set<VarType> type_vars;
-	gather_type_vars(type, type_vars);
-
-	for(VarType v: type_vars)
-	{
-		if(TypeDeductionVar const *d = std::get_if<TypeDeductionVar>(&v))
-			reduce(*d, constraints, env, ctx);
-	}
-}
-
-static void reduce(TypeDeductionVar var, ConstraintSystem &constraints, TypeEnv &env, SemaContext const &ctx)
-{
-	VarConstraintSet &c = constraints.constraints.at(var);
+	VarConstraintSet &c = sys.constraints.at(var);
 	if(c.state == VarConstraintSet::DONE)
 		return;
 
+	// Check for cycles
 	assert(c.state == VarConstraintSet::PENDING);
 	c.state = VarConstraintSet::IN_PROGRESS;
 
+	// Compute and visit dependencies
+	for(RelationalConstraint const &bc: c.constraints)
+		bc.compute_dependencies(c.deps);
+
+	for(VarType v: c.deps)
+	{
+		reduce(std::get<TypeDeductionVar>(v), sys, env, ctx);
+		sys.constraints.at(std::get<TypeDeductionVar>(v)).reverse_deps.insert(var);
+	}
+
+
 	assert(c.constraints.size());
-	Type result = c.constraints.front().combine(nullptr, constraints, env, ctx);
+	Type result = c.constraints.front().combine(nullptr, env, ctx);
 
 	for(RelationalConstraint const &bc: c.constraints | std::views::drop(1))
-		result = bc.combine(&result, constraints, env, ctx);
+		result = bc.combine(&result, env, ctx);
 
 	c.state = VarConstraintSet::DONE;
 	assert(not env.try_lookup(var));
 
-	if(KnownIntType const *known_int = std::get_if<KnownIntType>(&result))
-		result = materialize_known_int(*known_int);
-
 	env.add(var, result);
+}
+
+// Information flow top-down
+static optional<Type> materialize(TypeDeductionVar var, ConstraintSystem &sys, TypeEnv &env, SemaContext const &ctx)
+{
+	Type &type = env.lookup(var);
+	KnownIntType const *known_int = std::get_if<KnownIntType>(&type);
+	if(not known_int)
+	{
+		if(is_integer_type(type))
+			return type;
+
+		return nullopt;
+	}
+
+	VarConstraintSet &c = sys.constraints.at(var);
+	bool constrained = false;
+	for(VarType rdep: c.reverse_deps)
+	{
+		TypeDeductionVar rdep_var = std::get<TypeDeductionVar>(rdep);
+		if(optional<Type> const &used_in_type = materialize(rdep_var, sys, env, ctx))
+		{
+			if(constrained)
+			{
+				if(not equiv(type, *used_in_type))
+					throw_sem_error("Type deduction ambiguous", INVALID_TOKEN_IDX, ctx.mod);
+			}
+			else
+			{
+				BuiltinType b = std::get<BuiltinType>(*used_in_type);
+				assert(integer_assignable_to(b.builtin, known_int->low));
+				assert(integer_assignable_to(b.builtin, known_int->high));
+				type = *used_in_type;
+			}
+		}
+	}
+
+	if(constrained)
+		return type;
+
+	return nullopt;
 }
 
 
 Type UnificationConstraint::combine(
 	Type const *NULLABLE current_result,
-	ConstraintSystem &constraints,
 	TypeEnv &env,
 	SemaContext const &ctx
 ) const
 {
-	visit_deps(*type, constraints, env, ctx);
-
 	if(not current_result)
 		return *type;
 
@@ -3220,13 +3306,10 @@ Type UnificationConstraint::combine(
 
 Type ElementTypeConstraint::combine(
 	Type const *NULLABLE current_result,
-	ConstraintSystem &constraints,
 	TypeEnv &env,
 	SemaContext const &ctx
 ) const
 {
-	visit_deps(Type(array_var), constraints, env, ctx);
-
 	Type const &other_type = env.lookup(array_var);
 	PointerType const *array_type = std::get_if<PointerType>(&other_type);
 	if(not array_type or array_type->kind != PointerType::MANY)
@@ -3243,13 +3326,10 @@ Type ElementTypeConstraint::combine(
 
 Type PointeeTypeConstraint::combine(
 	Type const *NULLABLE current_result,
-	ConstraintSystem &constraints,
 	TypeEnv &env,
 	SemaContext const &ctx
 ) const
 {
-	visit_deps(Type(pointer_var), constraints, env, ctx);
-
 	Type const &other_type = env.lookup(pointer_var);
 	PointerType const *pointer_type = std::get_if<PointerType>(&other_type);
 	if(not pointer_type)
@@ -3268,13 +3348,10 @@ Parameter const* find_var_member(StructInstance *inst, string_view field);
 
 Type MemberTypeConstraint::combine(
 	Type const *NULLABLE current_result,
-	ConstraintSystem &constraints,
 	TypeEnv &env,
 	SemaContext const &ctx
 ) const
 {
-	visit_deps(Type(object_var), constraints, env, ctx);
-
 	Type const &other_type = env.lookup(object_var);
 	StructType const *struct_type = std::get_if<StructType>(&other_type);
 
@@ -3307,6 +3384,9 @@ static TypeEnv create_subst_from_constraints(ConstraintSystem &constraints, Sema
 	TypeEnv result;
 	for(auto const &[var, _]: constraints.constraints)
 		reduce(var, constraints, result, ctx);
+
+	for(auto const &[var, _]: constraints.constraints)
+		materialize(var, constraints, result, ctx);
 
 	for(TypeCheck const &c: constraints.checks)
 		do_check(c, result, ctx);
@@ -4076,7 +4156,11 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					e.type = mk_builtin_type(BuiltinTypeDef::BOOL, ctx.arena);
 					Type const *sub_type = typecheck_subexpr(*e.sub, constraints, ctx);
 
-					unify(*e.type, *sub_type, UNIFY_EQUAL, &constraints, {}, ctx);
+					auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
+					{
+						throw_sem_error("Invalid operand for not operator: " + reason, token_range_of(expr).first, &mod);
+					};
+					unify(*e.type, *sub_type, UNIFY_EQUAL, &constraints, {}, ctx, LazyErrorMsg(e.sub, error_msg));
 				} break;
 
 				case UnaryOp::NEG:
@@ -4097,12 +4181,12 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					}
 					else
 					{
+						e.type = ctx.arena.alloc<Type>(clone(*sub_type, ctx.arena));
+
 						auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 						{
-							throw_sem_error("Invalid type for negation operator: " + reason, token_range_of(expr).first, &mod);
+							throw_sem_error("Invalid operand for negation operator: " + reason, token_range_of(expr).first, &mod);
 						};
-
-						e.type = ctx.arena.alloc<Type>(clone(*sub_type, ctx.arena));
 						constraints.add_check(IntegerCheck(LazyErrorMsg(e.sub, error_msg), e.type));
 					}
 				} break;
@@ -4119,12 +4203,6 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 				case BinaryOp::MUL:
 				case BinaryOp::DIV:
 				{
-					// Error message for when LHS and RHS don't have a common type
-					LazyErrorMsg uni_error_msg(&expr, [](Expr const &expr, string const &reason, Module const &mod)
-					{
-						throw_sem_error("Invalid operands for binary operator: " + reason, token_range_of(expr).first, &mod);
-					});
-
 					Type const *left_type = typecheck_subexpr(*e.left, constraints, ctx);
 					Type const *right_type = typecheck_subexpr(*e.right, constraints, ctx);
 
@@ -4133,11 +4211,16 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 						.right_expr = e.right,
 						.result = ctx.arena.alloc<Type>(),
 					};
+					auto uni_error_msg = [](Expr const &expr, string const &reason, Module const &mod)
+					{
+						throw_sem_error("Invalid operands for binary operator: " + reason, token_range_of(expr).first, &mod);
+					};
 					unify(
 						*left_type, *right_type,
 						{TypeConversion::NON_TRIVIAL, ConversionDirection::BIDIRECTIONAL},
 						&constraints,
-						out, ctx, uni_error_msg
+						out, ctx,
+						LazyErrorMsg(&expr, uni_error_msg)
 					);
 
 					KnownIntType const *left_known_int = std::get_if<KnownIntType>(left_type);
@@ -4183,9 +4266,9 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 						{
 							throw_sem_error("Invalid type for binary operator: " + reason, token_range_of(expr).first, &mod);
 						};
-
 						constraints.add_check(IntegerCheck(LazyErrorMsg(e.left, error_msg), left_type));
 						constraints.add_check(IntegerCheck(LazyErrorMsg(e.right, error_msg), right_type));
+
 						e.type = out.result;
 					}
 				} break;
@@ -4195,12 +4278,11 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					Type const *left_type = typecheck_subexpr(*e.left, constraints, ctx);
 					Type const *right_type = typecheck_subexpr(*e.right, constraints, ctx);
 
-					try {
-						unify(*left_type, *right_type, UNIFY_EQUAL, &constraints, {}, ctx);
-					}
-					catch(ParseError const &exc) {
-						throw_sem_error("Equality operator requires equal types: "s + exc.what(), e.range.first, ctx.mod);
-					}
+					auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
+					{
+						throw_sem_error("Equality operator requires equal types: " + reason, token_range_of(expr).first, &mod);
+					};
+					unify(*left_type, *right_type, UNIFY_EQUAL, &constraints, {}, ctx, LazyErrorMsg(&expr, error_msg));
 
 					e.type = mk_builtin_type(BuiltinTypeDef::BOOL, ctx.arena);
 				} break;
@@ -4213,20 +4295,19 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					Type const *left_type = typecheck_subexpr(*e.left, constraints, ctx);
 					Type const *right_type = typecheck_subexpr(*e.right, constraints, ctx);
 
-					try {
-						unify(*left_type, *right_type, UNIFY_EQUAL, &constraints, {}, ctx);
-					}
-					catch(ParseError const &exc) {
-						throw_sem_error("Comparison operator requires compatible types: "s + exc.what(), e.range.first, ctx.mod);
-					}
-
-					auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
+					auto uni_error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 					{
-						throw_sem_error("Invalid type for binary operator: " + reason, token_range_of(expr).first, &mod);
+						throw_sem_error("Invalid operands for comparison operator: " + reason, token_range_of(expr).first, &mod);
+					};
+					unify(*left_type, *right_type, UNIFY_EQUAL, &constraints, {}, ctx, LazyErrorMsg(&expr, uni_error_msg));
+
+					auto integer_check_msg = [](Expr const &expr, string const &reason, Module const &mod)
+					{
+						throw_sem_error("Invalid operand for comparison operator: " + reason, token_range_of(expr).first, &mod);
 					};
 
-					constraints.add_check(IntegerCheck(LazyErrorMsg(e.left, error_msg), left_type));
-					constraints.add_check(IntegerCheck(LazyErrorMsg(e.right, error_msg), right_type));
+					constraints.add_check(IntegerCheck(LazyErrorMsg(e.left, integer_check_msg), left_type));
+					constraints.add_check(IntegerCheck(LazyErrorMsg(e.right, integer_check_msg), right_type));
 
 					e.type = mk_builtin_type(BuiltinTypeDef::BOOL, ctx.arena);
 				} break;
@@ -4291,7 +4372,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 
 			auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 			{
-				throw_sem_error("Invalid type for index operator: " + reason, token_range_of(expr).first, &mod);
+				throw_sem_error("Invalid operand for index operator: " + reason, token_range_of(expr).first, &mod);
 			};
 
 			constraints.add_check(IntegerCheck(LazyErrorMsg(e.index, error_msg), index_type));
@@ -4327,7 +4408,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			else
 			{
 				// TODO This error message occurs in two places: here and when checking the
-				//	  relational constraint. Remove this duplication.
+				//      relational constraint. Remove this duplication.
 				throw_sem_error("Expected object of struct type for member access, got " + str(*object_type, *ctx.mod), e.range.first, ctx.mod);
 			}
 
@@ -4338,12 +4419,18 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			Type const *lhs_type = typecheck_subexpr(*e.lhs, constraints, ctx);
 			Type const *rhs_type = typecheck_subexpr(*e.rhs, constraints, ctx);
 
-			try {
-				unify(*lhs_type, *rhs_type, {TypeConversion::NON_TRIVIAL, ConversionDirection::RIGHT_TO_LEFT}, &constraints, {.right_expr = e.rhs}, ctx);
-			}
-			catch(ParseError const &exc) {
-				throw_sem_error(exc.what(), e.range.first, ctx.mod);
-			}
+			auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
+			{
+				throw_sem_error("Invalid operands for assignment operator: " + reason, token_range_of(expr).first, &mod);
+			};
+			unify(
+				*lhs_type, *rhs_type,
+				{TypeConversion::NON_TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
+				&constraints,
+				{.right_expr = e.rhs},
+				ctx,
+				LazyErrorMsg(&expr, error_msg)
+			);
 
 			constraints.add_check(LValueCheck(e.lhs, IsMutable::YES));
 
@@ -4488,24 +4575,41 @@ static Type const* typecheck_pattern(
 	Type const *expected_type = &rhs_type;
 	if(lhs_pattern.provided_type)
 	{
-		try
-		{
-			if(infallible_pattern_required)
-				unify(*lhs_pattern.provided_type, rhs_type, {allow_conversion ? TypeConversion::NON_TRIVIAL : TypeConversion::TRIVIAL, ConversionDirection::RIGHT_TO_LEFT}, &constraints, {.right_expr = root_rhs_expr}, ctx);
-			else
-				unify(rhs_type, *lhs_pattern.provided_type, {TypeConversion::TRIVIAL, ConversionDirection::RIGHT_TO_LEFT}, &constraints, {}, ctx);
-		}
-		catch (ParseError const &e)
+		auto error_msg = [](Pattern const &pattern, string const &reason, Module const &mod)
 		{
 			throw_sem_error(
-				"Inferred type does not match specified type in let statement: "s + e.what(),
-				token_range_of(lhs_pattern).first,
-				ctx.mod
+				"Inferred type does not match specified type in let statement: " + reason,
+				token_range_of(pattern).first,
+				&mod
+			);
+		};
+
+		if(infallible_pattern_required)
+		{
+			unify(
+				*lhs_pattern.provided_type, rhs_type,
+				{allow_conversion ? TypeConversion::NON_TRIVIAL : TypeConversion::TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
+				&constraints,
+				{.right_expr = root_rhs_expr},
+				ctx,
+				LazyErrorMsg(&lhs_pattern, error_msg)
+			);
+		}
+		else
+		{
+			unify(
+				rhs_type, *lhs_pattern.provided_type,
+				{TypeConversion::TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
+				&constraints,
+				{},
+				ctx,
+				LazyErrorMsg(&lhs_pattern, error_msg)
 			);
 		}
 
 		expected_type = &*lhs_pattern.provided_type;
 	}
+
 
 	return lhs_pattern | match
 	{
@@ -4563,12 +4667,18 @@ static Type const* typecheck_pattern(
 				throw_sem_error("Infallible pattern required, but encountered constructor pattern", p.range.first, ctx.mod);
 			}
 
-			try {
-				unify(*expected_type, *p.ctor, {TypeConversion::TRIVIAL, ConversionDirection::RIGHT_TO_LEFT}, &constraints, {}, ctx);
-			}
-			catch(ParseError const &exc) {
-				throw_sem_error("Invalid constructor pattern: "s + exc.what(), p.range.first, ctx.mod);
-			}
+			auto error_msg = [](Pattern const &pattern, string const &reason, Module const &mod)
+			{
+				throw_sem_error("Invalid constructor pattern: " + reason, token_range_of(pattern).first, &mod);
+			};
+			unify(
+				*expected_type, *p.ctor,
+				{TypeConversion::TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
+				&constraints,
+				{},
+				ctx,
+				LazyErrorMsg(&lhs_pattern, error_msg)
+			);
 
 			// Make sure the constructor is not a type variable
 			if(VarType const *var = std::get_if<VarType>(p.ctor))
@@ -4794,12 +4904,19 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 				{
 					ConstraintSystem constraints(*ctx.mod);
 					Type const *default_value_type = typecheck_subexpr(*default_value, constraints, ctx);
-					try {
-						unify(*var_member.type, *default_value_type, {TypeConversion::NON_TRIVIAL, ConversionDirection::RIGHT_TO_LEFT}, &constraints, {.right_expr = default_value}, ctx);
-					}
-					catch(ParseError const &exc) {
-						throw_sem_error("Invalid default value: "s + exc.what(), var_member.range.first, ctx.mod);
-					}
+
+					auto error_msg = [](Expr const &init_expr, string const &reason, Module const &mod)
+					{
+						throw_sem_error("Invalid default value: " + reason, token_range_of(init_expr).first, &mod);
+					};
+					unify(
+						*var_member.type, *default_value_type,
+						{TypeConversion::NON_TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
+						&constraints,
+						{.right_expr = default_value},
+						ctx,
+						LazyErrorMsg(default_value, error_msg)
+					);
 
 					TypeEnv subst = create_subst_from_constraints(constraints, ctx);
 					substitute_types_in_expr(*default_value, subst, ctx.mod->sema->insts);
