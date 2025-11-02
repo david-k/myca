@@ -1,1 +1,1 @@
-|19:41| error: The type argument T causes causes the type term to grow indefinitely
+|19:41| error: The type argument T causes the type term to grow indefinitely

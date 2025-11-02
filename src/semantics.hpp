@@ -521,6 +521,14 @@ struct NewInstanceListener : InstanceRegistryListener
 	vector<ProcInstance*> procs;
 };
 
+struct BestEffortSubstitution {};
+struct FullDeductionSubsitution
+{
+	TokenRange region_being_substituted;
+};
+struct FullSubsitution {};
+using SubstitutionMode = variant<BestEffortSubstitution, FullDeductionSubsitution, FullSubsitution>;
+
 class InstanceRegistry
 {
 public:
@@ -552,7 +560,8 @@ public:
 		StructItem const *struct_,
 		TypeArgList const &type_args,
 		TypeEnv const &subst,
-		StructInstance *NULLABLE parent
+		StructInstance *NULLABLE parent,
+		SubstitutionMode mode
 	);
 
 	ProcInstance* get_proc_instance(ProcItem const *proc, FixedArray<Type> *NULLABLE type_args);
@@ -560,11 +569,17 @@ public:
 	ProcInstance* get_proc_instance(
 		ProcItem const *proc,
 		TypeArgList const &type_args,
-		TypeEnv const &subst
+		TypeEnv const &subst,
+		SubstitutionMode mode
 	);
 
 	ProcTypeInstance* get_proc_type_instance(FixedArray<Type> *params, Type *ret);
-	ProcTypeInstance* get_proc_type_instance(FixedArray<Type> *params, Type *ret, TypeEnv const &subst);
+	ProcTypeInstance* get_proc_type_instance(
+		FixedArray<Type> *params,
+		Type *ret,
+		TypeEnv const &subst,
+		SubstitutionMode mode
+	);
 
 	std::generator<StructInstance&> struct_instances();
 	std::generator<ProcInstance&> proc_instances();
@@ -705,7 +720,7 @@ Type const* is_optional_ptr(StructInstance const *struct_);
 Type const* is_optional_ptr(Type const &type);
 
 Stmt clone(Stmt const &stmt, Arena &arena);
-void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry);
+void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry, SubstitutionMode mode);
 
 MemoryLayout compute_layout(Type const &type);
 void compute_type_layouts(Module &mod);

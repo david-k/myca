@@ -602,8 +602,13 @@ ScopeItem& Scope::lookup(string_view const &name, TokenIdx sloc, bool traverse_u
 //==============================================================================
 // Instance registry
 //==============================================================================
-static void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &registry);
-static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registry);
+static void substitute(
+	Type &type,
+	TypeEnv const &env,
+	InstanceRegistry &registry,
+	SubstitutionMode mode
+);
+static void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &registry, SubstitutionMode mode);
 
 bool operator == (ProcInstanceKey const &a, ProcInstanceKey const &b)
 {
@@ -731,12 +736,13 @@ StructInstance* InstanceRegistry::get_struct_instance(
 	StructItem const *struct_,
 	TypeArgList const &type_args,
 	TypeEnv const &subst,
-	StructInstance *NULLABLE parent
+	StructInstance *NULLABLE parent,
+	SubstitutionMode mode
 )
 {
 	void *original_mem_pos = m_arena.current_ptr();
 	TypeArgList new_args = clone(type_args, m_arena);
-	substitute(new_args, subst, *this);
+	substitute(new_args, subst, *this, mode);
 
 	auto it = m_struct_instances.find(StructInstanceKey(struct_, new_args.args, parent));
 	if(it != m_struct_instances.end())
@@ -797,12 +803,13 @@ ProcInstance* InstanceRegistry::get_proc_instance(ProcItem const *proc, TypeArgL
 ProcInstance* InstanceRegistry::get_proc_instance(
 	ProcItem const *proc,
 	TypeArgList const &type_args,
-	TypeEnv const &subst
+	TypeEnv const &subst,
+	SubstitutionMode mode
 )
 {
 	void *original_mem_pos = m_arena.current_ptr();
 	TypeArgList new_args = clone(type_args, m_arena);
-	substitute(new_args, subst, *this);
+	substitute(new_args, subst, *this, mode);
 
 	auto it = m_proc_instances.find(ProcInstanceKey(proc, new_args.args));
 	if(it != m_proc_instances.end())
@@ -842,7 +849,8 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(FixedArray<Type> *par
 ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
 	FixedArray<Type> *params,
 	Type *ret,
-	TypeEnv const &subst
+	TypeEnv const &subst,
+	SubstitutionMode mode
 )
 {
 	void *original_mem_pos = m_arena.current_ptr();
@@ -850,11 +858,11 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
 	// Substitute params
 	FixedArray<Type> *new_params = clone(params, m_arena);
 	for(Type &new_param: *new_params)
-		substitute(new_param, subst, *this);
+		substitute(new_param, subst, *this, mode);
 
 	// Substitute return type
 	Type *new_ret = clone_ptr(ret, m_arena);
-	substitute(*new_ret, subst, *this);
+	substitute(*new_ret, subst, *this, mode);
 
 	auto it = m_proc_type_instances.find(ProcTypeInstanceKey(new_params, new_ret));
 	if(it != m_proc_type_instances.end())
@@ -918,12 +926,12 @@ static void create_type_env(
 
 		// See tests struct_recursive_type_param_<N> for why we call substitute() and perform the
 		// type_var_occurs_in() check
-		substitute(cloned, result, registry);
+		substitute(cloned, result, registry, BestEffortSubstitution());
 		if(not equiv(type_param, cloned))
 		{
 			if(type_var_occurs_in(type_param, cloned))
 				throw_sem_error(
-					"The type argument " + str(type_args->items[i], registry.mod()) + " causes causes the type term to grow indefinitely",
+					"The type argument " + str(type_args->items[i], registry.mod()) + " causes the type term to grow indefinitely",
 					token_range_of(type_args->items[i]).first,
 					&registry.mod()
 				);
@@ -947,11 +955,15 @@ static TypeEnv create_type_env(
 //--------------------------------------------------------------------
 // StructInstance
 //--------------------------------------------------------------------
-static void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceRegistry &registry);
-
 static Type* mk_builtin_type(BuiltinTypeDef builtin, Arena &arena);
 static MemoryLayout get_layout(BuiltinTypeDef type);
 MemoryLayout compute_layout(Type const &type, unordered_set<TypeInstance> *parent_type_deps);
+static void substitute_types_in_expr(
+	Expr &expr,
+	TypeEnv const &env,
+	InstanceRegistry &registry,
+	SubstitutionMode mode
+);
 
 
 Module const& StructInstance::mod() const
@@ -1089,7 +1101,7 @@ void StructInstance::compute_dependent_properties()
 					.default_value = var_member.default_value ?
 						DefaultValueExpr(ExprPending()) : DefaultValueExpr(NoDefaultValue()),
 				};
-				substitute(*inst_var_member.type, env, *m_registry);
+				substitute(*inst_var_member.type, env, *m_registry, BestEffortSubstitution());
 
 				new (m_members->items+i) InstanceMember(inst_var_member);
 			},
@@ -1246,7 +1258,7 @@ void StructInstance::finalize_typechecking()
 			if(Expr *default_value = var_member->default_value.try_get_expr())
 			{
 				default_value = clone_ptr(default_value, m_registry->arena());
-				substitute_types_in_expr(*default_value, env, *m_registry);
+				substitute_types_in_expr(*default_value, env, *m_registry, BestEffortSubstitution());
 				inst_var_member.default_value = default_value;
 			}
 		}
@@ -1337,15 +1349,15 @@ static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRe
 	for(auto const &[idx, param]: *proc->params | std::views::enumerate)
 	{
 		Parameter new_param = clone(param, instances.arena());
-		substitute(*new_param.type, env, instances);
+		substitute(*new_param.type, env, instances, BestEffortSubstitution());
 		if(Expr *default_value = new_param.default_value.try_get_expr())
-			substitute_types_in_expr(*default_value, env, instances);
+			substitute_types_in_expr(*default_value, env, instances, BestEffortSubstitution());
 
 		ctor_params->items[idx] = *new_param.type;
 	}
 
 	Type *new_ret = clone_ptr(proc->ret_type, instances.arena());
-	substitute(*new_ret, env, instances);
+	substitute(*new_ret, env, instances, BestEffortSubstitution());
 
 	ProcTypeInstance *proc_type_inst = instances.get_proc_type_instance(ctor_params, new_ret);
 	return instances.arena().alloc<Type>(ProcType{
@@ -1549,7 +1561,6 @@ static void declare_items(SemaContext &ctx)
 //==============================================================================
 // Pass 2: Path resolution
 //==============================================================================
-static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registry);
 static void resolve_type(Type &type, Scope *scope, SemaContext &ctx);
 static void resolve_expr(Expr &expr, Scope *scope, SemaContext &ctx);
 static void resolve_alias(AliasItem &alias, SemaContext &ctx);
@@ -1658,7 +1669,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			TypeEnv env = create_type_env(alias->type_params, resolved_type_args, ctx.mod->sema->insts);
 
 			Type type = clone(*alias->aliased_type, ctx.arena);
-			substitute(type, env, ctx.mod->sema->insts);
+			substitute(type, env, ctx.mod->sema->insts, BestEffortSubstitution());
 
 			if(path.child)
 			{
@@ -2032,12 +2043,10 @@ static bool have_common_vars(unordered_set<VarType> const &occurring_vars, TypeE
 	return false;
 }
 
-static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registry);
-
-static void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &registry)
+static void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &registry, SubstitutionMode mode)
 {
 	for(size_t i = 0; i < args.args->count; ++i)
-		substitute(args.args->items[i], env, registry);
+		substitute(args.args->items[i], env, registry, mode);
 
 	// Update args.occurring_vars and args.has_type_deduction_vars
 	args.occurring_vars.clear();
@@ -2049,6 +2058,41 @@ static void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &
 	}
 }
 
+void validate_unsubstituted_var(VarType var, SubstitutionMode mode, Module const &mod)
+{
+	if(is<FullSubsitution>(mode)) {
+		assert(!"VarType has not been substituted");
+	}
+
+	if(FullDeductionSubsitution *m = std::get_if<FullDeductionSubsitution>(&mode))
+	{
+		if(is<TypeDeductionVar>(var))
+			throw_sem_error("Type parameter could not be deduced", m->region_being_substituted.first, &mod);
+	}
+}
+
+// Make sure that the kinds of variables that must be substituted actually have been substituted
+void validate_unsubstituted_vars(
+	unordered_set<VarType> const &vars,
+	bool has_type_deduction_vars,
+	TypeEnv const &env,
+	SubstitutionMode mode,
+	Module const &mod
+)
+{
+	if(
+		(is<FullDeductionSubsitution>(mode) and has_type_deduction_vars)
+		or (is<FullSubsitution>(mode) and vars.size())
+	)
+	{
+		for(VarType var: vars)
+		{
+			if(not env.try_lookup(var))
+				validate_unsubstituted_var(var, mode, mod);
+		}
+	}
+}
+
 // If `inst` is deduction complete, apply `env` to it directly and return `inst`.
 // Otherwise, leave `inst` unchanged and return the StructInstance that corresponds to `inst` where
 // `env` has been applied to the type args of `inst`
@@ -2056,6 +2100,7 @@ static StructInstance* substitute_types_in_struct(
 	StructInstance *inst,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
+	SubstitutionMode mode,
 	bool *modified = nullptr
 )
 {
@@ -2064,17 +2109,23 @@ static StructInstance* substitute_types_in_struct(
 	StructInstance *new_parent = nullptr;
 	bool parent_modified = false;
 	if(inst->parent())
-		new_parent = substitute_types_in_struct(inst->parent(), env, registry, &parent_modified);
+		new_parent = substitute_types_in_struct(inst->parent(), env, registry, mode, &parent_modified);
 
 	if(parent_modified or have_common_vars(inst->type_args().occurring_vars, env))
 	{
-		inst = registry.get_struct_instance(inst->struct_(), inst->type_args(), env, new_parent);
+		inst = registry.get_struct_instance(inst->struct_(), inst->type_args(), env, new_parent, mode);
 
 		LOGGER(registry.mod().logger, on_struct_substitution_replaced, inst);
 		if(modified) *modified = true;
 	}
 	else
 	{
+		validate_unsubstituted_vars(
+			inst->type_args().occurring_vars,
+			inst->type_args().has_type_deduction_vars,
+			env, mode, registry.mod()
+		);
+
 		LOGGER(registry.mod().logger, on_struct_substitution_noop);
 		if(modified) *modified = false;
 	}
@@ -2087,11 +2138,19 @@ static StructInstance* substitute_types_in_struct(
 static ProcInstance* substitute_types_in_proc(
 	ProcInstance *inst,
 	TypeEnv const &env,
-	InstanceRegistry &registry
+	InstanceRegistry &registry,
+	SubstitutionMode mode
 )
 {
 	if(have_common_vars(inst->type_args().occurring_vars, env))
-		inst = registry.get_proc_instance(inst->proc(), inst->type_args(), env);
+		inst = registry.get_proc_instance(inst->proc(), inst->type_args(), env, mode);
+	else
+		validate_unsubstituted_vars(
+			inst->type_args().occurring_vars,
+			inst->type_args().has_type_deduction_vars,
+			env, mode, registry.mod()
+		);
+
 
 	return inst;
 }
@@ -2099,17 +2158,31 @@ static ProcInstance* substitute_types_in_proc(
 static ProcTypeInstance* substitute_types_in_proc_type(
 	ProcTypeInstance *inst,
 	TypeEnv const &env,
-	InstanceRegistry &registry
+	InstanceRegistry &registry,
+	SubstitutionMode mode
 )
 {
 	if(have_common_vars(inst->occurring_vars, env))
-		inst = registry.get_proc_type_instance(inst->params, inst->ret, env);
+		inst = registry.get_proc_type_instance(inst->params, inst->ret, env, mode);
+	else
+	{
+		validate_unsubstituted_vars(
+			inst->occurring_vars,
+			inst->has_type_deduction_vars,
+			env, mode, registry.mod()
+		);
+	}
 
 	return inst;
 }
 
 
-static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registry)
+static void substitute(
+	Type &type,
+	TypeEnv const &env,
+	InstanceRegistry &registry,
+	SubstitutionMode mode
+)
 {
 	type | match
 	{
@@ -2120,24 +2193,24 @@ static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registr
 		},
 		[&](PointerType &t)
 		{
-			substitute(*t.pointee, env, registry);
+			substitute(*t.pointee, env, registry, mode);
 		},
 		[&](StructType &t)
 		{
-			t.inst = substitute_types_in_struct(t.inst, env, registry);
+			t.inst = substitute_types_in_struct(t.inst, env, registry, mode);
 		},
 		[&](ProcType &t)
 		{
-			t.inst = substitute_types_in_proc_type(t.inst, env, registry);
+			t.inst = substitute_types_in_proc_type(t.inst, env, registry, mode);
 			t.callable | match
 			{
 				[&](ProcInstance *proc)
 				{
-					t.callable = substitute_types_in_proc(proc, env, registry);
+					t.callable = substitute_types_in_proc(proc, env, registry, mode);
 				},
 				[&](StructInstance *struct_)
 				{
-					t.callable = substitute_types_in_struct(struct_, env, registry);
+					t.callable = substitute_types_in_struct(struct_, env, registry, mode);
 				},
 			};
 		},
@@ -2154,8 +2227,10 @@ static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registr
 				// Apply substitution recursively.
 				// This is not how substitution is traditionally defined for e.g. first-order logic,
 				// but is easier to implement. See note for the unify() function.
-				substitute(type, env, registry);
+				substitute(type, env, registry, mode);
 			}
+			else
+				validate_unsubstituted_var(t, mode, registry.mod());
 		},
 		[&](ProcTypeUnresolved const&) { UNREACHABLE; },
 		[&](UnionTypeUnresolved const&) { UNREACHABLE; },
@@ -2163,10 +2238,10 @@ static void substitute(Type &type, TypeEnv const &env, InstanceRegistry &registr
 	};
 }
 
-static void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceRegistry &registry)
+static void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceRegistry &registry, SubstitutionMode mode)
 {
 	if(Type *expr_type = type_of(expr))
-		substitute(*expr_type, env, registry);
+		substitute(*expr_type, env, registry, mode);
 
 	expr | match
 	{
@@ -2175,58 +2250,58 @@ static void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceReg
 		[&](StringLiteralExpr&) {},
 		[&](UnaryExpr &e)
 		{
-			substitute_types_in_expr(*e.sub, env, registry);
+			substitute_types_in_expr(*e.sub, env, registry, mode);
 		},
 		[&](BinaryExpr &e)
 		{
-			substitute_types_in_expr(*e.left, env, registry);
-			substitute_types_in_expr(*e.right, env, registry);
+			substitute_types_in_expr(*e.left, env, registry, mode);
+			substitute_types_in_expr(*e.right, env, registry, mode);
 		},
 		[&](AddressOfExpr &e)
 		{
-			substitute_types_in_expr(*e.object, env, registry);
+			substitute_types_in_expr(*e.object, env, registry, mode);
 		},
 		[&](DerefExpr &e)
 		{
-			substitute_types_in_expr(*e.addr, env, registry);
+			substitute_types_in_expr(*e.addr, env, registry, mode);
 		},
 		[&](IndexExpr &e)
 		{
-			substitute_types_in_expr(*e.addr, env, registry);
-			substitute_types_in_expr(*e.index, env, registry);
+			substitute_types_in_expr(*e.addr, env, registry, mode);
+			substitute_types_in_expr(*e.index, env, registry, mode);
 		},
 		[&](MemberAccessExpr &e)
 		{
-			substitute_types_in_expr(*e.object, env, registry);
+			substitute_types_in_expr(*e.object, env, registry, mode);
 		},
 		[&](AssignmentExpr &e)
 		{
-			substitute_types_in_expr(*e.lhs, env, registry);
-			substitute_types_in_expr(*e.rhs, env, registry);
+			substitute_types_in_expr(*e.lhs, env, registry, mode);
+			substitute_types_in_expr(*e.rhs, env, registry, mode);
 		},
 		[&](AsExpr &e)
 		{
-			substitute_types_in_expr(*e.src_expr, env, registry);
-			substitute(*e.target_type, env, registry);
+			substitute_types_in_expr(*e.src_expr, env, registry, mode);
+			substitute(*e.target_type, env, registry, mode);
 		},
 		[&](ConstructorExpr &e)
 		{
-			substitute(*e.ctor, env, registry);
+			substitute(*e.ctor, env, registry, mode);
 		},
 		[&](ProcExpr &e)
 		{
-			e.inst = substitute_types_in_proc(e.inst, env, registry);
+			e.inst = substitute_types_in_proc(e.inst, env, registry, mode);
 		},
 		[&](CallExpr &e)
 		{
-			substitute_types_in_expr(*e.callable, env, registry);
+			substitute_types_in_expr(*e.callable, env, registry, mode);
 
 			for(Argument &arg: *e.args)
-				substitute_types_in_expr(arg.expr, env, registry);
+				substitute_types_in_expr(arg.expr, env, registry, mode);
 		},
 		[&](SizeOfExpr &e)
 		{
-			substitute(*e.subject, env, registry);
+			substitute(*e.subject, env, registry, mode);
 		},
 		[&](MakeExpr&)
 		{
@@ -2237,32 +2312,37 @@ static void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceReg
 	};
 }
 
-static void substitute_types_in_pattern(Pattern &pattern, TypeEnv const &subst, InstanceRegistry &registry)
+static void substitute_types_in_pattern(
+	Pattern &pattern,
+	TypeEnv const &subst,
+	InstanceRegistry &registry,
+	SubstitutionMode mode
+)
 {
-	substitute(type_of(pattern), subst, registry);
+	substitute(type_of(pattern), subst, registry, mode);
 
 	if(pattern.provided_type)
-		substitute(*pattern.provided_type, subst, registry);
+		substitute(*pattern.provided_type, subst, registry, mode);
 
 	pattern | match
 	{
 		[&](VarPattern &p)
 		{
-			substitute(*p.var->type, subst, registry);
+			substitute(*p.var->type, subst, registry, mode);
 		},
 		[&](DerefPattern &p)
 		{
-			substitute_types_in_pattern(*p.sub, subst, registry);
+			substitute_types_in_pattern(*p.sub, subst, registry, mode);
 		},
 		[&](AddressOfPattern &p)
 		{
-			substitute_types_in_pattern(*p.sub, subst, registry);
+			substitute_types_in_pattern(*p.sub, subst, registry, mode);
 		},
 		[&](ConstructorPattern &p)
 		{
-			substitute(*p.ctor, subst, registry);
+			substitute(*p.ctor, subst, registry, mode);
 			for(PatternArgument &arg: *p.args)
-				substitute_types_in_pattern(arg.pattern, subst, registry);
+				substitute_types_in_pattern(arg.pattern, subst, registry, mode);
 		},
 		[&](WildcardPattern &)
 		{
@@ -2272,47 +2352,47 @@ static void substitute_types_in_pattern(Pattern &pattern, TypeEnv const &subst, 
 	};
 }
 
-void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry)
+void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry, SubstitutionMode mode)
 {
 	stmt | match
 	{
 		[&](LetStmt &s)
 		{
-			substitute_types_in_pattern(*s.lhs, subst, registry);
-			substitute_types_in_expr(*s.init_expr, subst, registry);
+			substitute_types_in_pattern(*s.lhs, subst, registry, mode);
+			substitute_types_in_expr(*s.init_expr, subst, registry, mode);
 		},
 		[&](ExprStmt &s)
 		{
-			substitute_types_in_expr(*s.expr, subst, registry);
+			substitute_types_in_expr(*s.expr, subst, registry, mode);
 		},
 		[&](BlockStmt &s)
 		{
 			for(Stmt &child_stmt: *s.stmts)
-				substitute_types_in_stmt(child_stmt, subst, registry);
+				substitute_types_in_stmt(child_stmt, subst, registry, mode);
 		},
 		[&](ReturnStmt &s)
 		{
-			substitute_types_in_expr(*s.ret_expr, subst, registry);
+			substitute_types_in_expr(*s.ret_expr, subst, registry, mode);
 		},
 		[&](IfStmt &s)
 		{
-			substitute_types_in_expr(*s.condition, subst, registry);
-			substitute_types_in_stmt(*s.then, subst, registry);
+			substitute_types_in_expr(*s.condition, subst, registry, mode);
+			substitute_types_in_stmt(*s.then, subst, registry, mode);
 			if(s.else_)
-				substitute_types_in_stmt(*s.else_, subst, registry);
+				substitute_types_in_stmt(*s.else_, subst, registry, mode);
 		},
 		[&](WhileStmt &s)
 		{
-			substitute_types_in_expr(*s.condition, subst, registry);
-			substitute_types_in_stmt(*s.body, subst, registry);
+			substitute_types_in_expr(*s.condition, subst, registry, mode);
+			substitute_types_in_stmt(*s.body, subst, registry, mode);
 		},
 		[&](MatchStmt &s)
 		{
-			substitute_types_in_expr(*s.expr, subst, registry);
+			substitute_types_in_expr(*s.expr, subst, registry, mode);
 			for(MatchArm &arm: *s.arms)
 			{
-				substitute_types_in_pattern(arm.capture, subst, registry);
-				substitute_types_in_stmt(arm.stmt, subst, registry);
+				substitute_types_in_pattern(arm.capture, subst, registry, mode);
+				substitute_types_in_stmt(arm.stmt, subst, registry, mode);
 			}
 		},
 	};
@@ -3099,6 +3179,22 @@ struct ConstraintSystem
 		constraints[var].constraints.push_back(c);
 	}
 
+	// Lookup may fail for unconstrained TypeDeductionVars. For example, consider the following
+	// definition:
+	//
+	//     struct Foo'T {}
+	//
+	// If one tries to unify Foo'$_0 with Foo'$_1 with no further information available, then only
+	// one of $_0 and $_1 will have an associated VarConstraintSet.
+	VarConstraintSet* try_lookup(TypeDeductionVar var)
+	{
+		auto it = constraints.find(var);
+		if(it == constraints.end())
+			return nullptr;
+
+		return &it->second;
+	}
+
 	void print() const
 	{
 		vector<std::pair<TypeDeductionVar, VarConstraintSet const*>> list;
@@ -3213,32 +3309,33 @@ struct ConstraintSystem
 // Information flows bottom-up
 static void reduce(TypeDeductionVar var, ConstraintSystem &sys, TypeEnv &env, SemaContext const &ctx)
 {
-	VarConstraintSet &c = sys.constraints.at(var);
-	if(c.state == VarConstraintSet::DONE)
+	VarConstraintSet *c = sys.try_lookup(var);
+	if(not c or c->state == VarConstraintSet::DONE)
 		return;
 
 	// Check for cycles
-	assert(c.state == VarConstraintSet::PENDING);
-	c.state = VarConstraintSet::IN_PROGRESS;
+	assert(c->state == VarConstraintSet::PENDING);
+	c->state = VarConstraintSet::IN_PROGRESS;
 
 	// Compute and visit dependencies
-	for(RelationalConstraint const &bc: c.constraints)
-		bc.compute_dependencies(c.deps);
+	for(RelationalConstraint const &bc: c->constraints)
+		bc.compute_dependencies(c->deps);
 
-	for(VarType v: c.deps)
+	for(VarType v: c->deps)
 	{
 		reduce(std::get<TypeDeductionVar>(v), sys, env, ctx);
-		sys.constraints.at(std::get<TypeDeductionVar>(v)).reverse_deps.insert(var);
+		if(VarConstraintSet *dep = sys.try_lookup(std::get<TypeDeductionVar>(v)))
+			dep->reverse_deps.insert(var);
 	}
 
 
-	assert(c.constraints.size());
-	Type result = c.constraints.front().combine(nullptr, env, ctx);
+	assert(c->constraints.size());
+	Type result = c->constraints.front().combine(nullptr, env, ctx);
 
-	for(RelationalConstraint const &bc: c.constraints | std::views::drop(1))
+	for(RelationalConstraint const &bc: c->constraints | std::views::drop(1))
 		result = bc.combine(&result, env, ctx);
 
-	c.state = VarConstraintSet::DONE;
+	c->state = VarConstraintSet::DONE;
 	assert(not env.try_lookup(var));
 
 	env.add(var, result);
@@ -4556,7 +4653,7 @@ static Type const* typecheck_expr(Expr &expr, SemaContext &ctx)
 	Type const *type = typecheck_subexpr(expr, constraints, ctx);
 
 	TypeEnv subst = create_subst_from_constraints(constraints, ctx);
-	substitute_types_in_expr(expr, subst, ctx.mod->sema->insts);
+	substitute_types_in_expr(expr, subst, ctx.mod->sema->insts, FullDeductionSubsitution(token_range_of(expr)));
 
 	return type;
 }
@@ -4770,8 +4867,8 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				subst.print(std::cout, *ctx.mod);
 				std::cout << std::endl;*/
 
-				substitute_types_in_expr(*s.init_expr, subst, ctx.mod->sema->insts);
-				substitute_types_in_pattern(*s.lhs, subst, ctx.mod->sema->insts);
+				substitute_types_in_expr(*s.init_expr, subst, ctx.mod->sema->insts, FullDeductionSubsitution(s.range));
+				substitute_types_in_pattern(*s.lhs, subst, ctx.mod->sema->insts, FullDeductionSubsitution(s.range));
 			}
 			else
 			{
@@ -4809,7 +4906,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				);
 
 				TypeEnv subst = create_subst_from_constraints(constraints, ctx);
-				substitute_types_in_expr(*s.ret_expr, subst, ctx.mod->sema->insts);
+				substitute_types_in_expr(*s.ret_expr, subst, ctx.mod->sema->insts, FullDeductionSubsitution(s.range));
 			}
 			else
 			{
@@ -4859,7 +4956,8 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 						substitute_types_in_pattern(
 							arm.capture,
 							subst_arm,
-							ctx.mod->sema->insts
+							ctx.mod->sema->insts,
+							FullDeductionSubsitution(token_range_of(arm.capture))
 						);
 
 						if(is<WildcardPattern>(arm.capture))
@@ -4919,7 +5017,7 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 					);
 
 					TypeEnv subst = create_subst_from_constraints(constraints, ctx);
-					substitute_types_in_expr(*default_value, subst, ctx.mod->sema->insts);
+					substitute_types_in_expr(*default_value, subst, ctx.mod->sema->insts, FullDeductionSubsitution(token_range_of(*default_value)));
 				}
 			},
 			[&](StructItem *case_member)

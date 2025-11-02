@@ -31,9 +31,9 @@ proc main() -> i32
 		}
 	}
 
-	//while cur_opt != None {
-	//	sum := sum + cur!'.value;
-	//	cur := cur!'.next;
+	//while cur is Some(inner: ^List) {
+	//	sum := sum + inner.value;
+	//	cur := inner.next;
 	//}
 
 	return sum;
@@ -58,12 +58,3 @@ proc unwrap_or'T(opt: ?T, fallback: T) -> T
 		case None { return fallback; }
 	}
 }
-
-
-//==================================================================================================
-// TODO Calling the constructor like `Foo()` causes an assertion failure because T has not been deduced
-//==================================================================================================
-/*struct Foo'T
-{
-	x: i32,
-}*/

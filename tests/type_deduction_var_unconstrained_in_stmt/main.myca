@@ -1,0 +1,6 @@
+struct Foo'T {}
+
+proc main() -> i32
+{
+	let f = Foo();
+}
