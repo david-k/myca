@@ -114,9 +114,9 @@ cd myca
 cmake -B build
 cmake --build build
 
-# Compiling a *.myca file
-./build/myca hello.myca -o hello.c && gcc hello.c -o hello
-
 # Running the tests
 make test -C build/
+
+# Compiling a *.myca file
+./build/myca hello.myca -o hello.c && gcc hello.c -o hello
 ```

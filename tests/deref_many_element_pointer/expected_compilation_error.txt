@@ -1,0 +1,1 @@
+|3:9| error: Expected pointer type, got [^]i32

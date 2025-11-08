@@ -3341,7 +3341,7 @@ static void reduce(TypeDeductionVar var, ConstraintSystem &sys, TypeEnv &env, Se
 	env.add(var, result);
 }
 
-// Information flow top-down
+// Information flows top-down
 static optional<Type> materialize(TypeDeductionVar var, ConstraintSystem &sys, TypeEnv &env, SemaContext const &ctx)
 {
 	Type &type = env.lookup(var);
@@ -3401,24 +3401,52 @@ Type UnificationConstraint::combine(
 	return new_result;
 }
 
+static Type const* get_multi_element_pointee(
+	Type const *type,
+	TokenRange range,
+	SemaContext const &ctx
+)
+{
+	PointerType const *pointer_type = std::get_if<PointerType>(type);
+	if(not pointer_type or pointer_type->kind != PointerType::MANY)
+		throw_sem_error("Expected multi-element pointer type, got "s + str(*type, *ctx.mod), range.first, ctx.mod);
+
+	return pointer_type->pointee;
+}
+
 Type ElementTypeConstraint::combine(
 	Type const *NULLABLE current_result,
 	TypeEnv &env,
 	SemaContext const &ctx
 ) const
 {
-	Type const &other_type = env.lookup(array_var);
-	PointerType const *array_type = std::get_if<PointerType>(&other_type);
-	if(not array_type or array_type->kind != PointerType::MANY)
-		throw_sem_error("Expected many pointer type", token_range_of(other_type).first, ctx.mod);
+	Type const &pointer_type = env.lookup(array_var);
+	Type const *pointee = get_multi_element_pointee(
+		&pointer_type,
+		token_range_of(pointer_type),
+		ctx
+	);
 
 	if(not current_result)
-		return *array_type->pointee;
+		return *pointee;
 
 	Type new_result;
-	unify(*current_result, *array_type->pointee, UNIFY_EQUAL, &env, {.result = &new_result}, ctx, nullopt);
+	unify(*current_result, *pointee, UNIFY_EQUAL, &env, {.result = &new_result}, ctx, nullopt);
 
 	return new_result;
+}
+
+static Type const* get_single_element_pointee(
+	Type const *type,
+	TokenRange range,
+	SemaContext const &ctx
+)
+{
+	PointerType const *pointer_type = std::get_if<PointerType>(type);
+	if(not pointer_type or pointer_type->kind != PointerType::SINGLE)
+		throw_sem_error("Expected pointer type, got "s + str(*type, *ctx.mod), range.first, ctx.mod);
+
+	return pointer_type->pointee;
 }
 
 Type PointeeTypeConstraint::combine(
@@ -3427,21 +3455,41 @@ Type PointeeTypeConstraint::combine(
 	SemaContext const &ctx
 ) const
 {
-	Type const &other_type = env.lookup(pointer_var);
-	PointerType const *pointer_type = std::get_if<PointerType>(&other_type);
-	if(not pointer_type)
-		throw_sem_error("Expected pointer type", token_range_of(other_type).first, ctx.mod);
+	Type const &pointer_type = env.lookup(pointer_var);
+	Type const *pointee = get_single_element_pointee(
+		&pointer_type,
+		token_range_of(pointer_type),
+		ctx
+	);
 
 	if(not current_result)
-		return *pointer_type->pointee;
+		return *pointee;
 
 	Type new_result;
-	unify(*current_result, *pointer_type->pointee, UNIFY_EQUAL, &env, {.result = &new_result}, ctx, nullopt);
+	unify(*current_result, *pointee, UNIFY_EQUAL, &env, {.result = &new_result}, ctx, nullopt);
 
 	return new_result;
 }
 
 Parameter const* find_var_member(StructInstance *inst, string_view field);
+
+static Type const* get_member_type(
+	Type const *type,
+	string_view member,
+	TokenRange range,
+	SemaContext const &ctx
+)
+{
+	StructType const *struct_type = std::get_if<StructType>(type);
+	if(not struct_type)
+		throw_sem_error("Expected object of struct type for member access, got " + str(*type, *ctx.mod), range.first, ctx.mod);
+
+	Parameter const *var_member = find_var_member(struct_type->inst, member);
+	if(not var_member)
+		throw_sem_error("`"s + struct_type->inst->struct_()->name + "` has no field named `"s + member + "`", range.first, ctx.mod);
+
+	return var_member->type;
+}
 
 Type MemberTypeConstraint::combine(
 	Type const *NULLABLE current_result,
@@ -3449,21 +3497,14 @@ Type MemberTypeConstraint::combine(
 	SemaContext const &ctx
 ) const
 {
-	Type const &other_type = env.lookup(object_var);
-	StructType const *struct_type = std::get_if<StructType>(&other_type);
-
-	if(not struct_type)
-		throw_sem_error("Expected object of struct type for member access, got " + str(other_type, *ctx.mod), token_range_of(other_type).first, ctx.mod);
-
-	Parameter const *var_member = find_var_member(struct_type->inst, member);
-	if(not var_member)
-		throw_sem_error("`"s + struct_type->inst->struct_()->name + "` has no field named `"s + member + "`", struct_type->range.first, ctx.mod);
+	Type const &struct_type = env.lookup(object_var);
+	Type const *member_type = get_member_type(&struct_type, member, token_range_of(struct_type), ctx);
 
 	if(not current_result)
-		return *var_member->type;
+		return *member_type;
 
 	Type new_result;
-	unify(*current_result, *var_member->type, UNIFY_EQUAL, &env, {.result = &new_result}, ctx, nullopt);
+	unify(*current_result, *member_type, UNIFY_EQUAL, &env, {.result = &new_result}, ctx, nullopt);
 
 	return new_result;
 }
@@ -4423,11 +4464,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 		{
 			Type const *addr_type = typecheck_subexpr(*e.addr, constraints, ctx);
 
-			if(PointerType const *addr_ptr_type = std::get_if<PointerType>(addr_type))
-			{
-				e.type = clone_ptr(addr_ptr_type->pointee, ctx.arena);
-			}
-			else if(optional<TypeDeductionVar> pointer_var = get_if_type_deduction_var(*addr_type))
+			if(optional<TypeDeductionVar> pointer_var = get_if_type_deduction_var(*addr_type))
 			{
 				TypeDeductionVar var = ctx.new_type_deduction_var();
 				constraints.add_relational_constraint(var, PointeeTypeConstraint(*pointer_var));
@@ -4435,9 +4472,8 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			}
 			else
 			{
-				// TODO This error message occurs in two places: here and when checking the
-				//      relational constraint. Remove this duplication.
-				throw_sem_error("Expected pointer type, got "s + str(*addr_type, *ctx.mod), e.range.first, ctx.mod);
+				Type const *pointee = get_single_element_pointee(addr_type, e.range, ctx);
+				e.type = clone_ptr(pointee, ctx.arena);
 			}
 
 			return e.type;
@@ -4447,14 +4483,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			Type const *addr_type = typecheck_subexpr(*e.addr, constraints, ctx);
 			Type const *index_type = typecheck_subexpr(*e.index, constraints, ctx);
 
-			if(
-				PointerType const *addr_ptr_type = std::get_if<PointerType>(addr_type);
-				addr_ptr_type and addr_ptr_type->kind == PointerType::MANY
-			)
-			{
-				e.type = clone_ptr(addr_ptr_type->pointee, ctx.arena);
-			}
-			else if(optional<TypeDeductionVar> array_var = get_if_type_deduction_var(*addr_type))
+			if(optional<TypeDeductionVar> array_var = get_if_type_deduction_var(*addr_type))
 			{
 				TypeDeductionVar var = ctx.new_type_deduction_var();
 				constraints.add_relational_constraint(var, ElementTypeConstraint(*array_var));
@@ -4462,9 +4491,8 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			}
 			else
 			{
-				// TODO This error message occurs in two places: here and when checking the
-				//      relational constraint. Remove this duplication.
-				throw_sem_error("Expected many pointer type for indexing, got " + str(*addr_type, *ctx.mod), token_range_of(*e.addr).first, ctx.mod);
+				Type const *pointee = get_multi_element_pointee(addr_type, e.range, ctx);
+				e.type = clone_ptr(pointee, ctx.arena);
 			}
 
 			auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
@@ -4486,16 +4514,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 
 			Type const *object_type = typecheck_subexpr(*e.object, constraints, ctx);
 
-			if(StructType const *struct_type = std::get_if<StructType>(object_type))
-			{
-				// TODO This is the same code as in ElementTypeConstraint::combine()
-				Parameter const *var_member = find_var_member(struct_type->inst, e.member);
-				if(not var_member)
-					throw_sem_error("`"s + struct_type->inst->struct_()->name + "` has no field named `"s + e.member + "`", e.range.first, ctx.mod);
-
-				e.type = clone_ptr(var_member->type, ctx.arena);
-			}
-			else if(optional<TypeDeductionVar> object_var = get_if_type_deduction_var(*object_type))
+			if(optional<TypeDeductionVar> object_var = get_if_type_deduction_var(*object_type))
 			{
 				TypeDeductionVar var = ctx.new_type_deduction_var();
 				constraints.add_relational_constraint(var, MemberTypeConstraint(*object_var, e.member));
@@ -4504,9 +4523,8 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			}
 			else
 			{
-				// TODO This error message occurs in two places: here and when checking the
-				//      relational constraint. Remove this duplication.
-				throw_sem_error("Expected object of struct type for member access, got " + str(*object_type, *ctx.mod), e.range.first, ctx.mod);
+				Type const *member_type = get_member_type(object_type, e.member, e.range, ctx);
+				e.type = clone_ptr(member_type, ctx.arena);
 			}
 
 			return e.type;

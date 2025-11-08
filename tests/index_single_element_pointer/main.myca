@@ -1,0 +1,7 @@
+proc main() -> i32
+{
+	let a = 42;
+	let pa = &a;
+
+	return pa[0];
+}

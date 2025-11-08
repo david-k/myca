@@ -1,0 +1,4 @@
+proc foo(p: [^]i32) -> i32
+{
+	return p^;
+}
