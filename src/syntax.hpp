@@ -152,7 +152,7 @@ static constexpr TokenRange UNKNOWN_TOKEN_RANGE = TokenRange(INVALID_TOKEN_IDX, 
 struct Module;
 class StructInstance;
 class ProcInstance;
-struct UnionInstance;
+class UnionInstance;
 struct ProcTypeInstance;
 struct TypeParameter;
 struct Expr;
@@ -595,25 +595,39 @@ struct VarExpr
 	Type *NULLABLE type = nullptr;
 };
 
+struct UnionInitExpr
+{
+	TokenRange range;
+	Expr *alt_expr;
+
+	// We have to store the alt_type instead of the alt_idx here because the order of the
+	// alternatives may change during substitution. Additinally, some alternatives may be removed
+	// if it turns out they are duplicates.
+	Type *alt_type;
+
+	Type *NULLABLE type = nullptr;
+};
+
 
 struct Expr : variant<
-	struct IntLiteralExpr,
-	struct BoolLiteralExpr,
-	struct StringLiteralExpr,
-	struct UnaryExpr,
-	struct BinaryExpr,
-	struct AddressOfExpr,
-	struct DerefExpr,
-	struct IndexExpr,
-	struct MemberAccessExpr,
-	struct AssignmentExpr,
-	struct AsExpr,
-	struct ConstructorExpr,
-	struct ProcExpr,
-	struct CallExpr,
-	struct SizeOfExpr,
-	struct MakeExpr,
-	struct VarExpr,
+	IntLiteralExpr,
+	BoolLiteralExpr,
+	StringLiteralExpr,
+	UnaryExpr,
+	BinaryExpr,
+	AddressOfExpr,
+	DerefExpr,
+	IndexExpr,
+	MemberAccessExpr,
+	AssignmentExpr,
+	AsExpr,
+	ConstructorExpr,
+	ProcExpr,
+	CallExpr,
+	SizeOfExpr,
+	MakeExpr,
+	VarExpr,
+	UnionInitExpr,
 	Path
 >
 {
@@ -979,7 +993,7 @@ struct Parser
 		pos -= 1;
 	}
 
-	optional<Lexeme> peek(size_t i = 0)
+	optional<Lexeme> peek(size_t i = 0) const
 	{
 		if(pos + i < tokens.size())
 			return tokens[pos + i].kind;

@@ -1,0 +1,1 @@
+error: Assignment to union is ambiguous

@@ -1,6 +1,7 @@
 #include "codegen.hpp"
 
 #include "semantics.hpp"
+#include <ranges>
 
 
 //==============================================================================
@@ -198,14 +199,11 @@ static string mangle_type_args(TypeArgList const &types)
 
 static string mangle_union_type_segment(UnionType const &union_)
 {
-	(void)union_;
-	assert(!"[TODO] mangle_union_type_segment");
+	string mangled = "U";
+	for(Type const *alt: union_.inst->alternatives())
+		mangled += mangle_type_segment(*alt);
 
-	/*string mangled = "U";
-	for(Type const &alt: union_.alternatives())
-		mangled += mangle_type_segment(alt);
-
-	return mangled + "E";*/
+	return mangled + "E";
 }
 
 static string mangle_type_segment(Type const &type)
@@ -266,11 +264,6 @@ static string mangle_type(Type const &type)
 {
 	return "_YT" + mangle_type_segment(type);
 }
-
-/*static string mangle_union_type(UnionType const &union_)
-{
-	return "_YT" + mangle_union_type_segment(union_);
-}*/
 
 static string mangle_constructor(Type const &type)
 {
@@ -560,6 +553,19 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 			backend << "*" << result_var << " = " << init_val << ";" << LineEnd;
 
 			return result_var;
+		},
+		[&](UnionInitExpr const &e)
+		{
+			UnionType const &union_ = std::get<UnionType>(*e.type);
+			string init_val = generate_c_cast(*e.alt_type, *e.alt_expr, backend);
+
+			size_t alt_idx = union_.inst->get_alt_idx(*e.alt_type);
+			string union_var = backend.new_tmp_var();
+			backend << "struct " << mangle_type(union_) << " " << union_var << ";" << LineEnd;
+			backend << union_var << ".__myca__discr = " << alt_idx << ";" << LineEnd;
+			backend << union_var << ".__myca_alt" << alt_idx << " = " << init_val << ";" << LineEnd;
+
+			return union_var;
 		},
 		[&](Path const&) -> string { assert(!"generate_c: Path"); },
 	};
@@ -903,6 +909,29 @@ void generate_c_struct_methods(CStruct const &cstruct, CBackend &backend)
 
 
 //==============================================================================
+// Unions
+//==============================================================================
+void generate_c_union_type(UnionInstance *union_, CBackend &backend)
+{
+	assert(union_->alternatives().size() <= 255);
+
+	backend << "struct " << mangle_type(UnionType(UNKNOWN_TOKEN_RANGE, union_)) << LineEnd;
+	backend << "{" << LineEnd;
+	backend.increase_indent();
+		backend << "uint8_t __myca__discr;" << LineEnd;
+		backend << "union" << LineEnd;
+		backend << "{" << LineEnd;
+		backend.increase_indent();
+			for(auto const &[idx, alt]: union_->alternatives() | std::views::enumerate)
+				backend << *alt << " " << "__myca_alt" << idx << ";" << LineEnd;
+		backend.decrease_indent();
+		backend << "};" << LineEnd;
+	backend.decrease_indent();
+	backend << "};" << LineEnd;
+}
+
+
+//==============================================================================
 // Procedures
 //==============================================================================
 void generate_c_proc_sig(ProcInstance *proc, CBackend &backend)
@@ -953,9 +982,10 @@ void _sort_types_by_deps(
 				inst = inst->parent();
 			}
 		},
-		[&](UnionInstance const*)
+		[&](UnionInstance const *inst)
 		{
-			assert(!"[TODO] _sort_types_by_deps: UnionInstance");
+			for(TypeInstance dep: inst->type_deps())
+				_sort_types_by_deps(dep, result, visited, mod);
 		},
 	};
 
@@ -971,21 +1001,6 @@ vector<TypeInstance> sort_types_by_deps(vector<TypeInstance> const &types, Modul
 
 	return result;
 }
-
-/*void gather_concrete_instances(StructDef *struct_, vector<TypeInstance> &result)
-{
-	for(auto &[_, inst]: struct_->instances)
-	{
-		if(inst.is_concrete())
-			result.push_back(&inst);
-	}
-
-	for(Member &member: struct_->members)
-	{
-		if(StructDef **case_member = std::get_if<StructDef*>(&member))
-			gather_concrete_instances(*case_member, result);
-	}
-}*/
 
 struct ConcreteProcInstance
 {
@@ -1033,6 +1048,11 @@ void generate_c(Module &mod, CBackend &backend)
 			if(struct_->is_concrete())
 				types.push_back(struct_);
 		},
+		[&](UnionInstance *union_)
+		{
+			if(union_->is_concrete())
+				types.push_back(union_);
+		},
 		[&](ProcInstance *proc)
 		{
 			if(proc->is_concrete())
@@ -1055,9 +1075,9 @@ void generate_c(Module &mod, CBackend &backend)
 
 				cstructs.emplace(inst, std::move(cstruct));
 			},
-			[&](UnionInstance const*)
+			[&](UnionInstance *inst)
 			{
-				//generate_c_union_type(*union_, backend);
+				generate_c_union_type(inst, backend);
 			},
 		};
 	}

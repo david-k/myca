@@ -1,4 +1,5 @@
 #include <charconv>
+#include <ranges>
 #include <sstream>
 #include <unordered_map>
 
@@ -254,9 +255,24 @@ void print(Type const &type, Module const &mod, std::ostream &os)
 				print(alt, mod, os);
 			}
 		},
-		[&](UnionType const&)
+		[&](UnionType const &t)
 		{
-			assert(!"print: UnionType: TODO");
+			vector<Type const*> const &alts = t.inst->alternatives();
+			if(alts.size() == 1)
+			{
+				os << "(";
+				print(*alts.front(), mod, os);
+				os << " |)";
+			}
+			else
+			{
+				print(*alts.front(), mod, os);
+				for(Type const *alt: t.inst->alternatives() | std::views::drop(1))
+				{
+					os << " | ";
+					print(*alt, mod, os);
+				}
+			}
 		},
 		[&](Path const &path)
 		{
@@ -413,6 +429,14 @@ void print(Expr const &expr, Module const &mod, std::ostream &os)
 			print(*e.init, mod, os);
 			os << " @ ";
 			print(*e.addr, mod, os);
+		},
+		[&](UnionInitExpr const &e)
+		{
+			os << "$InitUnion'(";
+			print(*e.type, mod, os);
+			os << ")(";
+			print(*e.alt_expr, mod, os);
+			os << ")";
 		},
 		[&](VarExpr const &e)
 		{

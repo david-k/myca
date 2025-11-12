@@ -1,0 +1,7 @@
+proc get_int() -> IntType
+{
+	// This is ambiguous, causing an error. To disambiguate, cast to either i32 or i8
+	return 3;
+}
+
+typealias IntType = i32 | i8;

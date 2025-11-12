@@ -275,6 +275,9 @@ struct FixedArray
 
 	T* begin() { return items; }
 	T* end() { return items + count; }
+
+	T const* begin() const { return items; }
+	T const* end() const { return items + count; }
 };
 
 #pragma GCC diagnostic pop

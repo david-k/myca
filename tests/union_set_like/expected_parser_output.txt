@@ -1,0 +1,35 @@
+struct Foo {}
+
+struct Bar {}
+
+struct Baz
+{
+    i: i32,
+}
+
+typealias A = Foo | Bar | Baz;
+
+typealias BarOrFoo = Foo | Bar;
+
+typealias B = Foo | Bar | Baz;
+
+proc main() -> i32
+{
+    let a: Foo | Bar | Baz = $InitUnion'(Foo | Bar | Baz)(Baz(34));
+    let b: Foo | Bar | Baz = a;
+    match b
+    {
+        case f: Foo
+        {
+            return 0;
+        }
+        case Bar()
+        {
+            return 1;
+        }
+        case Baz(i: i32)
+        {
+            return i;
+        }
+    }
+}

@@ -1,0 +1,17 @@
+typealias Either'(S,T) = S | T;
+
+proc foo'(S,T)(c: Either'(S, T))
+{
+	// This shouldn't compile because it is not guaranteed that S and T are distinct types.
+	// If they refer to the same type, then it would be unclear which of the two case-clauses should
+	// be executed.
+	match c
+	{
+		case let _: S {
+
+		}
+		case let _: T {
+
+		}
+	}
+}

@@ -1,0 +1,47 @@
+struct Foo {}
+
+typealias U = Foo | ?i32;
+
+proc get() -> U
+{
+	// This requires two implicit conversion steps:
+	// 1. Option'(i32).Some ==> Option'i32
+	// 2. Option'i32 ==> U
+	return Some(89);
+}
+
+proc main() -> i32
+{
+	match get()
+	{
+		case let opt: Option
+		{
+			match opt
+			{
+				case Some(let value) { return value; }
+				case None { return 1; }
+			}
+		}
+		case _ { return 2; }
+	}
+}
+
+
+//------------------------------------------------------------------------------
+struct Option'T
+{
+    case implicit Some{value: T},
+    case None,
+}
+
+typealias Some'T = Option'(T).Some;
+typealias None'T = Option'(T).None;
+
+proc unwrap_or'T(opt: ?T, fallback: T) -> T
+{
+	match opt
+	{
+		case Some(let value) { return value; }
+		case None { return fallback; }
+	}
+}

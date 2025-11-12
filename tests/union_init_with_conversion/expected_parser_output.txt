@@ -1,0 +1,61 @@
+struct Foo {}
+
+typealias U = Foo | Option'(i32);
+
+proc get() -> Foo | Option'(i32)
+{
+    return $InitUnion'(Foo | Option'(i32))(Option'(i32).Some(89));
+}
+
+proc main() -> i32
+{
+    match get()
+    {
+        case opt: Option'(i32)
+        {
+            match opt
+            {
+                case Option'(i32).Some(value: i32)
+                {
+                    return value;
+                }
+                case Option'(i32).None()
+                {
+                    return 1;
+                }
+            }
+        }
+        case _
+        {
+            return 2;
+        }
+    }
+}
+
+struct Option'(T)
+{
+    case Some
+    {
+        value: T,
+    },
+    case None {},
+}
+
+typealias Some'(T) = Option'(T).Some;
+
+typealias None'(T) = Option'(T).None;
+
+proc unwrap_or'(T)(opt: Option'(T), fallback: T) -> T
+{
+    match opt
+    {
+        case Option'(T).Some(value: T)
+        {
+            return value;
+        }
+        case Option'(T).None()
+        {
+            return fallback;
+        }
+    }
+}

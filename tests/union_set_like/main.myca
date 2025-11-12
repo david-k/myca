@@ -1,0 +1,23 @@
+struct Foo {}
+struct Bar {}
+struct Baz { i: i32 }
+
+typealias A = Foo | Bar | Baz | Foo;
+
+typealias BarOrFoo = Bar | Foo;
+typealias B = BarOrFoo | Baz | Foo | Bar;
+
+// Both A and B refer to the same union type
+
+proc main() -> i32
+{
+	let a: A = Baz(34);
+	let b: B = a;
+
+	match b
+	{
+		case let f: Foo { return 0; }
+		case Bar() { return 1; }
+		case Baz(let i) { return i; }
+	}
+}

@@ -211,7 +211,7 @@ def run_test(test_src_dir: Path, test_build_dir: Path, myca_bin: Path) -> bool:
 
     if not plan.has_steps():
         print("ERROR: Invalid test")
-        print("No test execution steps defined")
+        print("No execution steps defined")
         return False
 
     return plan.execute(test_src_dir, test_build_dir)

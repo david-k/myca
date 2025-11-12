@@ -4,6 +4,7 @@
 #include <bits/elements_of.h>
 #include <memory>
 #include <ostream>
+#include <ranges>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -214,8 +215,7 @@ struct CaseMemberRegion
 
 using InstanceMember = variant<Parameter, StructInstance*>;
 
-struct UnionInstance;
-using TypeInstance = variant<StructInstance*, UnionInstance const*>;
+using TypeInstance = variant<StructInstance*, UnionInstance*>;
 
 template<>
 struct std::hash<::TypeInstance>
@@ -344,7 +344,6 @@ private:
 	Type *NULLABLE m_discriminator_type = nullptr; // if `m_struct->num_case_members > 0`
 	optional<CaseMemberRegion> m_cases_layout{}; // if `m_struct->num_case_members > 0`
 	unordered_set<TypeInstance> m_type_deps{};
-
 
 	void compute_dependent_properties();
 };
@@ -481,14 +480,103 @@ struct ProcTypeInstance
 bool operator == (ProcTypeInstanceKey const &a, ProcTypeInstanceKey const &b);
 
 template<>
-struct std::hash<::ProcTypeInstanceKey>
+struct std::hash<ProcTypeInstanceKey>
 {
-	size_t operator () (::ProcTypeInstanceKey const &key) const
+	size_t operator () (ProcTypeInstanceKey const &key) const
 	{
-		size_t h = ::compute_hash(*key.ret);
+		size_t h = compute_hash(*key.ret);
 
 		for(Type const &t: *key.params)
-			::combine_hashes(h, ::compute_hash(t));
+			combine_hashes(h, compute_hash(t));
+
+		return h;
+	}
+};
+
+
+//--------------------------------------------------------------------
+// UnionInstance
+//--------------------------------------------------------------------
+struct UnionInstanceKey
+{
+	span<Type const*> alternatives;
+};
+
+bool equiv(Type const &a, Type const &b);
+
+struct TypeEquiv
+{
+	bool operator () (Type const &a, Type const &b) const
+	{
+		return equiv(a, b);
+	}
+};
+
+class UnionInstance
+{
+public:
+
+	UnionInstance(
+		vector<Type const*> &&alternatives,
+		unordered_set<VarType> &&occurring_vars,
+		bool has_type_deduction_vars
+	) :
+		m_alternatives(std::move(alternatives)),
+		m_occurring_vars(std::move(occurring_vars)),
+		m_has_type_deduction_vars(has_type_deduction_vars) {}
+
+	bool is_concrete() const { return m_occurring_vars.empty(); }
+	bool has_type_deduction_vars() const { return m_has_type_deduction_vars; }
+	bool is_deduction_complete() const { return not m_has_type_deduction_vars; }
+	unordered_set<VarType> const& occurring_vars() const { return m_occurring_vars; }
+
+	vector<Type const*> const& alternatives() { return m_alternatives; }
+
+	size_t get_alt_idx(Type const &type) { compute_properties(); return m_alt_to_idx.at(type); }
+	optional<size_t> try_get_alt_idx(Type const &type)
+	{
+		compute_properties();
+
+		auto it = m_alt_to_idx.find(type);
+		if(it == m_alt_to_idx.end())
+			return nullopt;
+
+		return it->second;
+	}
+
+	MemoryLayout layout();
+	unordered_set<TypeInstance> const& type_deps() const { return m_type_deps; }
+
+private:
+	vector<Type const*> m_alternatives;
+	unordered_set<VarType> m_occurring_vars;
+	bool m_has_type_deduction_vars;
+
+	// Memory layout
+	LayoutComputationState m_layout_state = LayoutComputationState::PENDING;
+	optional<MemoryLayout> m_layout{};
+	unordered_set<TypeInstance> m_type_deps{};
+
+	// Lazily computed properties
+	using AltIdxMap = unordered_map<Type, size_t, std::hash<Type>, TypeEquiv>;
+	bool m_properties_computed = false;
+	AltIdxMap m_alt_to_idx;
+
+	void compute_properties();
+};
+
+
+
+bool operator == (UnionInstanceKey const &a, UnionInstanceKey const &b);
+
+template<>
+struct std::hash<UnionInstanceKey>
+{
+	size_t operator () (UnionInstanceKey const &key) const
+	{
+		size_t h = compute_hash(key.alternatives.size());
+		for(Type const *t: key.alternatives)
+			combine_hashes(h, compute_hash(*t));
 
 		return h;
 	}
@@ -502,6 +590,7 @@ class InstanceRegistryListener
 {
 public:
 	virtual void on_new_struct_instance(StructInstance*) {}
+	virtual void on_new_union_instance(UnionInstance*) {}
 	virtual void on_new_proc_instance(ProcInstance*) {}
 };
 
@@ -512,12 +601,18 @@ struct NewInstanceListener : InstanceRegistryListener
 		structs.push_back(inst);
 	}
 
+	virtual void on_new_union_instance(UnionInstance *inst) override
+	{
+		unions.push_back(inst);
+	}
+
 	virtual void on_new_proc_instance(ProcInstance *inst) override
 	{
 		procs.push_back(inst);
 	}
 
 	vector<StructInstance*> structs;
+	vector<UnionInstance*> unions;
 	vector<ProcInstance*> procs;
 };
 
@@ -581,7 +676,11 @@ public:
 		SubstitutionMode mode
 	);
 
+	// `alternatives` must be the result of canonicalize_union_alternatives()
+	UnionInstance* get_union_instance(vector<Type const*> &&alternatives);
+
 	std::generator<StructInstance&> struct_instances();
+	std::generator<UnionInstance&> union_instances();
 	std::generator<ProcInstance&> proc_instances();
 
 	void add_listener(InstanceRegistryListener *l);
@@ -592,15 +691,17 @@ private:
 	Module &m_mod;
 	vector<InstanceRegistryListener*> m_listeners;
 
-	// TODO After type-checking a full-expression, we can remove all StructInstances, ProcInstances
-	//      and ProcTypeInstances for which is_deduction_complete() returns false
+	// TODO After type-checking a full-expression, we can remove all instances
+	//      for which is_deduction_complete() returns false
 	unordered_map<StructInstanceKey, StructInstance> m_struct_instances;
 	unordered_map<ProcInstanceKey, ProcInstance> m_proc_instances;
 	unordered_map<ProcTypeInstanceKey, ProcTypeInstance> m_proc_type_instances;
+	unordered_map<UnionInstanceKey, UnionInstance> m_union_instances;
 
 	StructInstance* add_struct_instance(StructInstance &&new_inst);
 	ProcInstance* add_proc_instance(ProcInstance &&new_inst);
 	ProcTypeInstance* add_proc_type_instance(FixedArray<Type> *params, Type *ret);
+	UnionInstance* add_union_instance(vector<Type const*> &&alternatives);
 };
 
 // Visits each registered StructInstance, ensuring that new instances that might be added by the
@@ -634,25 +735,34 @@ void for_each_instance(InstanceRegistry &registry, Func &&func)
 	registry.add_listener(&listener);
 
 	vector<StructInstance*> structs;
+	vector<UnionInstance*> unions;
 	vector<ProcInstance*> procs;
 
 	for(StructInstance &struct_: registry.struct_instances())
 		structs.push_back(&struct_);
 
+	for(UnionInstance &union_: registry.union_instances())
+		unions.push_back(&union_);
+
 	for(ProcInstance &proc: registry.proc_instances())
 		procs.push_back(&proc);
 
-	while(structs.size() or procs.size())
+	while(structs.size() or unions.size() or procs.size())
 	{
 		for(StructInstance *struct_: structs)
 			func(struct_);
+
+		for(UnionInstance *union_: unions)
+			func(union_);
 
 		for(ProcInstance *proc: procs)
 			func(proc);
 
 		structs = std::move(listener.structs);
+		unions = std::move(listener.unions);
 		procs = std::move(listener.procs);
 		listener.structs = {};
+		listener.unions = {};
 		listener.procs = {};
 	}
 
@@ -711,7 +821,6 @@ struct SemaModule
 };
 
 
-bool equiv(Type const &a, Type const &b);
 bool is_builtin_type(Type const &type, BuiltinTypeDef builtin);
 BuiltinTypeDef smallest_int_type_for(Int128 low, Int128 high);
 BuiltinTypeDef smallest_int_type_for(Int128 value);

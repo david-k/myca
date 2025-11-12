@@ -103,13 +103,16 @@ Type clone(Type const &type, Arena &arena)
 		{
 			return t;
 		},
-		[&](UnionTypeUnresolved const &) -> Type
+		[&](UnionTypeUnresolved const &t) -> Type
 		{
-			assert(!"[TODO] clone: UnionTypeUnresolved");
+			return UnionTypeUnresolved{
+				.range = t.range,
+				.alternatives = clone(t.alternatives, arena),
+			};
 		},
-		[&](UnionType const &) -> Type
+		[&](UnionType const &t) -> Type
 		{
-			assert(!"[TODO] clone: UnionType");
+			return t;
 		},
 		[&](VarType const &t) -> Type
 		{
@@ -291,6 +294,15 @@ Expr clone(Expr const &expr, Arena &arena)
 			return VarExpr{
 				.range = e.range,
 				.var = e.var,
+				.type = clone_ptr(e.type, arena),
+			};
+		},
+		[&](UnionInitExpr const &e) -> Expr
+		{
+			return UnionInitExpr{
+				.range = e.range,
+				.alt_expr = clone_ptr(e.alt_expr, arena),
+				.alt_type = clone_ptr(e.alt_type, arena),
 				.type = clone_ptr(e.type, arena),
 			};
 		},
@@ -630,10 +642,26 @@ bool operator == (ProcTypeInstanceKey const &a, ProcTypeInstanceKey const &b)
 	if(not equiv(*a.ret, *b.ret))
 		return false;
 
-	assert(a.params->count == b.params->count);
+	if(a.params->count != b.params->count)
+		return false;
+
 	for(size_t i = 0; i < a.params->count; ++i)
 	{
 		if(not equiv(a.params->items[i], b.params->items[i]))
+			return false;
+	}
+
+	return true;
+}
+
+bool operator == (UnionInstanceKey const &a, UnionInstanceKey const &b)
+{
+	if(a.alternatives.size() != b.alternatives.size())
+		return false;
+
+	for(size_t i = 0; i < a.alternatives.size(); ++i)
+	{
+		if(not equiv(*a.alternatives[i], *b.alternatives[i]))
 			return false;
 	}
 
@@ -666,9 +694,15 @@ static bool gather_type_vars(Type const &type, unordered_set<VarType> &type_vars
 
 			return parent_has_type_deduction_vars || t.inst->type_args().has_type_deduction_vars;
 		},
-		[&](UnionType const&) -> bool
+		[&](UnionType const &t) -> bool
 		{
-			assert(!"gather_type_vars: UnionType");
+			if(not deduction_vars_only or t.inst->has_type_deduction_vars())
+			{
+				for(VarType v: t.inst->occurring_vars())
+					gather_type_vars(v, type_vars, deduction_vars_only);
+			}
+
+			return t.inst->has_type_deduction_vars();
 		},
 		[&](VarType const &t)
 		{
@@ -771,6 +805,12 @@ std::generator<StructInstance&> InstanceRegistry::struct_instances()
 {
 	for(auto &[_, struct_]: m_struct_instances)
 		co_yield struct_;
+}
+
+std::generator<UnionInstance&> InstanceRegistry::union_instances()
+{
+	for(auto &[_, union_]: m_union_instances)
+		co_yield union_;
 }
 
 std::generator<ProcInstance&> InstanceRegistry::proc_instances()
@@ -894,6 +934,40 @@ ProcTypeInstance* InstanceRegistry::add_proc_type_instance(FixedArray<Type> *par
 			.has_type_deduction_vars = has_type_deduction_vars,
 		}
 	).first->second;
+
+	return inst;
+}
+
+UnionInstance* InstanceRegistry::get_union_instance(vector<Type const*> &&alternatives)
+{
+	UnionInstanceKey key{alternatives};
+	auto it = m_union_instances.find(key);
+	if(it != m_union_instances.end())
+		return &it->second;
+
+	return add_union_instance(std::move(alternatives));
+}
+
+bool operator < (Type const &a, Type const &b);
+
+UnionInstance* InstanceRegistry::add_union_instance(vector<Type const*> &&alternatives)
+{
+	unordered_set<VarType> occurring_vars;
+	bool has_type_deduction_vars = false;
+	for(Type const *alt: alternatives)
+	{
+		if(gather_type_vars(*alt, occurring_vars))
+			has_type_deduction_vars = true;
+	}
+
+	UnionInstanceKey key(alternatives);
+	UnionInstance *inst = &m_union_instances.emplace(
+		key,
+		UnionInstance(std::move(alternatives), std::move(occurring_vars), has_type_deduction_vars)
+	).first->second;
+
+	for(InstanceRegistryListener *l: m_listeners)
+		l->on_new_union_instance(inst);
 
 	return inst;
 }
@@ -1300,6 +1374,99 @@ bool operator == (StructInstanceKey const &a, StructInstanceKey const &b)
 	}
 
 	return true;
+}
+
+
+//--------------------------------------------------------------------
+// UnionInstance
+//--------------------------------------------------------------------
+void flatten_union_alternatives(vector<Type const*> &alternatives)
+{
+	auto it = alternatives.begin();
+	while(it != alternatives.end())
+	{
+		if(UnionType const *sub_union = std::get_if<UnionType>(*it))
+		{
+			it = alternatives.erase(it);
+			it = alternatives.insert(
+				it,
+				sub_union->inst->alternatives().begin(),
+				sub_union->inst->alternatives().end()
+			);
+			it += sub_union->inst->alternatives().size();
+		}
+		else
+			++it;
+	}
+}
+
+void canonicalize_union_alternatives(vector<Type const*> &alternatives)
+{
+	// 1. Flatten
+	// 2. Sort
+	// 3. Remove duplicates
+
+	flatten_union_alternatives(alternatives);
+
+	std::ranges::sort(alternatives, [](Type const *a, Type const *b)
+	{
+		return *a < *b;
+	});
+
+	auto new_end = std::ranges::unique(alternatives, [](Type const *a, Type const *b)
+	{
+		return equiv(*a, *b);
+	}).begin();
+	alternatives.erase(new_end, alternatives.end());
+}
+
+vector<Type const*> canonicalize_union_alternatives(FixedArray<Type> *alternatives)
+{
+	vector<Type const*> result;
+	result.reserve(alternatives->count);
+	for(Type const &alt: *alternatives)
+		result.push_back(&alt);
+
+	canonicalize_union_alternatives(result);
+
+	return result;
+}
+
+MemoryLayout UnionInstance::layout()
+{
+	assert(is_concrete());
+
+	compute_properties();
+
+	if(m_layout_state == LayoutComputationState::DONE)
+		return *m_layout;
+
+	assert(m_layout_state != LayoutComputationState::IN_PROGRESS);
+	m_layout_state = LayoutComputationState::IN_PROGRESS;
+
+	BuiltinTypeDef discr_type = smallest_int_type_for(m_alternatives.size());
+	m_layout = MemoryLayout();
+	m_layout->extend(get_layout(discr_type));
+
+	MemoryLayout alt_layouts;
+	for(Type const *alt: m_alternatives)
+		alt_layouts.extend(compute_layout(*alt, &m_type_deps));
+
+	m_layout->extend(alt_layouts);
+	m_layout_state = LayoutComputationState::DONE;
+
+	return *m_layout;
+}
+
+void UnionInstance::compute_properties()
+{
+	if(m_properties_computed)
+		return;
+
+	for(auto const &[idx, alt]: m_alternatives | std::views::enumerate)
+		m_alt_to_idx.emplace(*alt, idx);
+
+	m_properties_computed = true;
 }
 
 
@@ -1789,9 +1956,17 @@ static void resolve_type(Type &type, Scope *scope, SemaContext &ctx)
 			assert(!"[TODO] resolve_type: ProcTypeUnresolved");
 			//mod.sema->inst_reg.get_proc_type_instance
 		},
-		[&](UnionTypeUnresolved&)
+		[&](UnionTypeUnresolved &t)
 		{
-			assert(!"[TODO] resolve_type: UnionTypeUnresolved");
+			for(Type &alt: *t.alternatives)
+				resolve_type(alt, scope, ctx);
+
+			vector<Type const*> canonical_alts = canonicalize_union_alternatives(t.alternatives);
+
+			type = UnionType{
+				.range = t.range,
+				.inst = ctx.mod->sema->insts.get_union_instance(std::move(canonical_alts)),
+			};
 		},
 		[&](Path &path)
 		{
@@ -1873,6 +2048,10 @@ static void resolve_expr(Expr &expr, Scope *scope, SemaContext &ctx)
 			expr = resolve_path_to_expr(p, scope, ctx);
 		},
 		[&](VarExpr const&) {},
+		[&](UnionInitExpr const &e)
+		{
+			resolve_expr(*e.alt_expr, scope, ctx);
+		},
 	};
 }
 
@@ -2176,6 +2355,40 @@ static ProcTypeInstance* substitute_types_in_proc_type(
 	return inst;
 }
 
+static UnionInstance* substitute_types_in_union(
+	UnionInstance *inst,
+	TypeEnv const &env,
+	InstanceRegistry &registry,
+	SubstitutionMode mode
+)
+{
+	if(have_common_vars(inst->occurring_vars(), env))
+	{
+		vector<Type const*> new_alts;
+		new_alts.reserve(inst->alternatives().size());
+		for(Type const *alt: inst->alternatives())
+		{
+			Type *new_alt = clone_ptr(alt, registry.arena());
+			substitute(*new_alt, env, registry, mode);
+			new_alts.push_back(new_alt);
+		}
+
+		canonicalize_union_alternatives(new_alts);
+
+		inst = registry.get_union_instance(std::move(new_alts));
+	}
+	else
+	{
+		validate_unsubstituted_vars(
+			inst->occurring_vars(),
+			inst->has_type_deduction_vars(),
+			env, mode, registry.mod()
+		);
+	}
+
+	return inst;
+}
+
 
 static void substitute(
 	Type &type,
@@ -2214,9 +2427,9 @@ static void substitute(
 				},
 			};
 		},
-		[&](UnionType &)
+		[&](UnionType &t)
 		{
-			assert(!"[TODO] substitute: UnionType");
+			t.inst = substitute_types_in_union(t.inst, env, registry, mode);
 		},
 		[&](VarType &t)
 		{
@@ -2307,6 +2520,11 @@ static void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceReg
 		{
 			assert(!"[TODO] substitute_types_in_expr: MakeExpr");
 		},
+		[&](UnionInitExpr &e)
+		{
+			substitute_types_in_expr(*e.alt_expr, env, registry, mode);
+			substitute(*e.alt_type, env, registry, mode);
+		},
 		[&](VarExpr&) {},
 		[&](Path&) { assert(!"substitute_types_in_expr: Path"); },
 	};
@@ -2344,10 +2562,7 @@ static void substitute_types_in_pattern(
 			for(PatternArgument &arg: *p.args)
 				substitute_types_in_pattern(arg.pattern, subst, registry, mode);
 		},
-		[&](WildcardPattern &)
-		{
-			assert(!"[TODO] substitute_types_in_pattern: WildcardPattern");
-		},
+		[&](WildcardPattern &) {},
 		[&](VarPatternUnresolved&) { assert(!"substitute_types_in_pattern: VarPatternUnresolved"); },
 	};
 }
@@ -2701,12 +2916,75 @@ bool equiv(Type const &a, Type const &b)
 		[&](UnionType const &ta)
 		{
 			UnionType const &tb = std::get<UnionType>(b);
+			return ta.inst == tb.inst;
+		},
+		[&](ProcTypeUnresolved const&) -> bool { assert(!"equiv: ProcTypeUnresolved"); },
+		[&](UnionTypeUnresolved const&) -> bool { assert(!"equiv: UnionTypeUnresolved"); },
+		[&](Path const&) -> bool { assert(!"equiv: Path"); },
+	};
+}
 
-			assert(!"[TODO] equiv: UnionType");
-			(void)ta;
-			(void)tb;
+bool operator < (Type const &a, Type const &b)
+{
+	if(a.index() != b.index())
+		return a.index() < b.index();
 
-			return false;
+	return a | match
+	{
+		[&](BuiltinType const &ta)
+		{
+			BuiltinType const &tb = std::get<BuiltinType>(b);
+			return ta.builtin < tb.builtin;
+		},
+		[&](KnownIntType const &ta)
+		{
+			KnownIntType const &tb = std::get<KnownIntType>(b);
+			return std::tie(ta.low, ta.high) < std::tie(tb.low, tb.high);
+		},
+		[&](VarType const &ta)
+		{
+			VarType const &tb = std::get<VarType>(b);
+			if(ta.index() != tb.index())
+				return ta.index() < tb.index();
+
+			return ta | match
+			{
+				[&](TypeParameterVar va)
+				{
+					// TODO Use something other than pointers to make comparison deterministic
+					return va.def < std::get<TypeParameterVar>(tb).def;
+				},
+				[&](TypeDeductionVar va)
+				{
+					return va.id < std::get<TypeDeductionVar>(tb).id;
+				},
+			};
+		},
+		[&](PointerType const &ta)
+		{
+			PointerType const &tb = std::get<PointerType>(b);
+			return std::tie(ta.kind, ta.mutability, *ta.pointee) < std::tie(tb.kind, tb.mutability, *tb.pointee);
+		},
+		[&](StructType const &ta)
+		{
+			StructType const &tb = std::get<StructType>(b);
+
+			// TODO Use something other than pointers to make comparison deterministic
+			return ta.inst < tb.inst;
+		},
+		[&](ProcType const &ta)
+		{
+			ProcType const &tb = std::get<ProcType>(b);
+
+			// TODO Use something other than pointers to make comparison deterministic
+			return ta.inst < tb.inst;
+		},
+		[&](UnionType const &ta)
+		{
+			UnionType const &tb = std::get<UnionType>(b);
+
+			// TODO Use something other than pointers to make comparison deterministic
+			return ta.inst < tb.inst;
 		},
 		[&](ProcTypeUnresolved const&) -> bool { assert(!"equiv: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> bool { assert(!"equiv: UnionTypeUnresolved"); },
@@ -2764,34 +3042,42 @@ struct ConstraintSystem;
 
 enum class TypeConversion
 {
-	// Do not allow any type conversion
+	// Allows:
+	// - Merging of KnownIntTypes
+	// - Conversion of KnownIntTypes to those concrete integer types that can hold it
 	NONE,
 
-	// Allow type conversions where the memory layout remains the same and the subtyping relation is
-	// respected. For example, the conversion Option.Some ==> Option is allowed, but i32 ==> u32 is
-	// not.
+	// Allows:
+	// - Everything allowed by NONE
+	// - Any type conversions where the memory layout remains the same and the subtyping relation is
+	//   respected. For example, the conversion Option.Some ==> Option is allowed, but i32 ==> u32 is
+	//   not.
 	TRIVIAL,
 
-	// Additionally allow implicit constructors
-	NON_TRIVIAL,
+	// Allows:
+	// - Everything allowed by TRIVIAL
+	// - Implicit struct constructors
+	// - Union constructors
+	// - Safe integer promotions
+	IMPLICIT_CTOR,
 };
 
-enum class ConversionDirection
+enum class ConversionSide
 {
-	RIGHT_TO_LEFT,
-	BIDIRECTIONAL,
+	RIGHT,
+	BOTH,
 };
 
 struct UnificationMode
 {
 	TypeConversion conv;
-	ConversionDirection dir;
+	ConversionSide dir;
 
 
 	UnificationMode with_conv(TypeConversion new_conv) const { return {.conv = new_conv, .dir = dir}; }
 };
 
-inline constexpr UnificationMode UNIFY_EQUAL = {.conv = TypeConversion::NONE, .dir = ConversionDirection::BIDIRECTIONAL};
+inline constexpr UnificationMode UNIFY_EQUAL = {.conv = TypeConversion::NONE, .dir = ConversionSide::BOTH};
 
 struct UnifyOutput
 {
@@ -2876,11 +3162,11 @@ static void unify(
 	string reason;
 	switch(mode.dir)
 	{
-		case ConversionDirection::RIGHT_TO_LEFT:
+		case ConversionSide::RIGHT:
 			reason = "Cannot convert " + str(right, *mod) + " to " + str(left, *mod);
 			break;
 
-		case ConversionDirection::BIDIRECTIONAL:
+		case ConversionSide::BOTH:
 			reason = "Got " + str(left, *mod) + " and " + str(right, *mod);
 			break;
 	}
@@ -3077,7 +3363,7 @@ static bool is_cast_ok(Type const &target_type, Expr &src_expr, TypeEnv const &e
 {
 	Type *src_type = type_of(src_expr);
 	try {
-		unify(target_type, *src_type, {TypeConversion::NON_TRIVIAL, ConversionDirection::RIGHT_TO_LEFT}, &env, {.right_expr = &src_expr}, ctx, nullopt);
+		unify(target_type, *src_type, {TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT}, &env, {.right_expr = &src_expr}, ctx, nullopt);
 		return true;
 	}
 	catch(ParseError const&) {}
@@ -3227,14 +3513,14 @@ struct ConstraintSystem
 							break;
 
 							case TypeConversion::TRIVIAL:
-								if(uc.mode.dir == ConversionDirection::RIGHT_TO_LEFT)
+								if(uc.mode.dir == ConversionSide::RIGHT)
 									std::cout << (uc.swapped ? "  => " : "  <= ");
 								else
 									std::cout << "  <=> ";
 							break;
 
-							case TypeConversion::NON_TRIVIAL:
-								if(uc.mode.dir == ConversionDirection::RIGHT_TO_LEFT)
+							case TypeConversion::IMPLICIT_CTOR:
+								if(uc.mode.dir == ConversionSide::RIGHT)
 									std::cout << (uc.swapped ? "  =>* " : "  <=* ");
 								else
 									std::cout << "  <=>* ";
@@ -3571,11 +3857,11 @@ static bool try_unify_integer_types(
 			}
 		} break;
 
-		case TypeConversion::NON_TRIVIAL:
+		case TypeConversion::IMPLICIT_CTOR:
 		{
 			switch(mode.dir)
 			{
-				case ConversionDirection::RIGHT_TO_LEFT:
+				case ConversionSide::RIGHT:
 				{
 					if(std::holds_alternative<KnownIntType>(left)) {
 						// Always okay
@@ -3587,7 +3873,7 @@ static bool try_unify_integer_types(
 					}
 				} break;
 
-				case ConversionDirection::BIDIRECTIONAL:
+				case ConversionSide::BOTH:
 				{
 					if(std::holds_alternative<KnownIntType>(left) and std::holds_alternative<KnownIntType>(right))
 					{
@@ -3844,7 +4130,7 @@ static bool try_unify_structs(
 		} break;
 
 		case TypeConversion::TRIVIAL:
-		case TypeConversion::NON_TRIVIAL:
+		case TypeConversion::IMPLICIT_CTOR:
 		{
 			try
 			{
@@ -3869,8 +4155,8 @@ static bool try_unify_structs(
 			catch(ParseError const &exc)
 			{
 				if(
-					mode.conv == TypeConversion::NON_TRIVIAL
-					and mode.dir == ConversionDirection::RIGHT_TO_LEFT
+					mode.conv == TypeConversion::IMPLICIT_CTOR
+					and mode.dir == ConversionSide::RIGHT
 					and left_struct->implicit_case()
 				)
 				{
@@ -3917,6 +4203,103 @@ static bool try_unify_structs(
 }
 
 
+// Unification of union types
+//--------------------------------------------------------------------
+static UnionInstance* get_if_union(Type const *type)
+{
+	UnionType const *union_type = std::get_if<UnionType>(type);
+	if(not union_type)
+		return nullptr;
+
+	return union_type->inst;
+}
+
+static bool try_unify_unions(
+	Type const &left,
+	Type const &right,
+	UnificationMode mode,
+	UnificationPhase phase,
+	UnifyOutput out,
+	SemaContext const &ctx,
+	optional<LazyErrorMsg> err
+)
+{
+	(void)phase;
+
+	UnionInstance *left_union = get_if_union(&left);
+	if(not left_union)
+		return false;
+
+	switch(mode.conv)
+	{
+		case TypeConversion::NONE:
+		case TypeConversion::TRIVIAL:
+		{
+			if(not equiv(left, right))
+				throw_unification_error(left, right, err, mode, ctx.mod);
+
+			if(out.result) *out.result = left;
+		} break;
+
+		case TypeConversion::IMPLICIT_CTOR:
+		{
+			if(mode.dir == ConversionSide::RIGHT)
+			{
+				if(not equiv(left, right))
+				{
+					Type const *matched_alt = nullptr;
+					for(Type const *alt: left_union->alternatives())
+					{
+						bool success = false;
+						try {
+							unify(*alt, right, {.conv = TypeConversion::TRIVIAL, .dir = ConversionSide::RIGHT}, phase, out, ctx, err);
+							success = true;
+						}
+						catch(ParseError const&) {}
+
+						if(success)
+						{
+							if(matched_alt)
+								throw_sem_error("Assignment to union is ambiguous", token_range_of(right).first, ctx.mod);
+
+							matched_alt = alt;
+						}
+					}
+
+					if(matched_alt)
+					{
+						if(out.right_expr)
+						{
+							UnionInitExpr init_expr{
+								.range = token_range_of(*out.right_expr),
+								.alt_expr = clone_ptr(out.right_expr, ctx.arena),
+								.alt_type = clone_ptr(matched_alt, ctx.arena),
+								.type = clone_ptr(&left, ctx.arena),
+							};
+
+							*out.right_expr = init_expr;
+						}
+					}
+					else
+						throw_unification_error(left, right, err, mode, ctx.mod);
+				}
+
+				if(out.result) *out.result = left;
+			}
+			else
+			{
+				if(not equiv(left, right))
+					throw_unification_error(left, right, err, mode, ctx.mod);
+
+				if(out.result) *out.result = left;
+			}
+		} break;
+	}
+
+	return true;
+}
+
+
 // Unification of pointer types
 //--------------------------------------------------------------------
 static bool try_unify_pointers(
@@ -3947,9 +4330,9 @@ static bool try_unify_pointers(
 		} break;
 
 		case TypeConversion::TRIVIAL:
-		case TypeConversion::NON_TRIVIAL:
+		case TypeConversion::IMPLICIT_CTOR:
 		{
-			assert(mode.dir == ConversionDirection::RIGHT_TO_LEFT);
+			assert(mode.dir == ConversionSide::RIGHT);
 
 			bool mut_compatible = right_pointer->mutability == IsMutable::YES or left_pointer->mutability == IsMutable::NO;
 			if(not mut_compatible)
@@ -4018,6 +4401,9 @@ static void unify(
 	if(try_unify_structs(left, right, mode, phase, out, ctx, err))
 		return;
 
+	if(try_unify_unions(left, right, mode, phase, out, ctx, err))
+		return;
+
 	if(try_unify_pointers(left, right, mode, phase, out, ctx, err))
 		return;
 
@@ -4054,15 +4440,12 @@ static void unify(
 		{
 			assert(!"[TODO] unify: ProcType");
 		},
-		[&](UnionType const&)
-		{
-			assert(!"[TODO] unify: UnionType");
-		},
 
 		// Handled above
 		[&](KnownIntType const&) { throw_unification_error(left, right, err, mode, ctx.mod); },
 		[&](PointerType const&) { throw_unification_error(left, right, err, mode, ctx.mod); },
 		[&](StructType const&) { throw_unification_error(left, right, err, mode, ctx.mod); },
+		[&](UnionType const&) { throw_unification_error(left, right, err, mode, ctx.mod); },
 
 		[&](ProcTypeUnresolved const&) { assert(!"unify: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) { assert(!"unify: UnionTypeUnresolved"); },
@@ -4199,6 +4582,10 @@ static void expr_default_value_deps(Expr const &expr, std::unordered_map<Default
 		{
 			expr_default_value_deps(*e.addr, deps, mod);
 			expr_default_value_deps(*e.init, deps, mod);
+		},
+		[&](UnionInitExpr const &e)
+		{
+			expr_default_value_deps(*e.alt_expr, deps, mod);
 		},
 		[&](VarExpr const&) {},
 		[&](Path const&) { assert(!"expr_default_value_deps: Path"); },
@@ -4355,7 +4742,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					};
 					unify(
 						*left_type, *right_type,
-						{TypeConversion::NON_TRIVIAL, ConversionDirection::BIDIRECTIONAL},
+						{TypeConversion::IMPLICIT_CTOR, ConversionSide::BOTH},
 						&constraints,
 						out, ctx,
 						LazyErrorMsg(&expr, uni_error_msg)
@@ -4540,7 +4927,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			};
 			unify(
 				*lhs_type, *rhs_type,
-				{TypeConversion::NON_TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
+				{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
 				&constraints,
 				{.right_expr = e.rhs},
 				ctx,
@@ -4624,7 +5011,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 				Type *arg_type = typecheck_subexpr(arg.expr, constraints, ctx);
 				unify(
 					param_type, *arg_type,
-					{TypeConversion::NON_TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
+					{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
 					&constraints,
 					{.right_expr = &arg.expr},
 					ctx,
@@ -4652,6 +5039,10 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			assert(!"[TODO] typecheck_subexpr: MakeExpr");
 			return (Type*)nullptr;
 		},
+		[&](UnionInitExpr &e)
+		{
+			return e.type;
+		},
 		[&](VarExpr &e)
 		{
 			assert(e.var->type && "typecheck_subexpr: VarExpr: Var::type is null");
@@ -4677,123 +5068,103 @@ static Type const* typecheck_expr(Expr &expr, SemaContext &ctx)
 }
 
 
-static Type const* typecheck_pattern(
+enum class PatternConversionSide
+{
+	RIGHT,
+	LEFT,
+};
+
+// Checks whether pattern_type <c rhs_type, where <c refers to the subtype relation induced by the
+// provided TypeConversion.
+//
+// Attention: Does not take lhs_pattern.provided_type into account.
+static Type const* unify_pattern(
 	Pattern &lhs_pattern,
 	Type const &rhs_type,
-	bool infallible_pattern_required,
+	TypeConversion conv,
+	PatternConversionSide dir,
 	ConstraintSystem &constraints,
 	SemaContext &ctx,
-	Expr *root_rhs_expr,
-	bool allow_conversion
+	// Output
+	optional<IsMutable> &requires_lvalue
 )
 {
-	Type const *expected_type = &rhs_type;
-	if(lhs_pattern.provided_type)
-	{
-		auto error_msg = [](Pattern const &pattern, string const &reason, Module const &mod)
-		{
-			throw_sem_error(
-				"Inferred type does not match specified type in let statement: " + reason,
-				token_range_of(pattern).first,
-				&mod
-			);
-		};
-
-		if(infallible_pattern_required)
-		{
-			unify(
-				*lhs_pattern.provided_type, rhs_type,
-				{allow_conversion ? TypeConversion::NON_TRIVIAL : TypeConversion::TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
-				&constraints,
-				{.right_expr = root_rhs_expr},
-				ctx,
-				LazyErrorMsg(&lhs_pattern, error_msg)
-			);
-		}
-		else
-		{
-			unify(
-				rhs_type, *lhs_pattern.provided_type,
-				{TypeConversion::TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
-				&constraints,
-				{},
-				ctx,
-				LazyErrorMsg(&lhs_pattern, error_msg)
-			);
-		}
-
-		expected_type = &*lhs_pattern.provided_type;
-	}
-
-
 	return lhs_pattern | match
 	{
 		[&](VarPattern &p)
 		{
-			p.var->type = clone_ptr(expected_type, ctx.arena);
+			p.var->type = clone_ptr(&rhs_type, ctx.arena);
 			return p.type = clone_ptr(p.var->type, ctx.arena);
 		},
 		[&](DerefPattern &p)
 		{
-			PointerType const *pointer_type = std::get_if<PointerType>(expected_type);
+			PointerType const *pointer_type = std::get_if<PointerType>(&rhs_type);
 			if(not pointer_type)
 				throw_sem_error("Invalid deref pattern: target type not a pointer", p.range.first, ctx.mod);
 
-			Type const *sub_type = typecheck_pattern(
+			Type const *sub_type = unify_pattern(
 				*p.sub,
 				*pointer_type->pointee,
-				infallible_pattern_required,
+				conv,
+				dir,
 				constraints,
 				ctx,
-				root_rhs_expr,
-				false
+				requires_lvalue
 			);
 			return p.type = clone_ptr(sub_type, ctx.arena);
 		},
 		[&](AddressOfPattern &p)
 		{
-			// TODO If there is more than one AddressOfPattern we may end up with multiple redundant LValueChecks
-			constraints.add_check(LValueCheck(root_rhs_expr, p.mutability));
+			if(not requires_lvalue or *requires_lvalue == IsMutable::NO)
+				requires_lvalue = p.mutability;
 
 			Type sub_rhs_type(PointerType{
 				.range = UNKNOWN_TOKEN_RANGE,
 				.kind = PointerType::SINGLE,
-				.pointee = clone_ptr(expected_type, ctx.arena),
+				.pointee = clone_ptr(&rhs_type, ctx.arena),
 				.mutability = p.mutability,
 			});
 
-			Type const *sub_type = typecheck_pattern(
+			Type const *sub_type = unify_pattern(
 				*p.sub,
 				sub_rhs_type,
-				infallible_pattern_required,
+				conv,
+				dir,
 				constraints,
 				ctx,
-				root_rhs_expr,
-				false
+				requires_lvalue
 			);
 
 			return p.type = clone_ptr(sub_type, ctx.arena);
 		},
 		[&](ConstructorPattern &p) -> Type*
 		{
-			if(infallible_pattern_required)
-			{
-				// For now, we treat all constructor patterns as fallible
-				throw_sem_error("Infallible pattern required, but encountered constructor pattern", p.range.first, ctx.mod);
-			}
-
-			auto error_msg = [](Pattern const &pattern, string const &reason, Module const &mod)
+			LazyErrorMsg error_msg(&lhs_pattern, [](Pattern const &pattern, string const &reason, Module const &mod)
 			{
 				throw_sem_error("Invalid constructor pattern: " + reason, token_range_of(pattern).first, &mod);
-			};
-			unify(
-				*expected_type, *p.ctor,
-				{TypeConversion::TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
-				&constraints,
-				{},
-				ctx,
-				LazyErrorMsg(&lhs_pattern, error_msg)
-			);
+			});
+			if(dir == PatternConversionSide::RIGHT)
+			{
+				unify(
+					*p.ctor, rhs_type,
+					{conv, ConversionSide::RIGHT},
+					&constraints,
+					{},
+					ctx,
+					error_msg
+				);
+			}
+			else
+			{
+				unify(
+					rhs_type, *p.ctor,
+					{conv, ConversionSide::RIGHT},
+					&constraints,
+					{},
+					ctx,
+					error_msg
+				);
+			}
 
 			// Make sure the constructor is not a type variable
 			if(VarType const *var = std::get_if<VarType>(p.ctor))
@@ -4837,14 +5208,14 @@ static Type const* typecheck_pattern(
 						if(arg.param_name.size())
 							throw_sem_error("TODO: Support named arguments in constructor pattern", p.range.first, ctx.mod);
 
-						typecheck_pattern(
+						unify_pattern(
 							arg.pattern,
 							param_type,
-							infallible_pattern_required,
+							conv,
+							dir,
 							constraints,
 							ctx,
-							root_rhs_expr,
-							false
+							requires_lvalue
 						);
 						arg.param_idx = i;
 					}
@@ -4853,12 +5224,111 @@ static Type const* typecheck_pattern(
 
 			return p.type = clone_ptr(p.ctor, ctx.arena);
 		},
-		[&](WildcardPattern &) -> Type*
+		[&](WildcardPattern &p) -> Type*
 		{
-			assert(!"[TODO] typecheck_pattern: WildcardPattern");
+			return p.type = clone_ptr(&rhs_type, ctx.arena);
 		},
-		[&](VarPatternUnresolved&) -> Type* { assert(!"typecheck_pattern: VarPatternUnresolved"); },
+		[&](VarPatternUnresolved&) -> Type* { assert(!"unify_pattern: VarPatternUnresolved"); },
 	};
+}
+
+static Type const* typecheck_pattern(
+	Pattern &lhs_pattern,
+	Type const &rhs_type,
+	bool irrefutable_pattern_required,
+	ConstraintSystem &constraints,
+	SemaContext &ctx,
+	Expr *root_rhs_expr
+)
+{
+	optional<IsMutable> requires_lvalue;
+	if(lhs_pattern.provided_type)
+	{
+		// If pattern must be irrefutable:
+		//   1. rhs_type <: provided_type
+		// Otherwise:
+		//   1. provided_type <: rhs_type
+		//
+		// In both cases:
+		//   2. pattern_type <: provided_type
+
+		auto error_msg = [](Pattern const &pattern, string const &reason, Module const &mod)
+		{
+			throw_sem_error(
+				"Inferred type does not match specified type in let statement: " + reason,
+				token_range_of(pattern).first,
+				&mod
+			);
+		};
+
+		if(irrefutable_pattern_required)
+		{
+			unify(
+				*lhs_pattern.provided_type, rhs_type,
+				{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
+				&constraints,
+				{.right_expr = root_rhs_expr},
+				ctx,
+				LazyErrorMsg(&lhs_pattern, error_msg)
+			);
+		}
+		else
+		{
+			unify(
+				rhs_type, *lhs_pattern.provided_type,
+				{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
+				&constraints,
+				{},
+				ctx,
+				LazyErrorMsg(&lhs_pattern, error_msg)
+			);
+		}
+
+		return unify_pattern(
+			lhs_pattern,
+			*lhs_pattern.provided_type,
+			TypeConversion::TRIVIAL,
+			PatternConversionSide::LEFT,
+			constraints,
+			ctx,
+			requires_lvalue
+		);
+	}
+	else
+	{
+		// If pattern must be irrefutable:
+		//   rhs_type <: pattern_type
+		// Otherwise:
+		//   pattern_type <: rhs_type
+
+		if(irrefutable_pattern_required)
+		{
+			return unify_pattern(
+				lhs_pattern,
+				rhs_type,
+				TypeConversion::IMPLICIT_CTOR,
+				PatternConversionSide::RIGHT,
+				constraints,
+				ctx,
+				requires_lvalue
+			);
+		}
+		else
+		{
+			return unify_pattern(
+				lhs_pattern,
+				rhs_type,
+				TypeConversion::IMPLICIT_CTOR,
+				PatternConversionSide::LEFT,
+				constraints,
+				ctx,
+				requires_lvalue
+			);
+		}
+	}
+
+	if(requires_lvalue)
+		constraints.add_check(LValueCheck(root_rhs_expr, *requires_lvalue));
 }
 
 
@@ -4873,7 +5343,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				ConstraintSystem constraints(*ctx.mod);
 
 				Type const *init_type = typecheck_subexpr(*s.init_expr, constraints, ctx);
-				typecheck_pattern(*s.lhs, *init_type, true, constraints, ctx, s.init_expr, true);
+				typecheck_pattern(*s.lhs, *init_type, true, constraints, ctx, s.init_expr);
 
 				TypeEnv subst = create_subst_from_constraints(constraints, ctx);
 
@@ -4916,7 +5386,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				unify(
 					*ctx.proc->ret_type,
 					*ret_expr_type,
-					{TypeConversion::NON_TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
+					{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
 					&constraints,
 					{.right_expr = s.ret_expr},
 					ctx,
@@ -4968,7 +5438,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 							throw_sem_error("Pattern is following wildcard pattern and is therefore unreachable", token_range_of(arm.capture).first, ctx.mod);
 
 						ConstraintSystem arm_constraints(*ctx.mod);
-						typecheck_pattern(arm.capture, *type_of(*s.expr), false, arm_constraints, ctx, s.expr, false);
+						typecheck_pattern(arm.capture, *type_of(*s.expr), false, arm_constraints, ctx, s.expr);
 						TypeEnv subst_arm = create_subst_from_constraints(arm_constraints, ctx);
 
 						substitute_types_in_pattern(
@@ -4998,9 +5468,97 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 					if((int)matched_cases.size() != subject->struct_()->num_case_members and not has_wildcard)
 						throw_sem_error("Match is not exhaustive", s.range.first, ctx.mod);
 				},
+				[&](UnionType const &union_type)
+				{
+					assert(union_type.inst->is_deduction_complete());
+
+					UnionInstance *subject = union_type.inst;
+					if(subject->occurring_vars().size())
+					{
+						// TODO
+						// The reason for this current restriction is that we cannot know if the
+						// alternatives of the union are actually distinct if type variables are
+						// involved.
+						//
+						// For example, consider the following function:
+						//
+						//     proc foo'(S,T)(c: S | T)
+						//     {
+						//         match c {
+						//             case let v: S {
+						//                 ...
+						//             }
+						//             case let v: T {
+						//                 ...
+						//             }
+						//         }
+						//     }
+						//
+						// If foo is instantiated such that S and T refer to the same type, then
+						// it's unclear which of the two case-clauses to keep.
+						//
+						// I think a good solution would be to require that the alternatives
+						// mentioned in the match statement must be distinct under all possible
+						// substitutions. (Note that this requirement is only necessary for the
+						// alternatives actually mentioned in the match statement, not for all
+						// alternatives of the union.)
+						throw_sem_error(
+							"Matching on a union that depends on type variables is not supported yet",
+							token_range_of(*s.expr).first,
+							ctx.mod
+						);
+					}
+
+					vector<bool> matched_alts(subject->alternatives().size(), false);
+					size_t num_matched_alts = 0;
+					bool has_wildcard = false;
+					for(MatchArm &arm: *s.arms)
+					{
+						if(has_wildcard)
+						{
+							throw_sem_error(
+								"Pattern is following wildcard pattern and is therefore unreachable",
+								token_range_of(arm.capture).first,
+								ctx.mod
+							);
+						}
+
+						ConstraintSystem arm_constraints(*ctx.mod);
+						typecheck_pattern(arm.capture, *type_of(*s.expr), false, arm_constraints, ctx, s.expr);
+						TypeEnv subst_arm = create_subst_from_constraints(arm_constraints, ctx);
+
+						substitute_types_in_pattern(
+							arm.capture,
+							subst_arm,
+							ctx.mod->sema->insts,
+							FullDeductionSubsitution(token_range_of(arm.capture))
+						);
+
+						if(is<WildcardPattern>(arm.capture))
+							has_wildcard = true;
+						else
+						{
+							optional<size_t> alt_idx = subject->try_get_alt_idx(type_of(arm.capture));
+							if(not alt_idx)
+								throw_sem_error("Must match against an alternative of the union", token_range_of(arm.capture).first, ctx.mod);
+
+							if(matched_alts[*alt_idx])
+								throw_sem_error("Duplicate case value", token_range_of(arm.capture).first, ctx.mod);
+
+							matched_alts[*alt_idx] = true;
+							num_matched_alts += 1;
+							arm.discr = *alt_idx;
+						}
+
+						typecheck_stmt(arm.stmt, ctx);
+					}
+
+					if(num_matched_alts != subject->alternatives().size() and not has_wildcard)
+						throw_sem_error("Match is not exhaustive", s.range.first, ctx.mod);
+				},
 				[&](auto const&)
 				{
-					throw_sem_error("The match subject must refer to a struct type", token_range_of(*s.expr).first, ctx.mod);
+					throw_sem_error("The match subject must refer to a struct or union type", token_range_of(*s.expr).first, ctx.mod);
 				},
 			};
 		},
@@ -5027,7 +5585,7 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 					};
 					unify(
 						*var_member.type, *default_value_type,
-						{TypeConversion::NON_TRIVIAL, ConversionDirection::RIGHT_TO_LEFT},
+						{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
 						&constraints,
 						{.right_expr = default_value},
 						ctx,
@@ -5162,14 +5720,13 @@ MemoryLayout compute_layout(Type const &type, unordered_set<TypeInstance> *paren
 		{
 			return get_layout(t.builtin);
 		},
-		[&](VarType const&) -> MemoryLayout { assert(!"compute_layout: VarType"); },
 		[&](PointerType const&)
 		{
 			return MemoryLayout{.size = 8, .alignment = 8};
 		},
 		[&](StructType const &t)
 		{
-			assert(t.inst->is_deduction_complete());
+			assert(t.inst->is_concrete());
 			if(parent_type_deps)
 				parent_type_deps->insert(t.inst);
 
@@ -5182,12 +5739,16 @@ MemoryLayout compute_layout(Type const &type, unordered_set<TypeInstance> *paren
 
 			return cur->compute_own_layout();
 		},
-		[&](ProcType const&) -> MemoryLayout { assert(!"compute_layout: ProcType"); },
-		[&](UnionType const&) -> MemoryLayout
+		[&](UnionType const &t) -> MemoryLayout
 		{
-			assert(!"[TODO] compute_layout: UnionType");
+			if(parent_type_deps)
+				parent_type_deps->insert(t.inst);
+
+			return t.inst->layout();
 		},
 
+		[&](VarType const&) -> MemoryLayout { assert(!"compute_layout: VarType"); },
+		[&](ProcType const&) -> MemoryLayout { assert(!"compute_layout: ProcType"); },
 		[&](KnownIntType const&) -> MemoryLayout { assert(!"compute_layout: KnownIntType"); },
 		[&](ProcTypeUnresolved const&) -> MemoryLayout { assert(!"compute_layout: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> MemoryLayout { assert(!"compute_layout: UnionTypeUnresolved"); },

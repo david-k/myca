@@ -1,0 +1,23 @@
+proc main() -> i32
+{
+	match get_int_or_bool(.int_val = true)
+	{
+		case let v: i32 {
+			return v;
+		}
+		case let b: bool {
+			return 99;
+		}
+	}
+}
+
+proc get_int_or_bool(int_val: bool) -> IntOrBool
+{
+	if int_val {
+		return 3;
+	}
+
+	return true;
+}
+
+typealias IntOrBool = i32 | bool;
