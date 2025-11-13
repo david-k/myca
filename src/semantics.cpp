@@ -3,15 +3,10 @@
 #include "utils.hpp"
 #include <algorithm>
 #include <memory>
+#include <ostream>
 #include <ranges>
 #include <unordered_map>
 #include <variant>
-
-//#define DEBUG_PRINTING
-
-//#ifdef DEBUG_PRINTING
-#include <iostream>
-//#endif
 
 
 //==============================================================================
@@ -805,7 +800,7 @@ StructInstance* InstanceRegistry::add_struct_instance(StructInstance &&new_inst)
 {
 	StructInstanceKey key = new_inst.key();
 	StructInstance *inst = &m_struct_instances.emplace(key, std::move(new_inst)).first->second;
-	LOGGER(m_mod.logger, on_register_struct, inst);
+	LOGGER(m_mod.logger, on_struct_register, inst);
 
 	for(InstanceRegistryListener *l: m_listeners)
 		l->on_new_struct_instance(inst);
@@ -878,7 +873,7 @@ ProcInstance* InstanceRegistry::add_proc_instance(ProcInstance &&new_inst)
 {
 	ProcInstanceKey key = new_inst.key();
 	ProcInstance *inst = &m_proc_instances.emplace(key, std::move(new_inst)).first->second;
-	LOGGER(m_mod.logger, on_register_proc, inst);
+	LOGGER(m_mod.logger, on_proc_register, inst);
 
 	for(InstanceRegistryListener *l: m_listeners)
 		l->on_new_proc_instance(inst);
@@ -1271,7 +1266,7 @@ MemoryLayout StructInstance::compute_own_layout()
 	if(m_layout_state == LayoutComputationState::IN_PROGRESS)
 		throw_sem_error("Cyclic type definition", m_struct->range.first, &m_registry->mod());
 
-	LOGGER(m_registry->mod().logger, on_start_layout_computation, this);
+	LOGGER(m_registry->mod().logger, on_struct_layout_computation_start, this);
 
 	m_layout_state = LayoutComputationState::IN_PROGRESS;
 	m_own_layout = MemoryLayout{};
@@ -1315,7 +1310,7 @@ MemoryLayout StructInstance::compute_own_layout()
 		m_own_layout->extend(var_layout);
 	}
 
-	LOGGER(m_registry->mod().logger, on_end_layout_computation);
+	LOGGER(m_registry->mod().logger, on_struct_layout_computation_end);
 
 	m_layout_state = LayoutComputationState::DONE;
 	return *m_own_layout;
@@ -2302,7 +2297,8 @@ static StructInstance* substitute_types_in_struct(
 	bool *modified = nullptr
 )
 {
-	LOGGER(registry.mod().logger, on_struct_substitution_start, inst, env);
+	LOGGER(registry.mod().logger, on_struct_substitution_start, inst);
+	LOGGER(registry.mod().logger, on_data, env);
 
 	StructInstance *new_parent = nullptr;
 	bool parent_modified = false;
@@ -3504,7 +3500,7 @@ struct ConstraintSystem
 		return &it->second;
 	}
 
-	void print() const
+	void print(std::ostream &os) const
 	{
 		vector<std::pair<TypeDeductionVar, VarConstraintSet const*>> list;
 		for(auto const &[var, constr]: constraints)
@@ -3515,16 +3511,15 @@ struct ConstraintSystem
 			return a.first.id < b.first.id;
 		});
 
-		std::cout << "Constraints:" << std::endl;
 		for(auto const &[var, constr]: list)
 		{
 			Type var_type{VarType(var)};
 
-			std::cout << str(var_type, mod);
+			os << str(var_type, mod);
 
 			for(RelationalConstraint const &c: constr->constraints)
 			{
-				std::cout << std::endl;
+				os << std::endl;
 				c | match
 				{
 					[&](UnificationConstraint const &uc)
@@ -3532,79 +3527,79 @@ struct ConstraintSystem
 						switch(uc.mode.conv)
 						{
 							case TypeConversion::NONE:
-								std::cout << "  == ";
+								os << "  == ";
 							break;
 
 							case TypeConversion::TRIVIAL:
 								if(uc.mode.dir == ConversionSide::RIGHT)
-									std::cout << (uc.swapped ? "  => " : "  <= ");
+									os << (uc.swapped ? "  => " : "  <= ");
 								else
-									std::cout << "  <=> ";
+									os << "  <=> ";
 							break;
 
 							case TypeConversion::IMPLICIT_CTOR:
 								if(uc.mode.dir == ConversionSide::RIGHT)
-									std::cout << (uc.swapped ? "  =>* " : "  <=* ");
+									os << (uc.swapped ? "  =>* " : "  <=* ");
 								else
-									std::cout << "  <=>* ";
+									os << "  <=>* ";
 							break;
 						}
 
-						std::cout << str(*uc.type, mod);
+						os << str(*uc.type, mod);
 					},
 					[&](ElementTypeConstraint const &uc)
 					{
-						std::cout << " == element_type_of(";
-						::print(VarType(uc.array_var), std::cout);
-						std::cout << ")";
+						os << " == element_type_of(";
+						::print(VarType(uc.array_var), os);
+						os << ")";
 					},
 					[&](PointeeTypeConstraint const &uc)
 					{
-						std::cout << " == pointee_of(";
-						::print(VarType(uc.pointer_var), std::cout);
-						std::cout << ")";
+						os << " == pointee_of(";
+						::print(VarType(uc.pointer_var), os);
+						os << ")";
 					},
 					[&](MemberTypeConstraint const &uc)
 					{
-						std::cout << " == member_of(";
-						::print(VarType(uc.object_var), std::cout);
-						std::cout << ", " << uc.member << ")";
+						os << " == member_of(";
+						::print(VarType(uc.object_var), os);
+						os << ", " << uc.member << ")";
 					},
 				};
 			}
 
-			std::cout << std::endl;
+			os << std::endl;
 		}
 
 		if(checks.size())
 		{
-			std::cout << "\nChecks:" << std::endl;
+			os << "\nChecks:" << std::endl;
 			for(TypeCheck const &check: checks)
 			{
 				check | match
 				{
 					[&](IntegerCheck c)
 					{
-						std::cout << "is_integer(" << str(*c.type, mod) << ")";
+						os << "is_integer(" << str(*c.type, mod) << ")";
 					},
 					[&](CastCheck c)
 					{
-						::print(*c.expr, mod, std::cout);
-						std::cout << " as " << str(*c.target_type, mod);
+						::print(*c.expr, mod, os);
+						os << " as " << str(*c.target_type, mod);
 					},
 					[&](LValueCheck const &c)
 					{
 						if(c.mutability == IsMutable::YES)
-							std::cout << "is_mut_lvalue(";
+							os << "is_mut_lvalue(";
 						else
-							std::cout << "is_lvalue(";
+							os << "is_lvalue(";
 
-						::print(*c.expr, mod, std::cout);
-						std::cout << ")";
+						::print(*c.expr, mod, os);
+						os << ")";
 					},
 				};
 
-				std::cout << std::endl;
+				os << std::endl;
 			}
 		}
 	}
@@ -4673,8 +4668,6 @@ Parameter const* find_var_member(StructInstance *inst, string_view field)
 
 static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaContext &ctx)
 {
-	LOGGER(ctx.mod->logger, on_expr_start, expr);
-
 	auto res = expr | match
 	{
 		[&](IntLiteralExpr &e)
@@ -5076,18 +5069,22 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 		[&](Path&) -> Type* { assert(!"typecheck_subexpr: Path"); },
 	};
 
-	LOGGER(ctx.mod->logger, on_expr_end);
-
 	return res;
 }
 
 static Type const* typecheck_expr(Expr &expr, SemaContext &ctx)
 {
+	LOGGER(ctx.mod->logger, on_expr_start, expr);
+
 	ConstraintSystem constraints(*ctx.mod);
 	Type const *type = typecheck_subexpr(expr, constraints, ctx);
+	LOGGER(ctx.mod->logger, on_data, constraints);
 
 	TypeEnv subst = create_subst_from_constraints(constraints, ctx);
 	substitute_types_in_expr(expr, subst, ctx.mod->sema->insts, FullDeductionSubsitution(token_range_of(expr)));
+
+	LOGGER(ctx.mod->logger, on_data, subst);
+	LOGGER(ctx.mod->logger, on_expr_end);
 
 	return type;
 }
@@ -5365,23 +5362,20 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 		{
 			if(s.init_expr)
 			{
-				ConstraintSystem constraints(*ctx.mod);
+				LOGGER(ctx.mod->logger, on_expr_start, *s.init_expr);
 
+				ConstraintSystem constraints(*ctx.mod);
 				Type const *init_type = typecheck_subexpr(*s.init_expr, constraints, ctx);
 				typecheck_pattern(*s.lhs, *init_type, true, constraints, ctx, s.init_expr);
+				LOGGER(ctx.mod->logger, on_data, constraints);
 
 				TypeEnv subst = create_subst_from_constraints(constraints, ctx);
-
-				/*std::cout << "==============================" << std::endl;
-				print(*s.init_expr, *ctx.mod, std::cout);
-				std::cout << "\n------------------------------" << std::endl;
-				constraints.print();
-				std::cout << "\n------------------------------" << std::endl;
-				subst.print(std::cout, *ctx.mod);
-				std::cout << std::endl;*/
+				LOGGER(ctx.mod->logger, on_data, subst);
 
 				substitute_types_in_expr(*s.init_expr, subst, ctx.mod->sema->insts, FullDeductionSubsitution(s.range));
 				substitute_types_in_pattern(*s.lhs, subst, ctx.mod->sema->insts, FullDeductionSubsitution(s.range));
+
+				LOGGER(ctx.mod->logger, on_expr_end);
 			}
 			else
 			{
@@ -5401,6 +5395,8 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 		{
 			if(s.ret_expr)
 			{
+				LOGGER(ctx.mod->logger, on_expr_start, *s.ret_expr);
+
 				auto error_msg = [](Expr const &ret_expr, string const &reason, Module const &mod)
 				{
 					throw_sem_error("Invalid return expression: " + reason, token_range_of(ret_expr).first, &mod);
@@ -5408,6 +5404,8 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 
 				ConstraintSystem constraints(*ctx.mod);
 				Type const *ret_expr_type = typecheck_subexpr(*s.ret_expr, constraints, ctx);
+				LOGGER(ctx.mod->logger, on_data, constraints);
+
 				unify(
 					*ctx.proc->ret_type,
 					*ret_expr_type,
@@ -5419,7 +5417,11 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				);
 
 				TypeEnv subst = create_subst_from_constraints(constraints, ctx);
+				LOGGER(ctx.mod->logger, on_data, subst);
+
 				substitute_types_in_expr(*s.ret_expr, subst, ctx.mod->sema->insts, FullDeductionSubsitution(s.range));
+
+				LOGGER(ctx.mod->logger, on_expr_end);
 			}
 			else
 			{
@@ -5601,8 +5603,11 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 			{
 				if(Expr *default_value = var_member.default_value.try_get_expr())
 				{
+					LOGGER(ctx.mod->logger, on_expr_start, *default_value);
+
 					ConstraintSystem constraints(*ctx.mod);
 					Type const *default_value_type = typecheck_subexpr(*default_value, constraints, ctx);
+					LOGGER(ctx.mod->logger, on_data, constraints);
 
 					auto error_msg = [](Expr const &init_expr, string const &reason, Module const &mod)
 					{
@@ -5618,7 +5623,11 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 					);
 
 					TypeEnv subst = create_subst_from_constraints(constraints, ctx);
+					LOGGER(ctx.mod->logger, on_data, subst);
+
 					substitute_types_in_expr(*default_value, subst, ctx.mod->sema->insts, FullDeductionSubsitution(token_range_of(*default_value)));
+
+					LOGGER(ctx.mod->logger, on_expr_end);
 				}
 			},
 			[&](StructItem *case_member)
@@ -5828,17 +5837,61 @@ void sema(Module &mod, Arena &arena)
 		check_default_values(ctx);
 	}
 
-	LOGGER(mod.logger, on_start_layout_computation_pass);
+	LOGGER(mod.logger, on_layout_computation_start);
 	{
 		compute_type_layouts(mod);
 	}
-	LOGGER(mod.logger, on_end_layout_computation_pass);
+	LOGGER(mod.logger, on_layout_computation_end);
 }
 
 
 //==============================================================================
 // Event logger
 //==============================================================================
+EventLogger::EventLogger(Module *mod, std::ostream &os) :
+	m_mod(mod),
+	m_os(os)
+{
+	m_os <<
+R"###(<!doctype html>
+<html>
+	<head>
+		<title>Myca Compiler Log</title>
+
+		<style>
+
+pre.data {
+	margin-top: 5px;
+	padding: 5px;
+	background-color: #eee;
+}
+
+code.myca-inline {
+	background-color: #eee;
+	white-space: pre;
+	padding: 0 3px;
+}
+
+span.side-info {
+	font-size: small;
+	color: gray;
+}
+
+		</style>
+	</head>
+	<body>
+)###";
+}
+
+EventLogger::~EventLogger()
+{
+	m_os <<
+R"###(
+	</body>
+</html>
+)###";
+}
+
 void EventLogger::on_declare_items_start()
 {
 	m_os << "<h2>Pass 1: Declare items</h2>\n";
@@ -5875,7 +5928,7 @@ void EventLogger::on_typecheck_end()
 void EventLogger::on_expr_start(Expr const &expr)
 {
 	m_os << "<li>Expression:\n";
-		m_os << "<code>"; print(expr, *m_mod, m_os); m_os << "</code>";
+		m_os << "<code class='myca-inline'>"; print(expr, *m_mod, m_os); m_os << "</code>";
 		m_os << "<ul>\n";
 }
 
@@ -5885,33 +5938,20 @@ void EventLogger::on_expr_end()
 	m_os << "</li>\n";
 }
 
-void EventLogger::on_struct_substitution_start(StructInstance *inst, TypeEnv const &subst)
+void EventLogger::on_struct_substitution_start(StructInstance *inst)
 {
 	m_os << "<li>Struct substitution: \n";
-		m_os << "<code>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
-		m_os << " <small><em>(" << inst << ")</em></small>\n";
-
+		m_os << "<code class='myca-inline'>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
+		m_os << " <span class='side-info'>(" << inst << ")</span>\n";
 		m_os << "<ul>\n";
-			m_os << "<li>Substitution:\n";
-				m_os << "<ul>\n";
-					for(auto &[var, type]: subst.env())
-					{
-						m_os << "<li>";
-							print(var, *m_mod, m_os);
-							m_os << " ==> ";
-							print(type, *m_mod, m_os);
-						m_os << "</li>";
-					}
-				m_os << "</ul>\n";
-			m_os << "</li>\n";
 }
 
 void EventLogger::on_struct_substitution_replaced(StructInstance *inst)
 {
 	(void)inst;
 			m_os << "<li>Replaced: ";
-			m_os << "<code>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
-			m_os << " <small><em>(" << inst << ")</em></small>\n";
+			m_os << "<code class='myca-inline'>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
+			m_os << " <span class='side-info'>(" << inst << ")</span>\n";
 			m_os << "</li>\n";
 }
 
@@ -5927,54 +5967,56 @@ void EventLogger::on_struct_substitution_end()
 }
 
 
-void EventLogger::on_register_struct(StructInstance *inst)
+void EventLogger::on_struct_register(StructInstance *inst)
 {
-	string_view deduction_state = "(partially deduced)";
+	string_view deduction_state = "partially deduced";
 	if(inst->is_deduction_complete())
-		deduction_state = "(fully deduced)";
+		deduction_state = "fully deduced";
 
-	m_os << "<li>Register struct " << deduction_state << ": \n";
-		m_os << "<code>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
-		m_os << " <small><em>(" << inst << ")</em></small>\n";
+	m_os << "<li>Register struct: \n";
+		m_os << "<code class='myca-inline'>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
+		m_os << " <span class='side-info'>[" << deduction_state << "]</span>\n";
+		m_os << " <span class='side-info'>[" << inst << "]</span>\n";
 	m_os << "</li>\n";
 }
 
-void EventLogger::on_register_proc(ProcInstance *inst)
+void EventLogger::on_proc_register(ProcInstance *inst)
 {
-	string_view deduction_state = "(partially deduced)";
+	string_view deduction_state = "partially deduced";
 	if(inst->is_deduction_complete())
-		deduction_state = "(fully deduced)";
+		deduction_state = "fully deduced";
 
-	m_os << "<li>Register proc " << deduction_state << ": \n";
-		m_os << "<code>" << inst->proc()->name << "</code>";
-		m_os << " <small><em>(" << inst << ")</em></small>\n";
+	m_os << "<li>Register proc: \n";
+		m_os << "<code class='myca-inline'>" << inst->proc()->name << "</code>";
+		m_os << " <span class='side-info'>[" << deduction_state << "]</span>\n";
+		m_os << " <span class='side-info'>[" << inst << "]</span>\n";
 	m_os << "</li>\n";
 }
 
 
-void EventLogger::on_start_layout_computation_pass()
+void EventLogger::on_layout_computation_start()
 {
 	m_os << "<h2>Pass 4: Layout computation</h2>\n";
 	m_os << "<ul>\n";
 }
 
-void EventLogger::on_end_layout_computation_pass()
+void EventLogger::on_layout_computation_end()
 {
 	m_os << "</ul>\n";
 }
 
-void EventLogger::on_start_layout_computation(StructInstance *inst)
+void EventLogger::on_struct_layout_computation_start(StructInstance *inst)
 {
 	m_os << "<li>Compute layout: \n";
-		m_os << "<code>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
-		m_os << " <small><em>(" << inst << ")</em></small>\n";
+		m_os << "<code class='myca-inline'>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
+		m_os << " <span class='side-info'>(" << inst << ")</span>\n";
 
 		m_os << "<ul>\n";
 			m_os << "<li>Members:\n";
 			m_os << "<ul>\n";
 				for(Parameter const &m: inst->own_var_members())
 				{
-					m_os << "<li><code>";
+					m_os << "<li><code class='myca-inline'>";
 						m_os << name_of(m, m_mod) << ": ";
 						print(*m.type, *m_mod, m_os);
 					m_os << "</code></li>\n";
@@ -5988,10 +6030,28 @@ void EventLogger::on_start_layout_computation(StructInstance *inst)
 				m_os.flush();
 }
 
-void EventLogger::on_end_layout_computation()
+void EventLogger::on_struct_layout_computation_end()
 {
 				m_os << "</ul>\n";
 			m_os << "</li>\n";
 		m_os << "</ul>\n";
+	m_os << "</li>\n";
+}
+
+void EventLogger::on_data(ConstraintSystem const &sys)
+{
+	m_os << "<li>Constraints:\n";
+		m_os << "<pre class='data'><code>";
+		sys.print(m_os);
+		m_os << "</code></pre>\n";
+	m_os << "</li>\n";
+}
+
+void EventLogger::on_data(TypeEnv const &subst)
+{
+	m_os << "<li>Substitution:\n";
+		m_os << "<pre class='data'><code>";
+		subst.print(m_os, *m_mod);
+		m_os << "</code></pre>\n";
 	m_os << "</li>\n";
 }

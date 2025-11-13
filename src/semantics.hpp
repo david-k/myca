@@ -120,7 +120,7 @@ public:
 		}
 	}
 
-	void print(std::ostream &os, Module const &mod)
+	void print(std::ostream &os, Module const &mod) const
 	{
 		vector<std::pair<VarType, Type const*>> sorted;
 		for(auto const &[var, type]: m_env)

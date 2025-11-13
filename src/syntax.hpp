@@ -898,39 +898,44 @@ using TopLevelItem = variant<
 	AliasItem
 >;
 
+class TypeEnv;
+struct ConstraintSystem;
+
 class EventLogger
 {
 public:
-	EventLogger(Module *mod, std::ostream &os) :
-		m_mod(mod),
-		m_os(os) {}
+	EventLogger(Module *mod, std::ostream &os);
+	~EventLogger();
 
+	// Compiler pass events
 	void on_declare_items_start();
 	void on_declare_items_end();
 	void on_resolve_names_start();
 	void on_resolve_names_end();
 	void on_typecheck_start();
 	void on_typecheck_end();
+	void on_layout_computation_start();
+	void on_layout_computation_end();
 
-	void on_struct_substitution_start(StructInstance *inst, class TypeEnv const &subst);
+	// Struct events
+	void on_struct_substitution_start(StructInstance *inst);
 	void on_struct_substitution_replaced(StructInstance *inst);
 	void on_struct_substitution_noop();
 	void on_struct_substitution_end();
+	void on_struct_layout_computation_start(StructInstance *inst);
+	void on_struct_layout_computation_end();
+	void on_struct_register(StructInstance *inst);
 
-	void on_register_struct(StructInstance *inst);
-	void on_register_proc(ProcInstance *inst);
+	// Procedure events
+	void on_proc_register(ProcInstance *inst);
 
+	// Expression events
 	void on_expr_start(Expr const &expr);
 	void on_expr_end();
 
-
-	// Layout computation pass
-	//------------------------------
-	void on_start_layout_computation_pass();
-	void on_end_layout_computation_pass();
-
-	void on_start_layout_computation(StructInstance *inst);
-	void on_end_layout_computation();
+	// Data events
+	void on_data(TypeEnv const &env);
+	void on_data(ConstraintSystem const &sys);
 
 private:
 	Module *m_mod;
