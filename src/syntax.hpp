@@ -153,6 +153,7 @@ struct Module;
 class StructInstance;
 class ProcInstance;
 class UnionInstance;
+struct StructItem;
 struct ProcTypeInstance;
 struct TypeParameter;
 struct Expr;
@@ -186,7 +187,8 @@ using Type = variant
 	// Unresolved types
 	struct Path,
 	struct ProcTypeUnresolved,
-	struct UnionTypeUnresolved
+	struct UnionTypeUnresolved,
+	struct InlineStructType
 >;
 
 enum class BuiltinTypeDef
@@ -315,6 +317,12 @@ struct StructType
 	StructInstance *inst;
 };
 
+struct InlineStructType
+{
+	TokenRange range;
+	StructItem *struct_;
+};
+
 static_assert(sizeof(Type) == 48, "sizeof(Type) is getting larger...");
 
 string_view name_of(Path const &path, Module const *mod);
@@ -401,6 +409,7 @@ struct std::hash<Type>
 			[&](ProcTypeUnresolved const&) { assert(!"hash<Type>: ProcTypeUnresolved"); },
 			[&](UnionTypeUnresolved const&) { assert(!"hash<Type>: UnionTypeUnresolved"); },
 			[&](Path const&) { assert(!"hash<Type>: Path"); },
+			[&](InlineStructType const&) { assert(!"hash<InlineStructType>: Path"); },
 		};
 
 		return h;

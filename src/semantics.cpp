@@ -105,6 +105,7 @@ Type clone(Type const &type, Arena &arena)
 		},
 		[&](UnionTypeUnresolved const &t) -> Type
 		{
+			assert(!"clone(Type): UnionTypeUnresolved");
 			return UnionTypeUnresolved{
 				.range = t.range,
 				.alternatives = clone(t.alternatives, arena),
@@ -119,6 +120,7 @@ Type clone(Type const &type, Arena &arena)
 			return t;
 		},
 		[&](Path const&) -> Type { UNREACHABLE; },
+		[&](InlineStructType const&) -> Type { UNREACHABLE; },
 	};
 }
 
@@ -557,9 +559,9 @@ Type const& type_of(Pattern const &pattern)
 //==============================================================================
 // Scope
 //==============================================================================
-Scope* Scope::new_child()
+Scope* Scope::new_child(bool child_accepts_item_decls)
 {
-	children.push_back(std::make_unique<Scope>(mod, this));
+	children.push_back(std::make_unique<Scope>(mod, child_accepts_item_decls, this));
 	return children.back().get();
 }
 
@@ -585,16 +587,25 @@ void Scope::declare_type_var(TypeParameter *def)
 
 void Scope::declare_struct(StructItem *struct_)
 {
+	if(not accept_item_decls)
+		return parent->declare_struct(struct_);
+
 	declare(struct_->name, struct_, struct_->range);
 }
 
 void Scope::declare_proc(ProcItem *proc)
 {
+	if(not accept_item_decls)
+		return parent->declare_proc(proc);
+
 	declare(proc->name, proc, proc->range);
 }
 
 void Scope::declare_alias(AliasItem *alias)
 {
+	if(not accept_item_decls)
+		return parent->declare_alias(alias);
+
 	declare(alias->name, alias, alias->range);
 }
 
@@ -714,6 +725,7 @@ static bool gather_type_vars(Type const &type, unordered_set<VarType> &type_vars
 		[&](ProcTypeUnresolved const&) -> bool { assert(!"gather_type_vars: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> bool { assert(!"gather_type_vars: UnionTypeUnresolved"); },
 		[&](Path const&) -> bool { assert(!"gather_type_vars: Path"); },
+		[&](InlineStructType const&) -> bool { assert(!"gather_type_vars: InlineStructType"); },
 	};
 }
 
@@ -1600,7 +1612,7 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 	assert(not struct_->ctor_without_parens or struct_->members->count == 0);
 
 	scope->declare_struct(struct_);
-	struct_->sema = ctx.arena.alloc<Struct>(parent, scope->new_child());
+	struct_->sema = ctx.arena.alloc<Struct>(parent, scope->new_child(true));
 
 	// Declare type parameters
 	size_t num_type_params = struct_->type_params->count;
@@ -1677,7 +1689,7 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 static void declare_items(SemaContext &ctx)
 {
 	Module *mod = ctx.mod;
-	mod->sema = std::make_unique<SemaModule>(std::make_unique<Scope>(ctx.mod), ctx.arena);
+	mod->sema = std::make_unique<SemaModule>(std::make_unique<Scope>(ctx.mod, true), ctx.arena);
 
 	for(TopLevelItem &item: to_range(ctx.mod->items))
 	{
@@ -1685,7 +1697,7 @@ static void declare_items(SemaContext &ctx)
 		{
 			[&](ProcItem &proc)
 			{
-				proc.sema = ctx.arena.alloc<Proc>(mod->sema->globals->new_child());
+				proc.sema = ctx.arena.alloc<Proc>(mod->sema->globals->new_child(true));
 				proc.sema->param_vars = alloc_fixed_array<Var*>(proc.params->count, ctx.arena);
 				for(auto const& [idx, param]: *proc.params | std::views::enumerate)
 				{
@@ -1708,7 +1720,7 @@ static void declare_items(SemaContext &ctx)
 			},
 			[&](AliasItem &alias)
 			{
-				alias.sema = ctx.arena.alloc<Alias>(mod->sema->globals->new_child());
+				alias.sema = ctx.arena.alloc<Alias>(mod->sema->globals->new_child(false));
 
 				size_t num_type_params = alias.type_params->count;
 				for(size_t i = 0; i < num_type_params; ++i)
@@ -1972,6 +1984,13 @@ static void resolve_type(Type &type, Scope *scope, SemaContext &ctx)
 		{
 			type = resolve_path_to_type(path, scope, ctx);
 		},
+		[&](InlineStructType &t)
+		{
+			declare_struct_item(t.struct_, nullptr, scope, ctx);
+			StructInstance *inst = ctx.mod->sema->insts.get_struct_instance(t.struct_, nullptr, nullptr);
+
+			type = StructType(t.range, inst);
+		},
 		[&](StructType const&) {},
 		[&](ProcType const&) {},
 		[&](UnionType const&) {},
@@ -2105,7 +2124,7 @@ static void resolve_stmt(Stmt &stmt, Scope *scope, SemaContext &ctx)
 		},
 		[&](BlockStmt const &s)
 		{
-			Scope *block_scope = scope->new_child();
+			Scope *block_scope = scope->new_child(true);
 			for(Stmt &child_stmt: *s.stmts)
 				resolve_stmt(child_stmt, block_scope, ctx);
 		},
@@ -2130,7 +2149,7 @@ static void resolve_stmt(Stmt &stmt, Scope *scope, SemaContext &ctx)
 			resolve_expr(*s.expr, scope, ctx);
 			for(MatchArm &arm: *s.arms)
 			{
-				Scope *arm_scope = scope->new_child();
+				Scope *arm_scope = scope->new_child(true);
 				resolve_pattern(arm.capture, arm_scope, ctx);
 				resolve_stmt(arm.stmt, arm_scope, ctx);
 			}
@@ -2448,6 +2467,7 @@ static void substitute(
 		[&](ProcTypeUnresolved const&) { UNREACHABLE; },
 		[&](UnionTypeUnresolved const&) { UNREACHABLE; },
 		[&](Path const&) { UNREACHABLE; },
+		[&](InlineStructType const&) { UNREACHABLE; },
 	};
 }
 
@@ -2921,6 +2941,7 @@ bool equiv(Type const &a, Type const &b)
 		[&](ProcTypeUnresolved const&) -> bool { assert(!"equiv: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> bool { assert(!"equiv: UnionTypeUnresolved"); },
 		[&](Path const&) -> bool { assert(!"equiv: Path"); },
+		[&](InlineStructType const&) -> bool { assert(!"equiv: InlineStructType"); },
 	};
 }
 
@@ -2986,9 +3007,10 @@ bool operator < (Type const &a, Type const &b)
 			// TODO Use something other than pointers to make comparison deterministic
 			return ta.inst < tb.inst;
 		},
-		[&](ProcTypeUnresolved const&) -> bool { assert(!"equiv: ProcTypeUnresolved"); },
-		[&](UnionTypeUnresolved const&) -> bool { assert(!"equiv: UnionTypeUnresolved"); },
-		[&](Path const&) -> bool { assert(!"equiv: Path"); },
+		[&](ProcTypeUnresolved const&) -> bool { assert(!"operator <: ProcTypeUnresolved"); },
+		[&](UnionTypeUnresolved const&) -> bool { assert(!"operator <: UnionTypeUnresolved"); },
+		[&](Path const&) -> bool { assert(!"operator <: Path"); },
+		[&](InlineStructType const&) -> bool { assert(!"operator <: InlineStructType"); },
 	};
 }
 
@@ -3409,6 +3431,7 @@ static bool is_cast_ok(Type const &target_type, Expr &src_expr, TypeEnv const &e
 		[&](ProcTypeUnresolved const&) -> bool { assert(!"is_cast_ok: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> bool { assert(!"is_cast_ok: UnionTypeUnresolved"); },
 		[&](Path const&) -> bool { assert(!"is_cast_ok: Path"); },
+		[&](InlineStructType const&) -> bool { assert(!"is_cast_ok: InlineStructType"); },
 	};
 }
 
@@ -3929,6 +3952,7 @@ bool type_var_occurs_in(VarType var, Type const &type)
 		[&](ProcTypeUnresolved const&) -> bool { assert(!"type_var_occurs_in: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> bool { assert(!"type_var_occurs_in: UnionTypeUnresolved"); },
 		[&](Path const&) -> bool { assert(!"type_var_occurs_in: Path"); },
+		[&](InlineStructType const&) -> bool { assert(!"type_var_occurs_in: InlineStructType"); },
 	};
 }
 
@@ -4450,6 +4474,7 @@ static void unify(
 		[&](ProcTypeUnresolved const&) { assert(!"unify: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) { assert(!"unify: UnionTypeUnresolved"); },
 		[&](Path const&) { assert(!"unify: Path"); },
+		[&](InlineStructType const&) { assert(!"unify: InlineStructType"); },
 	};
 }
 
@@ -5753,6 +5778,7 @@ MemoryLayout compute_layout(Type const &type, unordered_set<TypeInstance> *paren
 		[&](ProcTypeUnresolved const&) -> MemoryLayout { assert(!"compute_layout: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> MemoryLayout { assert(!"compute_layout: UnionTypeUnresolved"); },
 		[&](Path const&) -> MemoryLayout { assert(!"compute_layout: Path"); },
+		[&](InlineStructType const&) -> MemoryLayout { assert(!"compute_layout: InlineStructType"); },
 	};
 }
 

@@ -282,6 +282,10 @@ void print(Type const &type, Module const &mod, std::ostream &os)
 		{
 			print(t, os);
 		},
+		[&](InlineStructType const&)
+		{
+			assert(!"[TODO] print(Type): InlineStructType");
+		},
 	};
 }
 
@@ -1252,6 +1256,16 @@ static optional<Token> try_consume(Parser &parser, Lexeme kind)
 //--------------------------------------------------------------------
 static Type parse_type(Parser &parser, Memory M);
 static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path = true);
+static Type parse_union_type(Parser &parser, Memory M);
+
+enum class StructParseContext
+{
+	TOP_LEVEL,
+	CASE_MEMBER,
+	INLINE,
+};
+
+static StructItem parse_struct(Parser &parser, StructParseContext struct_context, Memory M);
 
 static FixedArray<Type>* parse_type_arg_list(Parser &parser, Memory M)
 {
@@ -1388,14 +1402,19 @@ static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 			return ProcTypeUnresolved(ranger.get(), M.main->alloc<Type>(ret), params.to_array(*M.main));
 		}
 
+		case Lexeme::BAR: return parse_union_type(parser, M);
+
 		case Lexeme::STRUCT:
 		{
-			assert(!"TODO");
-			/*StructDef* struct_ = parse_struct(parser, mod, false);
-			if(struct_->type_params.size())
-				throw ParseError("Inline struct definition cannot have type parameters");
+			StructItem struct_ = parse_struct(parser, StructParseContext::INLINE, M);
 
-			return UnresolvedPath(struct_->name, {}, mod.scope());*/
+			if(struct_.type_params->count)
+				throw_parse_error("Inline struct definition cannot have type parameters", ranger.first, parser);
+
+			return InlineStructType(
+				ranger.get(),
+				M.main->alloc<StructItem>(struct_)
+			);
 		}
 
 		default: throw_parse_error("Invalid token while parsing type: "s + str(tok.kind), ranger.first, parser);
@@ -2080,18 +2099,11 @@ static ProcItem parse_proc(Parser &parser, Memory M)
 	return proc;
 }
 
-enum class StructParseContext
-{
-	TOP_LEVEL,
-	CASE_MEMBER,
-	INLINE,
-};
-
 static StructItem parse_struct(Parser &parser, StructParseContext struct_context, Memory M)
 {
 	TokenRanger ranger(parser);
 
-	if(struct_context == StructParseContext::TOP_LEVEL || struct_context == StructParseContext::INLINE)
+	if(struct_context == StructParseContext::TOP_LEVEL)
 		consume(parser, Lexeme::STRUCT);
 
 	StructItem struct_;
@@ -2213,7 +2225,7 @@ Module parse_module(string_view source, Memory M)
 	while(parser.tok_kind() != Lexeme::END)
 	{
 		TopLevelItem item = parse_top_level_item(parser, M);
-		items.append(std::move(item));
+		items.append(item);
 	}
 
 	return Module(items.list(), std::move(tokens), source);

@@ -783,14 +783,19 @@ struct Scope
 	Scope *NULLABLE parent = nullptr;
 	vector<std::unique_ptr<Scope>> children;
 	UnorderedStringMap<ScopeItem> items_by_name;
+	bool accept_item_decls;
 
 
-	explicit Scope(Module *mod, Scope *NULLABLE parent = nullptr) :
+	explicit Scope(Module *mod, bool accept_item_decls, Scope *NULLABLE parent = nullptr) :
 		mod(mod),
-		parent(parent) {}
+		parent(parent),
+		accept_item_decls(accept_item_decls)
+	{
+		assert(accept_item_decls or parent);
+	}
 
 	// Scope handling
-	Scope* new_child();
+	Scope* new_child(bool child_accepts_item_decls);
 
 	// Declaring items
 	Var* declare_var(string_view name, IsMutable mutability, TokenRange sloc);

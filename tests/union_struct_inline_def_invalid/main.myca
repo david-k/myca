@@ -1,0 +1,5 @@
+typealias ArithError =
+	| struct DivisionByZero
+	| struct Overflow;
+
+struct DivisionByZero;

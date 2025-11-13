@@ -1,0 +1,34 @@
+proc get_error_code(err: DivisionByZero | Overflow | FileNotFound | NoPermission) -> i32
+{
+    match err
+    {
+        case DivisionByZero()
+        {
+            return 1;
+        }
+        case Overflow()
+        {
+            return 2;
+        }
+        case FileNotFound()
+        {
+            return 3;
+        }
+        case NoPermission()
+        {
+            return 4;
+        }
+    }
+}
+
+proc main() -> i32
+{
+    let err: DivisionByZero | Overflow | FileNotFound | NoPermission = $InitUnion'(DivisionByZero | Overflow | FileNotFound | NoPermission)(FileNotFound());
+    return get_error_code(err);
+}
+
+typealias Error = DivisionByZero | Overflow | FileNotFound | NoPermission;
+
+typealias ArithError = DivisionByZero | Overflow;
+
+typealias IOError = FileNotFound | NoPermission;

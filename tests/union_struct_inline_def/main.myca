@@ -1,0 +1,27 @@
+proc get_error_code(err: Error) -> i32
+{
+	match err
+	{
+		case DivisionByZero { return 1; }
+		case Overflow { return 2; }
+		case FileNotFound { return 3; }
+		case NoPermission { return 4; }
+	}
+}
+
+proc main() -> i32
+{
+	let err: Error = FileNotFound;
+	return get_error_code(err);
+}
+
+typealias Error = ArithError | IOError;
+
+typealias ArithError =
+	| struct DivisionByZero
+	| struct Overflow;
+
+typealias IOError =
+	| struct FileNotFound
+	| struct NoPermission;
+

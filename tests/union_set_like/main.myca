@@ -5,7 +5,13 @@ struct Baz { i: i32 }
 typealias A = Foo | Bar | Baz | Foo;
 
 typealias BarOrFoo = Bar | Foo;
-typealias B = BarOrFoo | Baz | Foo | Bar;
+
+// A leading | is permitted
+typealias B =
+	| BarOrFoo
+	| Baz
+	| Foo
+	| Bar;
 
 // Both A and B refer to the same union type
 

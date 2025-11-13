@@ -256,6 +256,7 @@ static string mangle_type_segment(Type const &type)
 		[&](ProcTypeUnresolved const&) -> string { assert(!"mangle_type_segment: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> string { assert(!"mangle_type_segment: UnionTypeUnresolved"); },
 		[&](Path const&) -> string { assert(!"mangle_type_segment: Path"); },
+		[&](InlineStructType const&) -> string { assert(!"mangle_type_segment: InlineStructType"); },
 	};
 }
 
@@ -340,6 +341,7 @@ static string generate_c_to_str(Type const &type)
 		[&](ProcTypeUnresolved const&) -> string { assert(!"generate_c_to_str: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> string { assert(!"generate_c_to_str: UnionTypeUnresolved"); },
 		[&](Path const&) -> string { assert(!"generate_c_to_str: Path"); },
+		[&](InlineStructType const&) -> string { assert(!"generate_c_to_str: InlineStructType"); },
 	};
 }
 
@@ -568,6 +570,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 			return union_var;
 		},
 		[&](Path const&) -> string { assert(!"generate_c: Path"); },
+		[&](InlineStructType const&) -> string { assert(!"generate_c: InlineStructType"); },
 	};
 }
 
