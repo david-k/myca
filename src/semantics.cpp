@@ -1789,6 +1789,8 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			string_view name = name_of(path, ctx.mod);
 			if(name == "?")
 				name = "Option";
+			else if(name == "!")
+				name = "Result";
 
 			return &scope->lookup(name, path.range.first);
 		},
@@ -3938,10 +3940,9 @@ bool type_var_occurs_in(VarType var, Type const &type)
 		{
 			return t.inst->type_args().occurring_vars.contains(var);
 		},
-		[&](UnionType const&)
+		[&](UnionType const &t)
 		{
-			assert(!"[TODO] type_var_occurs_in: UnionType");
-			return false;
+			return t.inst->occurring_vars().contains(var);
 		},
 
 		[&](ProcTypeUnresolved const&) -> bool { assert(!"type_var_occurs_in: ProcTypeUnresolved"); },
@@ -5480,7 +5481,11 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 							has_wildcard = true;
 						else
 						{
-							StructInstance *arm_inst = std::get<StructType>(type_of(arm.capture)).inst;
+							StructType *arm_struct_type = std::get_if<StructType>(&type_of(arm.capture));
+							if(not arm_struct_type)
+								throw_sem_error("Must match against a case member", token_range_of(arm.capture).first, ctx.mod);
+
+							StructInstance *arm_inst = arm_struct_type->inst;
 							if(arm_inst->parent() != subject)
 								throw_sem_error("Must match against a case member", token_range_of(arm.capture).first, ctx.mod);
 
@@ -5649,6 +5654,7 @@ static void typecheck(SemaContext &ctx)
 			[&](ProcItem &proc)
 			{
 				LOGGER(ctx.mod->logger, on_proc_start, &proc);
+
 				for(auto const &[idx, param]: *proc.params | std::views::enumerate)
 				{
 					proc.sema->param_vars->items[idx]->type = param.type;
@@ -5664,6 +5670,7 @@ static void typecheck(SemaContext &ctx)
 					typecheck_stmt(*proc.body, ctx);
 					ctx.proc = nullptr;
 				}
+
 				LOGGER(ctx.mod->logger, on_proc_end);
 			},
 			[&](StructItem &struct_)

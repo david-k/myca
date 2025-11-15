@@ -1427,11 +1427,12 @@ static Type parse_result_type(Parser &parser, Memory M)
 	Type type = parse_prefix_type(parser, M);
 	if(optional<Token> bang_tok = try_consume(parser, Lexeme::BANG))
 	{
+		TokenRange bang_token_range{parser.prev_tok_idx(), parser.prev_tok_idx()};
 		FixedArray<Type> *type_args = alloc_fixed_array<Type>(2, *M.main);
 		type_args->items[0] = type;
 		type_args->items[1] = parse_prefix_type(parser, M);
 
-		type = Path(ranger.get(), type_args);
+		type = Path(bang_token_range, type_args);
 	}
 
 	return type;
