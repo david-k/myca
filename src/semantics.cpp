@@ -5356,6 +5356,7 @@ static Type const* typecheck_pattern(
 
 static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 {
+	LOGGER(ctx.mod->logger, on_stmt_start, stmt);
 	stmt | match
 	{
 		[&](LetStmt const &s)
@@ -5404,7 +5405,6 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 
 				ConstraintSystem constraints(*ctx.mod);
 				Type const *ret_expr_type = typecheck_subexpr(*s.ret_expr, constraints, ctx);
-				LOGGER(ctx.mod->logger, on_data, constraints);
 
 				unify(
 					*ctx.proc->ret_type,
@@ -5415,6 +5415,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 					ctx,
 					LazyErrorMsg(s.ret_expr, error_msg)
 				);
+				LOGGER(ctx.mod->logger, on_data, constraints);
 
 				TypeEnv subst = create_subst_from_constraints(constraints, ctx);
 				LOGGER(ctx.mod->logger, on_data, subst);
@@ -5590,6 +5591,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 			};
 		},
 	};
+	LOGGER(ctx.mod->logger, on_stmt_end);
 }
 
 
@@ -5646,6 +5648,7 @@ static void typecheck(SemaContext &ctx)
 		{
 			[&](ProcItem &proc)
 			{
+				LOGGER(ctx.mod->logger, on_proc_start, &proc);
 				for(auto const &[idx, param]: *proc.params | std::views::enumerate)
 				{
 					proc.sema->param_vars->items[idx]->type = param.type;
@@ -5661,6 +5664,7 @@ static void typecheck(SemaContext &ctx)
 					typecheck_stmt(*proc.body, ctx);
 					ctx.proc = nullptr;
 				}
+				LOGGER(ctx.mod->logger, on_proc_end);
 			},
 			[&](StructItem &struct_)
 			{
@@ -5925,6 +5929,97 @@ void EventLogger::on_typecheck_end()
 	m_os << "</ul>\n";
 }
 
+void EventLogger::on_stmt_start(Stmt const &stmt)
+{
+	auto output_html = [&](optional<string> const &custom = nullopt)
+	{
+		m_os << "<li>Statement:";
+			if(custom)
+				m_os << " <code class='myca-inline'>" << *custom << "</code>";
+
+			m_os << "<ul>\n";
+			if(not custom)
+			{
+				m_os << "<li>\n";
+					m_os << "<pre class='data'><code>";
+					print(stmt, *m_mod, m_os); m_os << "</code></pre>";
+				m_os << "</li>\n";
+			}
+	};
+
+	stmt | match
+	{
+		[&](LetStmt const&)
+		{
+			output_html();
+		},
+		[&](ExprStmt const&)
+		{
+			output_html();
+		},
+		[&](BlockStmt const&) {},
+		[&](ReturnStmt const&)
+		{
+			output_html();
+		},
+		[&](IfStmt const&)
+		{
+			output_html("if");
+		},
+		[&](WhileStmt const&)
+		{
+			output_html("while");
+		},
+		[&](MatchStmt const&)
+		{
+			output_html("match");
+		},
+	};
+
+	m_stmt_stack.push_back(&stmt);
+}
+
+void EventLogger::on_stmt_end()
+{
+	Stmt const *stmt = m_stmt_stack.back();
+	m_stmt_stack.pop_back();
+
+	auto output_html = [&]()
+	{
+			m_os << "</ul>\n";
+		m_os << "</li>\n";
+	};
+
+	*stmt | match
+	{
+		[&](LetStmt const&)
+		{
+			output_html();
+		},
+		[&](ExprStmt const&)
+		{
+			output_html();
+		},
+		[&](BlockStmt const&) {},
+		[&](ReturnStmt const&)
+		{
+			output_html();
+		},
+		[&](IfStmt const&)
+		{
+			output_html();
+		},
+		[&](WhileStmt const&)
+		{
+			output_html();
+		},
+		[&](MatchStmt const&)
+		{
+			output_html();
+		},
+	};
+}
+
 void EventLogger::on_expr_start(Expr const &expr)
 {
 	m_os << "<li>Expression:\n";
@@ -5993,6 +6088,21 @@ void EventLogger::on_proc_register(ProcInstance *inst)
 	m_os << "</li>\n";
 }
 
+void EventLogger::on_proc_start(ProcItem *proc)
+{
+	m_os << "<li>Procedure: ";
+		m_os << "<code class='myca-inline'>";
+		m_os << proc->name;
+		m_os << "</code>";
+		m_os << "<ul>\n";
+}
+
+void EventLogger::on_proc_end()
+{
+		m_os << "</ul>\n";
+	m_os << "</li>\n";
+}
+
 
 void EventLogger::on_layout_computation_start()
 {
@@ -6040,18 +6150,24 @@ void EventLogger::on_struct_layout_computation_end()
 
 void EventLogger::on_data(ConstraintSystem const &sys)
 {
-	m_os << "<li>Constraints:\n";
-		m_os << "<pre class='data'><code>";
-		sys.print(m_os);
-		m_os << "</code></pre>\n";
-	m_os << "</li>\n";
+	if(sys.checks.size() or sys.constraints.size())
+	{
+		m_os << "<li>Constraints:\n";
+			m_os << "<pre class='data'><code>";
+			sys.print(m_os);
+			m_os << "</code></pre>\n";
+		m_os << "</li>\n";
+	}
 }
 
 void EventLogger::on_data(TypeEnv const &subst)
 {
-	m_os << "<li>Substitution:\n";
-		m_os << "<pre class='data'><code>";
-		subst.print(m_os, *m_mod);
-		m_os << "</code></pre>\n";
-	m_os << "</li>\n";
+	if(not subst.empty())
+	{
+		m_os << "<li>Substitution:\n";
+			m_os << "<pre class='data'><code>";
+			subst.print(m_os, *m_mod);
+			m_os << "</code></pre>\n";
+		m_os << "</li>\n";
+	}
 }

@@ -917,7 +917,6 @@ public:
 	void on_layout_computation_start();
 	void on_layout_computation_end();
 
-	// Struct events
 	void on_struct_substitution_start(StructInstance *inst);
 	void on_struct_substitution_replaced(StructInstance *inst);
 	void on_struct_substitution_noop();
@@ -926,20 +925,23 @@ public:
 	void on_struct_layout_computation_end();
 	void on_struct_register(StructInstance *inst);
 
-	// Procedure events
 	void on_proc_register(ProcInstance *inst);
+	void on_proc_start(ProcItem *proc);
+	void on_proc_end();
 
-	// Expression events
+	void on_stmt_start(Stmt const &stmt);
+	void on_stmt_end();
+
 	void on_expr_start(Expr const &expr);
 	void on_expr_end();
 
-	// Data events
 	void on_data(TypeEnv const &env);
 	void on_data(ConstraintSystem const &sys);
 
 private:
 	Module *m_mod;
 	std::ostream &m_os;
+	vector<Stmt const*> m_stmt_stack;
 };
 
 #define LOGGER(logger, event, ...) do { if(logger) (logger)->event(__VA_ARGS__); } while(false)
