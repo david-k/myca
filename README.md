@@ -1,19 +1,17 @@
 # Myca
 
 Myca is a low-level language with manual memory management. First and foremost,
-the goal is to have a language that I actually like using. Once I have achieved
-that, I want to experiment with compile-time memory safety.
+the goal is to develop a language that is ergonomic and fun to use. Second, I
+want to experiment with compile-time memory safety so I can sleep at night.
 
-Currently implemented:
-- generic structs (combining both sum and product types)
-- generic procedures
-- generic type aliases
-- type inference for generics
+Development is still at a very early stage. The main features currently implemented are:
+- struct types that combine the functionality of both sum and product types
+- union types with set-like semantics
+- generics
+- type inference
 - order-independent type/procedure declarations (no forward-declarations needed)
-- pattern matching
-- basic control flow
-
-For now, the compiler simply emits C to ease prototyping.
+- basic pattern matching
+- a C backend
 
 ## Examples
 
@@ -99,6 +97,7 @@ struct Expr
     case Int{value: i32},
     case Binary{left: ^Expr, right: ^Expr, op: BinaryOp},
 
+    // `type` is automatically added to the constructors of the above cases
     type: ?Type = None,
 }
 ```
