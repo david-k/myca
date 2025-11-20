@@ -829,7 +829,7 @@ void create_c_struct_trailing_vars(StructInstance *struct_inst, CStruct *result)
 
 	if(struct_inst->parent())
 	{
-		size_t additional_padding = struct_inst->parent()->cases_layout().end() - result->cur_layout.size;
+		size_t additional_padding = struct_inst->root()->cases_layout().end() - result->cur_layout.size;
 		if(additional_padding)
 		{
 			for(size_t i = 0; i < additional_padding; ++i)

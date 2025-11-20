@@ -275,6 +275,13 @@ public:
 	StructInstance const *NULLABLE parent() const { return m_parent; }
 	TypeArgList const& type_args() const { return m_type_args; }
 
+	StructInstance *NULLABLE root()
+	{
+		if(m_parent)
+			return m_parent->root();
+
+		return this;
+	}
 	TypeEnv create_type_env() const;
 
 	StructInstanceKey key() { return StructInstanceKey(m_struct, m_type_args.args, m_parent); }
