@@ -2,6 +2,7 @@
 
 #include "semantics.hpp"
 #include <ranges>
+#include <string>
 
 
 //==============================================================================
@@ -358,6 +359,32 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result = true);
 void generate_c(Stmt const &stmt, CBackend &backend);
 void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type const &rhs_type, CBackend &backend);
 
+static string get_discr_name(StructInstance const *inst)
+{
+	return "__myca__discr" + std::to_string(inst->id());
+}
+
+static string get_discr_name(UnionInstance const*)
+{
+	return "__myca__discr";
+}
+
+static string get_discr_name(Type const &type)
+{
+	return type | match
+	{
+		[](StructType const &t)
+		{
+			return get_discr_name(t.inst);
+		},
+		[](UnionType const &t)
+		{
+			return get_discr_name(t.inst);
+		},
+		[](auto const&) -> string { UNREACHABLE; },
+	};
+}
+
 string generate_c_cast(Type const &target_type, string const &expr, Type const &expr_type)
 {
 	if(equiv(target_type, expr_type) || expr == "NULL")
@@ -564,7 +591,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 			size_t alt_idx = union_.inst->get_alt_idx(*e.alt_type);
 			string union_var = backend.new_tmp_var();
 			backend << "struct " << mangle_type(union_) << " " << union_var << ";" << LineEnd;
-			backend << union_var << ".__myca__discr = " << alt_idx << ";" << LineEnd;
+			backend << union_var << "." << get_discr_name(union_.inst) << " = " << alt_idx << ";" << LineEnd;
 			backend << union_var << ".__myca_alt" << alt_idx << " = " << init_val << ";" << LineEnd;
 
 			return union_var;
@@ -750,7 +777,7 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 			else
 			{
 				string subject_str = generate_c(*s.expr, backend);
-				backend << "switch(" << subject_str << ".__myca__discr)" << LineEnd;
+				backend << "switch(" << subject_str << "." << get_discr_name(*type_of(*s.expr)) << ")" << LineEnd;
 				backend << "{" << LineEnd;
 				backend.increase_indent();
 					bool has_wildcard = false;
@@ -807,9 +834,7 @@ void create_c_struct_initial_vars(StructInstance *struct_inst, optional<size_t> 
 		create_c_struct_initial_vars(struct_inst->parent(), struct_inst->case_idx(), result);
 
 	if(struct_inst->struct_()->num_case_members)
-		// TODO When the struct contains multiple nested case members then the name is not
-		// unique anymore
-		result->add(CMember("__myca__discr", child_case_idx, *struct_inst->discriminator_type()));
+		result->add(CMember(get_discr_name(struct_inst), child_case_idx, *struct_inst->discriminator_type()));
 
 	for(Parameter const &member: struct_inst->initial_var_members())
 	{
@@ -921,7 +946,7 @@ void generate_c_union_type(UnionInstance *union_, CBackend &backend)
 	backend << "struct " << mangle_type(UnionType(UNKNOWN_TOKEN_RANGE, union_)) << LineEnd;
 	backend << "{" << LineEnd;
 	backend.increase_indent();
-		backend << "uint8_t __myca__discr;" << LineEnd;
+		backend << "uint8_t " << get_discr_name(union_) << ";" << LineEnd;
 		backend << "union" << LineEnd;
 		backend << "{" << LineEnd;
 		backend.increase_indent();

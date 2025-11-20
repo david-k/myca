@@ -757,7 +757,7 @@ StructInstance* InstanceRegistry::get_struct_instance(
 		return &it->second;
 
 	TypeArgList type_arg_list = create_type_arg_list(type_args, m_arena);
-	return add_struct_instance(StructInstance(struct_, type_arg_list, parent, this));
+	return add_struct_instance(StructInstance(struct_, type_arg_list, parent, next_struct_id(), this));
 }
 
 StructInstance* InstanceRegistry::get_struct_instance(
@@ -770,7 +770,7 @@ StructInstance* InstanceRegistry::get_struct_instance(
 	if(it != m_struct_instances.end())
 		return &it->second;
 
-	return add_struct_instance(StructInstance(struct_, type_args, parent, this));
+	return add_struct_instance(StructInstance(struct_, type_args, parent, next_struct_id(), this));
 }
 
 StructInstance* InstanceRegistry::get_struct_instance(
@@ -793,7 +793,7 @@ StructInstance* InstanceRegistry::get_struct_instance(
 		return &it->second;
 	}
 
-	return add_struct_instance(StructInstance(struct_, new_args, parent, this));
+	return add_struct_instance(StructInstance(struct_, new_args, parent, next_struct_id(), this));
 }
 
 StructInstance* InstanceRegistry::add_struct_instance(StructInstance &&new_inst)

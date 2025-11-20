@@ -260,12 +260,14 @@ public:
 		StructItem const *struct_,
 		TypeArgList const &type_args,
 		StructInstance *parent,
+		size_t id,
 		InstanceRegistry *registry
 	) :
 		m_registry(registry),
 		m_struct(struct_),
 		m_type_args(type_args),
-		m_parent(parent) {}
+		m_parent(parent),
+		m_id(id) {}
 
 
 	Module const& mod() const;
@@ -282,6 +284,8 @@ public:
 
 		return this;
 	}
+
+	size_t id() const { return m_id; }
 	TypeEnv create_type_env() const;
 
 	StructInstanceKey key() { return StructInstanceKey(m_struct, m_type_args.args, m_parent); }
@@ -330,6 +334,7 @@ private:
 	StructItem const *m_struct;
 	TypeArgList m_type_args;
 	StructInstance *m_parent;
+	size_t m_id;
 	bool m_finalized = false;
 
 	// Dependent properties (those that depend on `m_type_args`).
@@ -705,6 +710,7 @@ private:
 	unordered_map<ProcTypeInstanceKey, ProcTypeInstance> m_proc_type_instances;
 	unordered_map<UnionInstanceKey, UnionInstance> m_union_instances;
 
+	size_t next_struct_id() const { return m_struct_instances.size(); }
 	StructInstance* add_struct_instance(StructInstance &&new_inst);
 	ProcInstance* add_proc_instance(ProcInstance &&new_inst);
 	ProcTypeInstance* add_proc_type_instance(FixedArray<Type> *params, Type *ret);
