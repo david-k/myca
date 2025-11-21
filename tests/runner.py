@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 TESTS_TO_IGNORE = {
     "struct_recursive_def",
-    "nested_option_2", # Will be fixed in the next commit (requires an overhaul of the constraint solving algorithm)
 }
 
 
