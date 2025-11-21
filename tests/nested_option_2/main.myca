@@ -1,0 +1,24 @@
+proc main() -> i32
+{
+	let opt: ??i32 = Some(None);
+	return unwrap_or(unwrap_or(opt, 0), 1);
+}
+
+//------------------------------------------------------------------------------
+struct Option'T
+{
+    case implicit Some{value: T},
+    case None,
+}
+
+typealias Some'T = Option'(T).Some;
+typealias None'T = Option'(T).None;
+
+proc unwrap_or'T(opt: ?T, fallback: T) -> T
+{
+	match opt
+	{
+		case Some(let value) { return value; }
+		case None { return fallback; }
+	}
+}

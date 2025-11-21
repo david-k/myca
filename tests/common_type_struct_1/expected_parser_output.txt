@@ -1,0 +1,20 @@
+struct A
+{
+    case B
+    {
+        case C {},
+    },
+}
+
+proc f'(T)(a: T, b: T, c: T) -> Unit
+{
+}
+
+proc main() -> i32
+{
+    let a: A = A.B.C();
+    let b: A.B = A.B.C();
+    let c: A.B.C = A.B.C();
+    f'(A)(a, b, c);
+    return 0;
+}

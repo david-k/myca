@@ -1,0 +1,23 @@
+struct Foo
+{
+	case implicit Ctor{_: Bar}
+}
+
+struct Bar
+{
+	case implicit Ctor{_: Foo}
+}
+
+proc f'T(a: T, b: T) {}
+
+proc g(a: Foo, b: Bar)
+{
+	// The typechecker needs to find a common type T for a and b.
+	// However, there in this case, there are two possibilities:
+	//
+	// 1. T == Foo, by applying Foo.Ctor to b
+	// 2. T == Bar, by applying Bar.Ctor to a
+	//
+	// As this is ambiguous, this should generate an error
+	f(a, b);
+}

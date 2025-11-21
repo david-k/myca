@@ -1,0 +1,23 @@
+struct Foo
+{
+	case implicit Ctor{_: U}
+}
+
+typealias U = Foo | i32;
+
+proc f'T(a: T, b: T) {}
+
+proc g(a: Foo, u: U)
+{
+	// The typechecker needs to find a common type T for a and b.
+	// However, there in this case, there are two possibilities:
+	//
+	// 1. T == Foo, by applying Foo.Ctor to u
+	// 2. T == U, by converting a to the union type U
+	//
+	// As this is ambiguous, this should generate an error
+	//
+	// NOTE: Even if this didn't cause an error the program still wouldn't
+	// compile because Foo and U are mutually recursive.
+	f(a, u);
+}

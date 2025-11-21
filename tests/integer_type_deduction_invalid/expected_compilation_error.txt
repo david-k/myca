@@ -1,1 +1,1 @@
-|12:27| error: Invalid argument: Cannot convert u8 to $KnownInt(1,300)
+|12:27| error: Invalid argument: Incompatible types u8 and $KnownInt(1,300)

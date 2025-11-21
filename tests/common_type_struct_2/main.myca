@@ -1,0 +1,28 @@
+struct A
+{
+	case implicit Ctor{_: B}
+}
+
+struct B
+{
+	case implicit Ctor{_: C}
+}
+
+struct C {}
+
+proc f'T(a: T, b: T, c: T) {}
+
+proc main() -> i32
+{
+	let c = C();
+	let b: B = c;
+	let a: A = c;
+
+	// In all these calls, T is deduced to be A. Implicit constructor calls are
+	// inserted automatically
+	f(a, b, c);
+	f(c, b, a);
+	f(c, a, b);
+
+	return 0;
+}

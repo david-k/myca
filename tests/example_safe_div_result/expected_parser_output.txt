@@ -1,0 +1,81 @@
+typealias ArithError = DivisionByZero | Overflow;
+
+typealias IOError = FileNotFound | NoPermission;
+
+typealias Error = DivisionByZero | Overflow | FileNotFound | NoPermission;
+
+proc safe_div(a: i32, b: i32) -> Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission)
+{
+    if (b == 0)
+    {
+        return Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Err($InitUnion'(DivisionByZero | Overflow | FileNotFound | NoPermission)(DivisionByZero()));
+    }
+    return Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Ok((a / b));
+}
+
+proc get_error_code(err: DivisionByZero | Overflow | FileNotFound | NoPermission) -> i32
+{
+    match err
+    {
+        case DivisionByZero()
+        {
+            return 1;
+        }
+        case Overflow()
+        {
+            return 2;
+        }
+        case FileNotFound()
+        {
+            return 3;
+        }
+        case NoPermission()
+        {
+            return 4;
+        }
+    }
+}
+
+proc main() -> i32
+{
+    let mut result: i32 = 0;
+    match safe_div(12, 3)
+    {
+        case Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Ok(v: i32)
+        {
+            (result = (result + v));
+        }
+        case Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Err(err: DivisionByZero | Overflow | FileNotFound | NoPermission)
+        {
+            (result = (result + get_error_code(err)));
+        }
+    }
+    match safe_div(7, 0)
+    {
+        case Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Ok(v: i32)
+        {
+            (result = (result + v));
+        }
+        case Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Err(err: DivisionByZero | Overflow | FileNotFound | NoPermission)
+        {
+            (result = (result + get_error_code(err)));
+        }
+    }
+    return result;
+}
+
+struct Result'(TOk, TError)
+{
+    case Ok
+    {
+        value: TOk,
+    },
+    case Err
+    {
+        value: TError,
+    },
+}
+
+typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
+
+typealias Err'(TOk, TError) = Result'(TOk, TError).Err;

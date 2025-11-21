@@ -34,6 +34,7 @@ struct Struct
 	Scope *type_scope;
 	FixedArray<Parameter const*> *NULLABLE ctor_params = nullptr;
 	int num_initial_var_members = 0;
+	int depth = 0;
 };
 
 struct Proc
@@ -286,6 +287,8 @@ public:
 	}
 
 	size_t id() const { return m_id; }
+	int depth() const { return m_struct->sema->depth; }
+
 	TypeEnv create_type_env() const;
 
 	StructInstanceKey key() { return StructInstanceKey(m_struct, m_type_args.args, m_parent); }

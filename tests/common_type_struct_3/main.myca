@@ -1,0 +1,17 @@
+struct Foo
+{
+	case A{},
+	case B{},
+	case C
+	{
+		case D{},
+	},
+}
+
+proc f'T(a: T, b: T, c: T) {}
+
+proc main() -> i32
+{
+	f(Foo.A(), Foo.B(), Foo.C.D());
+	return 0;
+}

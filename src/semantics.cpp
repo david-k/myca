@@ -9,6 +9,9 @@
 #include <variant>
 
 
+using std::pair;
+
+
 //==============================================================================
 Expr clone(Expr const &expr, Arena &arena);
 FixedArray<MatchArm>* clone(FixedArray<MatchArm> const *arms, Arena &arena);
@@ -1608,6 +1611,7 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 
 	scope->declare_struct(struct_);
 	struct_->sema = ctx.arena.alloc<Struct>(parent, scope->new_child(true));
+	struct_->sema->depth = parent ? parent->sema->depth + 1 : 0;
 
 	// Declare type parameters
 	size_t num_type_params = struct_->type_params->count;
@@ -2737,9 +2741,9 @@ static bool builtin_losslessly_convertible(BuiltinTypeDef dest, BuiltinTypeDef s
 	}
 }
 
-static bool integer_assignable_to(BuiltinTypeDef type, Int128 val)
+static bool integer_assignable_to(BuiltinTypeDef target_type, Int128 val)
 {
-	switch(type)
+	switch(target_type)
 	{
 		case BuiltinTypeDef::NEVER: assert(!"integer_assignable_to: NEVER");
 		case BuiltinTypeDef::UNIT:  assert(!"integer_assignable_to: UNIT");
@@ -3060,70 +3064,6 @@ static Type* mk_pointer_type(Type *pointee, IsMutable mutability, Arena &arena)
 //--------------------------------------------------------------------
 struct ConstraintSystem;
 
-enum class TypeConversion
-{
-	// Allows:
-	// - Merging of KnownIntTypes
-	// - Conversion of KnownIntTypes to those concrete integer types that can hold it
-	NONE,
-
-	// Allows:
-	// - Everything allowed by NONE
-	// - Any type conversions where the memory layout remains the same and the subtyping relation is
-	//   respected. For example, the conversion Option.Some ==> Option is allowed, but i32 ==> u32 is
-	//   not.
-	TRIVIAL,
-
-	// Allows:
-	// - Everything allowed by TRIVIAL
-	// - Implicit struct constructors
-	// - Union constructors
-	// - Safe integer promotions
-	IMPLICIT_CTOR,
-};
-
-enum class ConversionSide
-{
-	RIGHT,
-	BOTH,
-};
-
-struct UnificationMode
-{
-	TypeConversion conv;
-	ConversionSide dir;
-
-
-	UnificationMode with_conv(TypeConversion new_conv) const { return {.conv = new_conv, .dir = dir}; }
-};
-
-inline constexpr UnificationMode UNIFY_EQUAL = {.conv = TypeConversion::NONE, .dir = ConversionSide::BOTH};
-
-struct UnifyOutput
-{
-	Expr *left_expr = nullptr;
-	Expr *right_expr = nullptr;
-	Type *result = nullptr;
-};
-
-
-// The final goal of unification is to map each TypeDeductionVar to a concrete type (or report an
-// error if that's impossible). This process consists of two phases:
-//
-// 1. Constraint generation phase: If a TypeDeductionVar is encountered during this phase of
-//    unification, a constraint is generated that the TypeDeductionVar must satisfy in order for
-//    unification to succeed
-//
-// 2. Checking phase: If a TypeDeductionVar is encountered it is looked up in the TypeEnv and
-//    unification proceeds
-using UnificationPhase = variant<
-	// The constraint gathering phase
-	ConstraintSystem*,
-
-	// The checking phase
-	TypeEnv const*
->;
-
 using ThrowExprErrorFn = void (*)(Expr const &expr, string const &reason, Module const &mod);
 using ThrowPatternErrorFn = void (*)(Pattern const &pattern, string const &reason, Module const &mod);
 
@@ -3161,36 +3101,135 @@ private:
 
 };
 
+enum class TypeConversion
+{
+	// Allows:
+	// - Merging of KnownIntTypes
+	// - Conversion of KnownIntTypes to those concrete integer types that can hold it
+	NONE,
+
+	// Allows:
+	// - Everything allowed by NONE
+	// - Any type conversions where the memory layout remains the same and the subtyping relation is
+	//   respected. For example, the conversion Option.Some ==> Option is allowed, but i32 ==> u32 is
+	//   not.
+	TRIVIAL,
+
+	// Allows:
+	// - Everything allowed by TRIVIAL
+	// - Implicit struct constructors
+	// - Union constructors
+	// - Safe integer promotions
+	IMPLICIT_CTOR,
+};
+
+// The final goal of unification is to map each TypeDeductionVar to a concrete type (or report an
+// error if that's impossible). This process consists of two phases:
+//
+// 1. Constraint generation phase: If a TypeDeductionVar is encountered during this phase of
+//    unification, a constraint is generated that the TypeDeductionVar must satisfy in order for
+//    unification to succeed
+//
+// 2. Checking phase: If a TypeDeductionVar is encountered it is looked up in the TypeEnv and
+//    unification proceeds
+using UnificationPhase = variant<
+	// The constraint gathering phase
+	ConstraintSystem*,
+
+	// The checking phase
+	TypeEnv const*
+>;
+
+
+struct ConstructorConversion
+{
+	StructInstance *ctor;
+};
+
+struct UnionConversion
+{
+	Type const *union_;
+	Type const *alt;
+};
+
+using TypeConversionEvent = variant<ConstructorConversion, UnionConversion>;
+
+static void apply_conversion(TypeConversionEvent const &conv, Expr *expr, Arena &arena);
+
+
+struct ConversionCallback
+{
+	using Fn = void (*) (TypeConversionEvent const &conv, void *data, Arena &arena);
+
+	void operator () (TypeConversionEvent const &conv, Arena &arena)
+	{
+		fn(conv, data, arena);
+	}
+
+	explicit operator bool () const { return fn != nullptr; }
+
+	Fn fn = nullptr;
+	void *data = nullptr;
+};
+
+static ConversionCallback mk_expr_converter(Expr *expr)
+{
+	return ConversionCallback
+	{
+		.fn = [](TypeConversionEvent const &conv, void *expr, Arena &arena)
+		{
+			apply_conversion(conv, (Expr*)expr, arena);
+		},
+		.data = (void*)expr,
+	};
+}
+
+
+struct UnifyOutput
+{
+	ConversionCallback on_type_conversion_left{};
+	ConversionCallback on_type_conversion_right{};
+	Type *result = nullptr;
+
+	UnifyOutput sides_swapped()
+	{
+		return {
+			.on_type_conversion_left = on_type_conversion_right,
+			.on_type_conversion_right = on_type_conversion_left,
+			.result = result,
+		};
+	}
+
+	UnifyOutput with_result(Type *new_result)
+	{
+		return {
+			.on_type_conversion_left = on_type_conversion_left,
+			.on_type_conversion_right = on_type_conversion_right,
+			.result = new_result,
+		};
+	}
+};
+
 static void unify(
 	Type const &left,
 	Type const &right,
-	UnificationMode mode,
+	TypeConversion conv_left,
+	TypeConversion conv_right,
 	UnificationPhase phase,
 	UnifyOutput out,
 	SemaContext const &ctx,
 	optional<LazyErrorMsg> err
 );
 
+
 [[noreturn]] static void throw_unification_error(
 	Type const &left,
 	Type const &right,
 	optional<LazyErrorMsg> error_msg,
-	UnificationMode mode,
 	Module const *mod
 )
 {
-	string reason;
-	switch(mode.dir)
-	{
-		case ConversionSide::RIGHT:
-			reason = "Cannot convert " + str(right, *mod) + " to " + str(left, *mod);
-			break;
-
-		case ConversionSide::BOTH:
-			reason = "Got " + str(left, *mod) + " and " + str(right, *mod);
-			break;
-	}
-
+	string reason = "Incompatible types " + str(left, *mod) + " and " + str(right, *mod);
 	if(error_msg)
 		error_msg->throw_error(reason, *mod);
 	else
@@ -3228,106 +3267,44 @@ using TypeCheck = variant<
 	LValueCheck
 >;
 
+struct GeneralConstraint { Type const *type; };
+struct ManyPointeeConstraint { TypeDeductionVar array_var; };
+struct SinglePointeeConstraint { TypeDeductionVar pointer_var; };
+struct MemberConstraint { TypeDeductionVar struct_var; string_view member; };
+
+using ConstraintKind = variant<
+	GeneralConstraint,
+	ManyPointeeConstraint,
+	SinglePointeeConstraint,
+	MemberConstraint
+>;
 
 struct UnificationConstraint
 {
-	Type const *type;
-	UnificationMode mode;
-	bool swapped;
-	Expr *left_expr;
-	Expr *right_expr;
-	optional<LazyErrorMsg> error_msg;
+	ConstraintKind kind;
+	TypeConversion own_conv = TypeConversion::NONE;
+	TypeConversion other_conv = TypeConversion::NONE;
+	ConversionCallback own_conv_cb{};
+	ConversionCallback other_conv_cb{};
+	optional<LazyErrorMsg> error_msg = nullopt;
+
+	Type const& get_type(TypeEnv const &env, SemaContext const &ctx) const;
 
 	void compute_dependencies(unordered_set<VarType> &deps) const
 	{
-		gather_type_deduction_vars(*type, deps);
-	}
-
-	Type combine(
-		Type const *NULLABLE current_result,
-		TypeEnv &env,
-		SemaContext const &ctx
-	) const;
-};
-
-struct ElementTypeConstraint
-{
-	TypeDeductionVar array_var;
-
-	void compute_dependencies(unordered_set<VarType> &deps) const
-	{
-		deps.insert(array_var);
-	}
-
-	Type combine(
-		Type const *NULLABLE current_result,
-		TypeEnv &env,
-		SemaContext const &ctx
-	) const;
-};
-
-struct PointeeTypeConstraint
-{
-	TypeDeductionVar pointer_var;
-
-	void compute_dependencies(unordered_set<VarType> &deps) const
-	{
-		deps.insert(pointer_var);
-	}
-
-	Type combine(
-		Type const *NULLABLE current_result,
-		TypeEnv &env,
-		SemaContext const &ctx
-	) const;
-};
-
-struct MemberTypeConstraint
-{
-	TypeDeductionVar object_var;
-	string_view member;
-
-	void compute_dependencies(unordered_set<VarType> &deps) const
-	{
-		deps.insert(object_var);
-	}
-
-	Type combine(
-		Type const *NULLABLE current_result,
-		TypeEnv &env,
-		SemaContext const &ctx
-	) const;
-};
-
-struct RelationalConstraint : variant<
-	UnificationConstraint,
-	PointeeTypeConstraint,
-	ElementTypeConstraint,
-	MemberTypeConstraint
->
-{
-	using variant::variant;
-
-	void compute_dependencies(unordered_set<VarType> &deps) const
-	{
-		*this | match
+		kind | match
 		{
-			[&](auto const c) { return c.compute_dependencies(deps); }
-		};
-	}
-
-	Type combine(Type const *NULLABLE current_result, TypeEnv &env, SemaContext const &ctx) const
-	{
-		return *this | match
-		{
-			[&](auto const c) { return c.combine(current_result, env, ctx); }
+			[&](GeneralConstraint c) { gather_type_deduction_vars(*c.type, deps); },
+			[&](ManyPointeeConstraint c) { deps.insert(c.array_var); },
+			[&](SinglePointeeConstraint c) { deps.insert(c.pointer_var); },
+			[&](MemberConstraint c) { deps.insert(c.struct_var); },
 		};
 	}
 };
 
 struct VarConstraintSet
 {
-	vector<RelationalConstraint> constraints;
+	vector<UnificationConstraint> constraints;
 
 	// Only used during constraint checking
 	enum State
@@ -3383,7 +3360,13 @@ static bool is_cast_ok(Type const &target_type, Expr &src_expr, TypeEnv const &e
 {
 	Type *src_type = type_of(src_expr);
 	try {
-		unify(target_type, *src_type, {TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT}, &env, {.right_expr = &src_expr}, ctx, nullopt);
+		unify(
+			target_type, *src_type,
+			TypeConversion::NONE, TypeConversion::IMPLICIT_CTOR,
+			&env,
+			{.on_type_conversion_right = mk_expr_converter(&src_expr)},
+			ctx, nullopt
+		);
 		return true;
 	}
 	catch(ParseError const&) {}
@@ -3471,6 +3454,18 @@ struct std::hash<TypeDeductionVar>
 	}
 };
 
+string_view type_conv_symbol(TypeConversion conv)
+{
+	switch(conv)
+	{
+		case TypeConversion::NONE: return "=";
+		case TypeConversion::TRIVIAL: return "^";
+		case TypeConversion::IMPLICIT_CTOR: return "^^";
+	}
+
+	UNREACHABLE;
+}
+
 struct ConstraintSystem
 {
 	explicit ConstraintSystem(Module const &mod) :
@@ -3481,7 +3476,7 @@ struct ConstraintSystem
 		checks.push_back(check);
 	}
 
-	void add_relational_constraint(TypeDeductionVar var, RelationalConstraint const &c)
+	void add_relational_constraint(TypeDeductionVar var, UnificationConstraint const &c)
 	{
 		constraints[var].constraints.push_back(c);
 	}
@@ -3519,53 +3514,33 @@ struct ConstraintSystem
 
 			os << str(var_type, mod);
 
-			for(RelationalConstraint const &c: constr->constraints)
+			for(UnificationConstraint const &c: constr->constraints)
 			{
-				os << std::endl;
-				c | match
+				os << "\n  " << type_conv_symbol(c.other_conv) << ":" << type_conv_symbol(c.own_conv) << " ";
+
+				c.kind | match
 				{
-					[&](UnificationConstraint const &uc)
+					[&](GeneralConstraint const &k)
 					{
-						switch(uc.mode.conv)
-						{
-							case TypeConversion::NONE:
-								os << "  == ";
-							break;
-
-							case TypeConversion::TRIVIAL:
-								if(uc.mode.dir == ConversionSide::RIGHT)
-									os << (uc.swapped ? "  => " : "  <= ");
-								else
-									os << "  <=> ";
-							break;
-
-							case TypeConversion::IMPLICIT_CTOR:
-								if(uc.mode.dir == ConversionSide::RIGHT)
-									os << (uc.swapped ? "  =>* " : "  <=* ");
-								else
-									os << "  <=>* ";
-							break;
-						}
-
-						os << str(*uc.type, mod);
+						os << str(*k.type, mod);
 					},
-					[&](ElementTypeConstraint const &uc)
+					[&](ManyPointeeConstraint const &k)
 					{
-						os << " == element_type_of(";
-						::print(VarType(uc.array_var), os);
+						os << "element_type_of(";
+						::print(VarType(k.array_var), os);
 						os << ")";
 					},
-					[&](PointeeTypeConstraint const &uc)
+					[&](SinglePointeeConstraint const &k)
 					{
-						os << " == pointee_of(";
-						::print(VarType(uc.pointer_var), os);
+						os << "pointee_of(";
+						::print(VarType(k.pointer_var), os);
 						os << ")";
 					},
-					[&](MemberTypeConstraint const &uc)
+					[&](MemberConstraint const &k)
 					{
-						os << " == member_of(";
-						::print(VarType(uc.object_var), os);
-						os << ", " << uc.member << ")";
+						os << "member_of(";
+						::print(VarType(k.struct_var), os);
+						os << ", " << k.member << ")";
 					},
 				};
 			}
@@ -3575,7 +3550,8 @@ struct ConstraintSystem
 
 		if(checks.size())
 		{
-			os << "\nChecks:" << std::endl;
+			if(list.size()) os << std::endl;
+
 			for(TypeCheck const &check: checks)
 			{
 				check | match
@@ -3612,6 +3588,25 @@ struct ConstraintSystem
 };
 
 
+static TypeConversion combine_conv(TypeConversion a, TypeConversion b)
+{
+	return (TypeConversion)std::min((int)a, (int)b);
+}
+
+static ConversionCallback mk_meta_converter(vector<ConversionCallback> *callbacks)
+{
+	return ConversionCallback
+	{
+		.fn = [](TypeConversionEvent const &conv, void *data, Arena &arena)
+		{
+			vector<ConversionCallback> *conv_cbs = (vector<ConversionCallback>*)data;
+			for(ConversionCallback cb: *conv_cbs)
+				cb(conv, arena);
+		},
+		.data = (void*)callbacks,
+	};
+}
+
 // Information flows bottom-up
 static void reduce(TypeDeductionVar var, ConstraintSystem &sys, TypeEnv &env, SemaContext const &ctx)
 {
@@ -3624,7 +3619,7 @@ static void reduce(TypeDeductionVar var, ConstraintSystem &sys, TypeEnv &env, Se
 	c->state = VarConstraintSet::IN_PROGRESS;
 
 	// Compute and visit dependencies
-	for(RelationalConstraint const &bc: c->constraints)
+	for(UnificationConstraint const &bc: c->constraints)
 		bc.compute_dependencies(c->deps);
 
 	for(VarType v: c->deps)
@@ -3634,16 +3629,62 @@ static void reduce(TypeDeductionVar var, ConstraintSystem &sys, TypeEnv &env, Se
 			dep->reverse_deps.insert(var);
 	}
 
-
+	// Reduce `c->constraints` to a single Type `result` by unify()ing them all together.
+	//
+	// As an example, assume we have constraints C1, C2 and C3 that constrain `var` to types the A,
+	// B and C, respectively. In order to compute `result` we essentially do the following:
+	//
+	//     (1) result = unify(C1, C2)      // result contains the common type of A and B
+	//     (2) result = unify(result, C3)  // result contains the common type of A, B and C
+	//
+	// Care must be taken that potential type conversions are always correctly inserted. To
+	// demonstrate this, assume the following relationships: A <c B <c C, where A <c B means that A
+	// can be converted to B, but we do need to insert the corresponding conversion function.
+	//
+	// Now, when we do step (1) above, the unification needs to insert a conversion for the
+	// expression associated with C1 from A to B. In step (2), we need to insert conversions for
+	// both C1 and C2 from B to A. In other words, we need to apply conversions to all previously
+	// visited constraints.
+	//
+	// See for example tests/common_type_struct_2
+	
 	assert(c->constraints.size());
-	Type result = c->constraints.front().combine(nullptr, env, ctx);
+	UnificationConstraint &first = c->constraints.front();
 
-	for(RelationalConstraint const &bc: c->constraints | std::views::drop(1))
-		result = bc.combine(&result, env, ctx);
+	// `conv_cbs` contains the ConversionCallbacks of all the constraints we have visited so far:
+	// Thus, if a constraint requires a conversion, we can apply that conversion to the expressions
+	// of all previous constraints.
+	vector<ConversionCallback> conv_cbs;
+	if(first.own_conv_cb) conv_cbs.push_back(first.own_conv_cb);
+	if(first.other_conv_cb) conv_cbs.push_back(first.other_conv_cb);
+
+	Type result = first.get_type(env, ctx);
+	TypeConversion result_conv = first.own_conv;
+	for(UnificationConstraint const &uc: c->constraints | std::views::drop(1))
+	{
+		if(uc.other_conv_cb) conv_cbs.push_back(uc.other_conv_cb);
+
+		Type new_result;
+		unify(
+			result, uc.get_type(env, ctx),
+			result_conv, uc.own_conv,
+			&env,
+			{
+				.on_type_conversion_left = mk_meta_converter(&conv_cbs),
+				.on_type_conversion_right = uc.own_conv_cb,
+				.result = &new_result
+			},
+			ctx,
+			uc.error_msg
+		);
+
+		if(uc.own_conv_cb) conv_cbs.push_back(uc.own_conv_cb);
+
+		result = new_result;
+		result_conv = combine_conv(result_conv, uc.own_conv);
+	}
 
 	c->state = VarConstraintSet::DONE;
-	assert(not env.try_lookup(var));
-
 	env.add(var, result);
 }
 
@@ -3688,134 +3729,6 @@ static optional<Type> materialize(TypeDeductionVar var, ConstraintSystem &sys, T
 	return nullopt;
 }
 
-
-Type UnificationConstraint::combine(
-	Type const *NULLABLE current_result,
-	TypeEnv &env,
-	SemaContext const &ctx
-) const
-{
-	if(not current_result)
-		return *type;
-
-	Type new_result;
-	if(swapped)
-		unify(*type, *current_result, mode, &env, {.left_expr = left_expr, .right_expr = right_expr, .result = &new_result}, ctx, error_msg);
-	else
-		unify(*current_result, *type, mode, &env, {.left_expr = left_expr, .right_expr = right_expr, .result = &new_result}, ctx, error_msg);
-
-	return new_result;
-}
-
-static Type const* get_multi_element_pointee(
-	Type const *type,
-	TokenRange range,
-	SemaContext const &ctx
-)
-{
-	PointerType const *pointer_type = std::get_if<PointerType>(type);
-	if(not pointer_type or pointer_type->kind != PointerType::MANY)
-		throw_sem_error("Expected multi-element pointer type, got "s + str(*type, *ctx.mod), range.first, ctx.mod);
-
-	return pointer_type->pointee;
-}
-
-Type ElementTypeConstraint::combine(
-	Type const *NULLABLE current_result,
-	TypeEnv &env,
-	SemaContext const &ctx
-) const
-{
-	Type const &pointer_type = env.lookup(array_var);
-	Type const *pointee = get_multi_element_pointee(
-		&pointer_type,
-		token_range_of(pointer_type),
-		ctx
-	);
-
-	if(not current_result)
-		return *pointee;
-
-	Type new_result;
-	unify(*current_result, *pointee, UNIFY_EQUAL, &env, {.result = &new_result}, ctx, nullopt);
-
-	return new_result;
-}
-
-static Type const* get_single_element_pointee(
-	Type const *type,
-	TokenRange range,
-	SemaContext const &ctx
-)
-{
-	PointerType const *pointer_type = std::get_if<PointerType>(type);
-	if(not pointer_type or pointer_type->kind != PointerType::SINGLE)
-		throw_sem_error("Expected pointer type, got "s + str(*type, *ctx.mod), range.first, ctx.mod);
-
-	return pointer_type->pointee;
-}
-
-Type PointeeTypeConstraint::combine(
-	Type const *NULLABLE current_result,
-	TypeEnv &env,
-	SemaContext const &ctx
-) const
-{
-	Type const &pointer_type = env.lookup(pointer_var);
-	Type const *pointee = get_single_element_pointee(
-		&pointer_type,
-		token_range_of(pointer_type),
-		ctx
-	);
-
-	if(not current_result)
-		return *pointee;
-
-	Type new_result;
-	unify(*current_result, *pointee, UNIFY_EQUAL, &env, {.result = &new_result}, ctx, nullopt);
-
-	return new_result;
-}
-
-Parameter const* find_var_member(StructInstance *inst, string_view field);
-
-static Type const* get_member_type(
-	Type const *type,
-	string_view member,
-	TokenRange range,
-	SemaContext const &ctx
-)
-{
-	StructType const *struct_type = std::get_if<StructType>(type);
-	if(not struct_type)
-		throw_sem_error("Expected object of struct type for member access, got " + str(*type, *ctx.mod), range.first, ctx.mod);
-
-	Parameter const *var_member = find_var_member(struct_type->inst, member);
-	if(not var_member)
-		throw_sem_error("`"s + struct_type->inst->struct_()->name + "` has no field named `"s + member + "`", range.first, ctx.mod);
-
-	return var_member->type;
-}
-
-Type MemberTypeConstraint::combine(
-	Type const *NULLABLE current_result,
-	TypeEnv &env,
-	SemaContext const &ctx
-) const
-{
-	Type const &struct_type = env.lookup(object_var);
-	Type const *member_type = get_member_type(&struct_type, member, token_range_of(struct_type), ctx);
-
-	if(not current_result)
-		return *member_type;
-
-	Type new_result;
-	unify(*current_result, *member_type, UNIFY_EQUAL, &env, {.result = &new_result}, ctx, nullopt);
-
-	return new_result;
-}
-
-
 // Reduces each VarConstraintSet into a single Type that can then be inserted into the TypeEnv.
 //
 // To this end, it is ensured that the reduction does not violate any of the stated constraints. For
@@ -3839,12 +3752,152 @@ static TypeEnv create_subst_from_constraints(ConstraintSystem &constraints, Sema
 }
 
 
+static Type const* get_multi_element_pointee(
+	Type const *type,
+	TokenRange range,
+	SemaContext const &ctx
+)
+{
+	PointerType const *pointer_type = std::get_if<PointerType>(type);
+	if(not pointer_type or pointer_type->kind != PointerType::MANY)
+		throw_sem_error("Expected multi-element pointer type, got "s + str(*type, *ctx.mod), range.first, ctx.mod);
+
+	return pointer_type->pointee;
+}
+
+
+static Type const* get_single_element_pointee(
+	Type const *type,
+	TokenRange range,
+	SemaContext const &ctx
+)
+{
+	PointerType const *pointer_type = std::get_if<PointerType>(type);
+	if(not pointer_type or pointer_type->kind != PointerType::SINGLE)
+		throw_sem_error("Expected pointer type, got "s + str(*type, *ctx.mod), range.first, ctx.mod);
+
+	return pointer_type->pointee;
+}
+
+
+Parameter const* find_var_member(StructInstance *inst, string_view field)
+{
+	Module *mod = inst->struct_()->sema->type_scope->mod; // This looks disgusting
+
+	for(Parameter const &var_member: inst->own_var_members())
+	{
+		if(name_of(var_member, mod) == field)
+			return &var_member;
+	}
+
+	if(inst->parent())
+		return find_var_member(inst->parent(), field);
+
+	return nullptr;
+}
+
+static Type const* get_member_type(
+	Type const *type,
+	string_view member,
+	TokenRange range,
+	SemaContext const &ctx
+)
+{
+	StructType const *struct_type = std::get_if<StructType>(type);
+	if(not struct_type)
+		throw_sem_error("Expected object of struct type for member access, got " + str(*type, *ctx.mod), range.first, ctx.mod);
+
+	Parameter const *var_member = find_var_member(struct_type->inst, member);
+	if(not var_member)
+		throw_sem_error("`"s + struct_type->inst->struct_()->name + "` has no field named `"s + member + "`", range.first, ctx.mod);
+
+	return var_member->type;
+}
+
+
+Type const& UnificationConstraint::get_type(TypeEnv const &env, SemaContext const &ctx) const
+{
+	return kind | match
+	{
+		[&](GeneralConstraint c) -> Type const&
+		{
+			return *c.type;
+		},
+		[&](ManyPointeeConstraint c) -> Type const&
+		{
+			Type const &pointer_type = env.lookup(c.array_var);
+			Type const *pointee = get_multi_element_pointee(
+				&pointer_type,
+				token_range_of(pointer_type),
+				ctx
+			);
+
+			return *pointee;
+		},
+		[&](SinglePointeeConstraint c) -> Type const&
+		{
+			Type const &pointer_type = env.lookup(c.pointer_var);
+			Type const *pointee = get_single_element_pointee(
+				&pointer_type,
+				token_range_of(pointer_type),
+				ctx
+			);
+
+			return *pointee;
+		},
+		[&](MemberConstraint c) -> Type const&
+		{
+			Type const &struct_type = env.lookup(c.struct_var);
+			Type const *member_type = get_member_type(&struct_type, c.member, token_range_of(struct_type), ctx);
+
+			return *member_type;
+		},
+	};
+}
+
+
 // Unification of integer types
 //--------------------------------------------------------------------
+static bool try_convert_integer_type(
+	Type const &src_type,
+	Type const &target_type,
+	TypeConversion conv
+)
+{
+	assert(is_integer_type(src_type));
+	assert(is_integer_type(target_type));
+
+	if(is<KnownIntType>(target_type))
+		return true;
+
+	if(KnownIntType const *src = std::get_if<KnownIntType>(&src_type))
+	{
+		BuiltinTypeDef target = std::get<BuiltinType>(target_type).builtin;
+		return integer_assignable_to(target, src->low) and integer_assignable_to(target, src->high);
+	}
+
+	switch(conv)
+	{
+		case TypeConversion::NONE:
+		case TypeConversion::TRIVIAL:
+			return equiv(src_type, target_type);
+
+		case TypeConversion::IMPLICIT_CTOR:
+		{
+			BuiltinTypeDef src = std::get<BuiltinType>(src_type).builtin;
+			BuiltinTypeDef target = std::get<BuiltinType>(target_type).builtin;
+			return builtin_losslessly_convertible(target, src);
+		}
+	}
+
+	UNREACHABLE;
+}
+
 static bool try_unify_integer_types(
 	Type const &left,
 	Type const &right,
-	UnificationMode mode,
+	TypeConversion conv_left,
+	TypeConversion conv_right,
 	UnifyOutput out,
 	SemaContext const &ctx,
 	optional<LazyErrorMsg> err
@@ -3855,60 +3908,13 @@ static bool try_unify_integer_types(
 
 	optional<Type> common_type = common_int_type(left, right);
 	if(not common_type)
-		throw_unification_error(left, right, err, mode, ctx.mod);
+		throw_unification_error(left, right, err, ctx.mod);
 
-	switch(mode.conv)
-	{
-		case TypeConversion::NONE:
-		case TypeConversion::TRIVIAL:
-		{
-			if(std::holds_alternative<KnownIntType>(left) or std::holds_alternative<KnownIntType>(right))
-			{
-				// If either left or right is a KnownIntType, then because they have a common type
-				// we can consider them equal
+	if(not try_convert_integer_type(left, *common_type, conv_left))
+		throw_unification_error(left, right, err, ctx.mod);
 
-				// If both left and right are KnownIntTypes then they always have a common type
-				// TODO Not if they are ISIZE_MIN and ISIZE_MAX
-			}
-			else
-			{
-				if(not equiv(left, right))
-					throw_unification_error(left, right, err, mode, ctx.mod);
-			}
-		} break;
-
-		case TypeConversion::IMPLICIT_CTOR:
-		{
-			switch(mode.dir)
-			{
-				case ConversionSide::RIGHT:
-				{
-					if(std::holds_alternative<KnownIntType>(left)) {
-						// Always okay
-					}
-					else
-					{
-						if(not equiv(left, *common_type))
-							throw_unification_error(left, right, err, mode, ctx.mod);
-					}
-				} break;
-
-				case ConversionSide::BOTH:
-				{
-					if(std::holds_alternative<KnownIntType>(left) and std::holds_alternative<KnownIntType>(right))
-					{
-						// Always okay
-						// TODO Not if they are ISIZE_MIN and ISIZE_MAX
-					}
-					else
-					{
-						if(not equiv(left, *common_type) and not equiv(right, *common_type))
-							throw_unification_error(left, right, err, mode, ctx.mod);
-					}
-				} break;
-			}
-		} break;
-	}
+	if(not try_convert_integer_type(right, *common_type, conv_right))
+		throw_unification_error(left, right, err, ctx.mod);
 
 	if(out.result) *out.result = *common_type;
 
@@ -3965,11 +3971,11 @@ static optional<TypeDeductionVar> get_if_type_deduction_var(Type const &type)
 	return *type_deduction_var;
 }
 
-
 static bool try_unify_type_deduction_vars(
 	Type const &left,
 	Type const &right,
-	UnificationMode mode,
+	TypeConversion conv_left,
+	TypeConversion conv_right,
 	UnificationPhase phase,
 	UnifyOutput out,
 	SemaContext const &ctx,
@@ -3993,11 +3999,11 @@ static bool try_unify_type_deduction_vars(
 				[&](ConstraintSystem *constraints)
 				{
 					UnificationConstraint uni_constr{
-						.type = &right,
-						.mode = mode,
-						.swapped = false,
-						.left_expr = out.left_expr,
-						.right_expr = out.right_expr,
+						.kind = GeneralConstraint(&right),
+						.own_conv = conv_right,
+						.other_conv = conv_left,
+						.own_conv_cb = out.on_type_conversion_right,
+						.other_conv_cb = out.on_type_conversion_right,
 						.error_msg = err,
 					};
 					constraints->add_relational_constraint(*left_var, uni_constr);
@@ -4005,7 +4011,7 @@ static bool try_unify_type_deduction_vars(
 				},
 				[&](TypeEnv const *env)
 				{
-					unify(env->lookup(*left_var), right, mode, phase, out, ctx, err);
+					unify(env->lookup(*left_var), right, conv_left, conv_right, phase, out, ctx, err);
 				},
 			};
 		}
@@ -4019,6 +4025,12 @@ static bool try_unify_type_deduction_vars(
 		Type const *type = left_var ? &right : &left;
 		bool args_swapped = not left_var;
 
+		if(args_swapped)
+		{
+			std::swap(conv_left, conv_right);
+			std::swap(out.on_type_conversion_left, out.on_type_conversion_right);
+		}
+
 		assert(not type_var_occurs_in(var, *type));
 
 		phase | match
@@ -4026,11 +4038,11 @@ static bool try_unify_type_deduction_vars(
 			[&](ConstraintSystem *constraints)
 			{
 				UnificationConstraint uni_constr{
-					.type = type,
-					.mode = mode,
-					.swapped = args_swapped,
-					.left_expr = out.left_expr,
-					.right_expr = out.right_expr,
+					.kind = GeneralConstraint(type),
+					.own_conv = conv_right,
+					.other_conv = conv_left,
+					.own_conv_cb = out.on_type_conversion_right,
+					.other_conv_cb = out.on_type_conversion_left,
 					.error_msg = err,
 				};
 				constraints->add_relational_constraint(var, uni_constr);
@@ -4038,10 +4050,7 @@ static bool try_unify_type_deduction_vars(
 			},
 			[&](TypeEnv const *env)
 			{
-				if(args_swapped)
-					unify(*type, env->lookup(var), mode, phase, out, ctx, err);
-				else
-					unify(env->lookup(var), *type, mode, phase, out, ctx, err);
+				unify(env->lookup(var), *type, conv_left, conv_right, phase, out, ctx, err);
 			},
 		};
 
@@ -4054,6 +4063,15 @@ static bool try_unify_type_deduction_vars(
 
 // Unification of struct types
 //--------------------------------------------------------------------
+static Type const* try_find_matching_alt_for(
+	UnionInstance *union_,
+	Type const &type,
+	UnificationPhase phase,
+	UnifyOutput out,
+	SemaContext const &ctx,
+	optional<LazyErrorMsg> err
+);
+
 static StructInstance* get_if_struct(Type const *type)
 {
 	StructType const *struct_type = std::get_if<StructType>(type);
@@ -4063,25 +4081,32 @@ static StructInstance* get_if_struct(Type const *type)
 	return struct_type->inst;
 }
 
+static UnionInstance* get_if_union(Type const *type)
+{
+	UnionType const *union_type = std::get_if<UnionType>(type);
+	if(not union_type)
+		return nullptr;
+
+	return union_type->inst;
+}
+
 static void unify_type_args(
 	TypeArgList const &left,
 	TypeArgList const &right,
 	UnificationPhase phase,
-	UnifyOutput out,
 	SemaContext const &ctx,
 	optional<LazyErrorMsg> err
 )
 {
 	assert(left.args->count == right.args->count);
 	for(size_t i = 0; i < left.args->count; ++i)
-		unify(left.args->items[i], right.args->items[i], UNIFY_EQUAL, phase, out, ctx, err);
+		unify(left.args->items[i], right.args->items[i], TypeConversion::NONE, TypeConversion::NONE, phase, {}, ctx, err);
 }
 
 static void unify_structs_eq(
 	StructInstance *left,
 	StructInstance *right,
 	UnificationPhase phase,
-	UnifyOutput out,
 	SemaContext const &ctx,
 	optional<LazyErrorMsg> err
 )
@@ -4094,7 +4119,6 @@ static void unify_structs_eq(
 				StructType(UNKNOWN_TOKEN_RANGE, left),
 				StructType(UNKNOWN_TOKEN_RANGE, right),
 				err,
-				UNIFY_EQUAL,
 				ctx.mod
 			);
 		}
@@ -4106,14 +4130,13 @@ static void unify_structs_eq(
 					StructType(UNKNOWN_TOKEN_RANGE, left),
 					StructType(UNKNOWN_TOKEN_RANGE, right),
 					err,
-					UNIFY_EQUAL,
 					ctx.mod
 				);
 			}
 
 			do
 			{
-				unify_type_args(left->type_args(), right->type_args(), phase, out, ctx, err);
+				unify_type_args(left->type_args(), right->type_args(), phase, ctx, err);
 				left = left->parent();
 				right = right->parent();
 			}
@@ -4122,10 +4145,119 @@ static void unify_structs_eq(
 	}
 }
 
+static bool try_convert_struct_to_parent(
+	StructInstance *struct_,
+	StructInstance *parent,
+	TypeConversion conv
+)
+{
+	switch(conv)
+	{
+		case TypeConversion::NONE:
+			return struct_ == parent;
+
+		case TypeConversion::TRIVIAL:
+		case TypeConversion::IMPLICIT_CTOR:
+			return true;
+	}
+
+	UNREACHABLE;
+}
+
+static std::pair<StructInstance*, StructInstance*> common_parent(StructInstance *left, StructInstance *right)
+{
+	int min_depth = std::min(left->depth(), right->depth());
+	while(left->depth() > min_depth)
+		left = left->parent();
+
+	while(right->depth() > min_depth)
+		right = right->parent();
+
+	do
+	{
+		if(left->struct_() == right->struct_())
+			return {left, right};
+
+		left = left->parent();
+		right = right->parent();
+	} while(left);
+
+	return {nullptr, nullptr};
+}
+
+StructInstance* try_get_implicit_ctor_for(
+	StructInstance *struct_,
+	Type const &arg_type,
+	ConversionCallback arg_conv_cb,
+	UnificationPhase phase,
+	SemaContext const &ctx
+)
+{
+	StructInstance *implicit_case = struct_->implicit_case();
+	if(not implicit_case)
+		return nullptr;
+
+	ProcType const &implicit_ctor = std::get<ProcType>(*implicit_case->try_get_ctor_type());
+	Type const &implicit_param_type = implicit_ctor.inst->params->items[0];
+
+	try {
+		unify(implicit_param_type, arg_type, TypeConversion::NONE, TypeConversion::IMPLICIT_CTOR, phase, {.on_type_conversion_right = arg_conv_cb}, ctx, nullopt);
+		return implicit_case;
+	}
+	catch(ParseError const&) {}
+
+	return nullptr;
+}
+
+Expr call_implicit_ctor(StructInstance *implicit_case, Expr const &arg, Arena &arena)
+{
+	assert(implicit_case->try_get_ctor_type());
+
+	Expr *ctor_expr = arena.alloc<Expr>(ConstructorExpr{
+		.range = UNKNOWN_TOKEN_RANGE,
+		.ctor = arena.alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, implicit_case)),
+		.type = implicit_case->try_get_ctor_type(),
+	});
+
+	FixedArray<Argument> *ctor_args = alloc_fixed_array<Argument>(1, arena);
+	ctor_args->items[0] = Argument{
+		.range = UNKNOWN_TOKEN_RANGE,
+		.expr = arg,
+	};
+
+	return CallExpr{
+		.range = UNKNOWN_TOKEN_RANGE,
+		.callable = ctor_expr,
+		.args = ctor_args,
+		.type = arena.alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, implicit_case)),
+	};
+}
+
+static void apply_conversion(TypeConversionEvent const &conv, Expr *expr, Arena &arena)
+{
+	conv | match
+	{
+		[&](ConstructorConversion c)
+		{
+			*expr = call_implicit_ctor(c.ctor, *expr, arena);
+		},
+		[&](UnionConversion c)
+		{
+			*expr = Expr(UnionInitExpr{
+				.range = token_range_of(*expr),
+				.alt_expr = clone_ptr(expr, arena),
+				.alt_type = clone_ptr(c.alt, arena),
+				.type = clone_ptr(c.union_, arena),
+			});
+		},
+	};
+}
+
 static bool try_unify_structs(
 	Type const &left,
 	Type const &right,
-	UnificationMode mode,
+	TypeConversion conv_left,
+	TypeConversion conv_right,
 	UnificationPhase phase,
 	UnifyOutput out,
 	SemaContext const &ctx,
@@ -4133,90 +4265,128 @@ static bool try_unify_structs(
 )
 {
 	StructInstance *left_struct = get_if_struct(&left);
+	StructInstance *right_struct = get_if_struct(&right);
 	if(not left_struct)
-		return false;
-
-	switch(mode.conv)
 	{
-		case TypeConversion::NONE:
+		if(not right_struct)
+			return false;
+
+		// Swap left and right
+		return try_unify_structs(right, left, conv_right, conv_left, phase, out.sides_swapped(), ctx, err);
+	}
+
+	// If either common_parent_left or common_parent_right is set, then the other one is also set,
+	// and they both refer to the same StructItem
+	StructInstance *common_parent_left = nullptr;
+	StructInstance *common_parent_right = nullptr;
+	if(right_struct)
+		std::tie(common_parent_left, common_parent_right) = common_parent(left_struct, right_struct);
+
+	if(common_parent_left)
+	{
+		// So `left` and `right` have a common parent. The only way unification can succeed is if
+		// both sides can be converted to that same parent.
+		if(
+			not try_convert_struct_to_parent(left_struct, common_parent_left, conv_left)
+			or not try_convert_struct_to_parent(right_struct, common_parent_right, conv_right)
+		) {
+			throw_unification_error(left, right, err, ctx.mod);
+		}
+
+		unify_structs_eq(common_parent_left, common_parent_right, phase, ctx, err);
+
+		if(out.result)
+			*out.result = StructType(UNKNOWN_TOKEN_RANGE, common_parent_left);
+	}
+	else if(UnionInstance *right_union = get_if_union(&right))
+	{
+		StructInstance *implicit_case_left = nullptr;
+		Type const *matching_alt_right = nullptr;
+
+		if(conv_right == TypeConversion::IMPLICIT_CTOR)
+			implicit_case_left = try_get_implicit_ctor_for(left_struct, right, out.on_type_conversion_right, phase, ctx);
+
+		if(conv_left == TypeConversion::IMPLICIT_CTOR)
+			matching_alt_right = try_find_matching_alt_for(right_union, left, phase, out, ctx, err);
+
+		if(not implicit_case_left and not matching_alt_right)
+			throw_unification_error(left, right, err, ctx.mod);
+
+		// This shouldn't be possible at the moment because it would imply left_struct and
+		// right_union are defined recursively. However, this could change once user-defined
+		// constructors are supported.
+		if(implicit_case_left and matching_alt_right)
 		{
-			StructInstance *right_struct = get_if_struct(&right);
-			if(not right_struct)
-				throw_unification_error(left, right, err, mode, ctx.mod);
+			string reason = "Ambiguous common type for " + str(left, *ctx.mod) + " and " + str(right, *ctx.mod);
+			if(err)
+				err->throw_error(reason, *ctx.mod);
+			else
+				throw ParseError(reason);
+		}
 
-			unify_structs_eq(left_struct, right_struct, phase, out, ctx, err);
-
-			if(out.result) *out.result = left;
-		} break;
-
-		case TypeConversion::TRIVIAL:
-		case TypeConversion::IMPLICIT_CTOR:
+		if(implicit_case_left)
 		{
-			try
-			{
-				StructInstance *right_struct = get_if_struct(&right);
-				if(not right_struct)
-					throw_unification_error(left, right, err, mode, ctx.mod);
+			if(out.result)
+				*out.result = left;
 
-				if(left_struct != right_struct)
-				{
-					while(left_struct->struct_() != right_struct->struct_())
-					{
-						if(not right_struct->parent())
-							throw_unification_error(left, right, err, mode, ctx.mod);
+			if(out.on_type_conversion_right)
+				out.on_type_conversion_right(ConstructorConversion(implicit_case_left), ctx.arena);
+		}
 
-						right_struct = right_struct->parent();
-					}
+		if(matching_alt_right)
+		{
+			if(out.result)
+				*out.result = right;
 
-				}
+			if(out.on_type_conversion_left)
+				out.on_type_conversion_left(UnionConversion(&right, matching_alt_right), ctx.arena);
+		}
+	}
+	else
+	{
+		// No common parent, so the only way forward is using an implicit ctor
 
-				unify_structs_eq(left_struct, right_struct, phase, out, ctx, err);
-			}
-			catch(ParseError const &exc)
-			{
-				if(
-					mode.conv == TypeConversion::IMPLICIT_CTOR
-					and mode.dir == ConversionSide::RIGHT
-					and left_struct->implicit_case()
-				)
-				{
-					StructInstance *implicit_case = left_struct->implicit_case();
-					ProcType const &implicit_ctor = std::get<ProcType>(*implicit_case->try_get_ctor_type());
-					Type const &implicit_param_type = implicit_ctor.inst->params->items[0];
+		StructInstance *implicit_case_right = nullptr;
+		StructInstance *implicit_case_left = nullptr;
 
-					unify(implicit_param_type, right, mode, phase, out, ctx, err);
+		if(conv_right == TypeConversion::IMPLICIT_CTOR)
+			implicit_case_left = try_get_implicit_ctor_for(left_struct, right, out.on_type_conversion_right, phase, ctx);
 
-					if(out.right_expr)
-					{
-						Expr *ctor_expr = ctx.arena.alloc<Expr>(ConstructorExpr{
-							.range = UNKNOWN_TOKEN_RANGE,
-							.ctor = ctx.arena.alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, implicit_case)),
-							.type = implicit_case->try_get_ctor_type(),
-						});
+		if(conv_left == TypeConversion::IMPLICIT_CTOR and right_struct)
+			implicit_case_right = try_get_implicit_ctor_for(right_struct, left, out.on_type_conversion_left, phase, ctx);
 
-						FixedArray<Argument> *ctor_args = alloc_fixed_array<Argument>(1, ctx.arena);
-						ctor_args->items[0] = Argument{
-							.range = UNKNOWN_TOKEN_RANGE,
-							.expr = *out.right_expr,
-						};
+		if(implicit_case_left and implicit_case_right)
+		{
+			string reason = "Ambiguous common type for " + str(left, *ctx.mod) + " and " + str(right, *ctx.mod);
+			if(err)
+				err->throw_error(reason, *ctx.mod);
+			else
+				throw ParseError(reason);
+		}
 
-						Expr *call_expr = ctx.arena.alloc<Expr>(CallExpr{
-							.range = UNKNOWN_TOKEN_RANGE,
-							.callable = ctor_expr,
-							.args = ctor_args,
-							.type = ctx.arena.alloc<Type>(StructType(UNKNOWN_TOKEN_RANGE, implicit_case)),
-						});
+		if(not implicit_case_left and not implicit_case_right)
+			throw_unification_error(left, right, err, ctx.mod);
 
-						*out.right_expr = *call_expr;
-					}
-				}
-				else
-					throw exc;
-			}
 
-			if(out.result) *out.result = left;
+		// Fill in `out`
 
-		} break;
+		if(implicit_case_left)
+		{
+			if(out.result)
+				*out.result = left;
+
+			if(out.on_type_conversion_right)
+				out.on_type_conversion_right(ConstructorConversion(implicit_case_left), ctx.arena);
+		}
+
+		if(implicit_case_right)
+		{
+			if(out.result)
+				*out.result = right;
+
+			if(out.on_type_conversion_left)
+				out.on_type_conversion_left(ConstructorConversion(implicit_case_right), ctx.arena);
+		}
 	}
 
 	return true;
@@ -4225,95 +4395,89 @@ static bool try_unify_structs(
 
 // Unification of union types
 //--------------------------------------------------------------------
-static UnionInstance* get_if_union(Type const *type)
-{
-	UnionType const *union_type = std::get_if<UnionType>(type);
-	if(not union_type)
-		return nullptr;
-
-	return union_type->inst;
-}
-
-static bool try_unify_unions(
-	Type const &left,
-	Type const &right,
-	UnificationMode mode,
+static Type const* try_find_matching_alt_for(
+	UnionInstance *union_,
+	Type const &type,
 	UnificationPhase phase,
 	UnifyOutput out,
 	SemaContext const &ctx,
 	optional<LazyErrorMsg> err
 )
 {
-	(void)phase;
-
-	UnionInstance *left_union = get_if_union(&left);
-	if(not left_union)
-		return false;
-
-	switch(mode.conv)
+	Type const *matched_alt = nullptr;
+	for(Type const *alt: union_->alternatives())
 	{
-		case TypeConversion::NONE:
-		case TypeConversion::TRIVIAL:
+		bool success = false;
+		try {
+			unify(*alt, type, TypeConversion::NONE, TypeConversion::TRIVIAL, phase, out, ctx, err);
+			success = true;
+		}
+		catch(ParseError const&) {}
+
+		if(success)
 		{
-			if(not equiv(left, right))
-				throw_unification_error(left, right, err, mode, ctx.mod);
+			if(matched_alt)
+				throw_sem_error("Assignment to union is ambiguous", token_range_of(type).first, ctx.mod);
 
-			if(out.result) *out.result = left;
-		} break;
+			matched_alt = alt;
+		}
+	}
 
-		case TypeConversion::IMPLICIT_CTOR:
-		{
-			if(mode.dir == ConversionSide::RIGHT)
-			{
-				if(not equiv(left, right))
-				{
-					Type const *matched_alt = nullptr;
-					for(Type const *alt: left_union->alternatives())
-					{
-						bool success = false;
-						try {
-							unify(*alt, right, {.conv = TypeConversion::TRIVIAL, .dir = ConversionSide::RIGHT}, phase, out, ctx, err);
-							success = true;
-						}
-						catch(ParseError const&) {}
+	return matched_alt;
+}
 
-						if(success)
-						{
-							if(matched_alt)
-								throw_sem_error("Assignment to union is ambiguous", token_range_of(right).first, ctx.mod);
+static bool try_unify_unions(
+	Type const &left,
+	Type const &right,
+	TypeConversion conv_left,
+	TypeConversion conv_right,
+	UnificationPhase phase,
+	UnifyOutput out,
+	SemaContext const &ctx,
+	optional<LazyErrorMsg> err
+)
+{
+	UnionInstance *left_union = get_if_union(&left);
+	UnionInstance *right_union = get_if_union(&right);
+	if(not left_union)
+	{
+		if(not right_union)
+			return false;
 
-							matched_alt = alt;
-						}
-					}
+		return try_unify_unions(right, left, conv_right, conv_left, phase, out.sides_swapped(), ctx, err);
+	}
+	assert(left_union);
 
-					if(matched_alt)
-					{
-						if(out.right_expr)
-						{
-							UnionInitExpr init_expr{
-								.range = token_range_of(*out.right_expr),
-								.alt_expr = clone_ptr(out.right_expr, ctx.arena),
-								.alt_type = clone_ptr(matched_alt, ctx.arena),
-								.type = clone_ptr(&left, ctx.arena),
-							};
+	if(left_union and right_union)
+	{
+		// Unions cannot be nested, so if we have two unions then they can only be unified if they
+		// are equal
 
-							*out.right_expr = init_expr;
-						}
-					}
-					else
-						throw_unification_error(left, right, err, mode, ctx.mod);
-				}
+		if(not equiv(left, right))
+			throw_unification_error(left, right, err, ctx.mod);
 
-				if(out.result) *out.result = left;
-			}
-			else
-			{
-				if(not equiv(left, right))
-					throw_unification_error(left, right, err, mode, ctx.mod);
+		if(out.result)
+			*out.result = left;
+	}
+	else
+	{
+		// If we get here we know `left` is a union type and `right` could be anything except a
+		// union. The only way unification can succeed here is if `right` can be unified with one of
+		// the alternatives of `left`. (Note that the case where `right` is a struct with an
+		// implicit constructor for `left` has already been handled in `try_unify_structs()`).
 
-				if(out.result) *out.result = left;
-			}
-		} break;
+		if(conv_right != TypeConversion::IMPLICIT_CTOR)
+			throw_unification_error(left, right, err, ctx.mod);
+
+		Type const *matched_alt = try_find_matching_alt_for(left_union, right, phase, out, ctx, err);
+		if(not matched_alt)
+			throw_unification_error(left, right, err, ctx.mod);
+
+		if(out.result)
+			*out.result = left;
+
+		if(out.on_type_conversion_right)
+			out.on_type_conversion_right(UnionConversion(&left, matched_alt), ctx.arena);
 	}
 
 	return true;
@@ -4322,10 +4486,34 @@ static bool try_unify_unions(
 
 // Unification of pointer types
 //--------------------------------------------------------------------
+IsMutable mutability_lub(IsMutable a, IsMutable b)
+{
+	if(a == IsMutable::YES and b == IsMutable::YES)
+		return IsMutable::YES;
+
+	return IsMutable::NO;
+}
+
+bool can_convert_mutability(IsMutable from, IsMutable to, TypeConversion conv)
+{
+	switch(conv)
+	{
+		case TypeConversion::NONE:
+			return from == to;
+
+		case TypeConversion::TRIVIAL:
+		case TypeConversion::IMPLICIT_CTOR:
+			return to == IsMutable::NO or from == IsMutable::YES;
+	}
+
+	UNREACHABLE;
+}
+
 static bool try_unify_pointers(
 	Type const &left,
 	Type const &right,
-	UnificationMode mode,
+	TypeConversion conv_left,
+	TypeConversion conv_right,
 	UnificationPhase phase,
 	UnifyOutput out,
 	SemaContext const &ctx,
@@ -4337,31 +4525,36 @@ static bool try_unify_pointers(
 	if(not left_pointer or not right_pointer)
 		return false;
 
-	switch(mode.conv)
+	if(left_pointer->kind != right_pointer->kind)
+		throw_unification_error(left, right, err, ctx.mod);
+
+	IsMutable common_mutability = mutability_lub(left_pointer->mutability, right_pointer->mutability);
+	if(
+		not can_convert_mutability(left_pointer->mutability, common_mutability, conv_left)
+		or not can_convert_mutability(right_pointer->mutability, common_mutability, conv_right)
+	) {
+		throw_unification_error(left, right, err, ctx.mod);
+	}
+
+	Type common_pointee;
+	unify(
+		*left_pointer->pointee,
+		*right_pointer->pointee,
+		conv_left == TypeConversion::IMPLICIT_CTOR ? TypeConversion::TRIVIAL : conv_left,
+		conv_right == TypeConversion::IMPLICIT_CTOR ? TypeConversion::TRIVIAL : conv_right,
+		phase,
+		out.with_result(&common_pointee),
+		ctx, err
+	);
+
+	if(out.result)
 	{
-		case TypeConversion::NONE:
-		{
-			if(left_pointer->mutability != right_pointer->mutability)
-				throw ParseError("Incompatible pointer mutability");
-
-			unify(*left_pointer->pointee, *right_pointer->pointee, mode, phase, out, ctx, err);
-
-			if(out.result) *out.result = left;
-		} break;
-
-		case TypeConversion::TRIVIAL:
-		case TypeConversion::IMPLICIT_CTOR:
-		{
-			assert(mode.dir == ConversionSide::RIGHT);
-
-			bool mut_compatible = right_pointer->mutability == IsMutable::YES or left_pointer->mutability == IsMutable::NO;
-			if(not mut_compatible)
-				throw ParseError("Incompatible pointer mutability");
-
-			unify(*left_pointer->pointee, *right_pointer->pointee, mode.with_conv(TypeConversion::TRIVIAL), phase, out, ctx, err);
-
-			if(out.result) *out.result = left;
-		} break;
+		*out.result = PointerType{
+			.range = UNKNOWN_TOKEN_RANGE,
+			.kind = left_pointer->kind,
+			.pointee = clone_ptr(&common_pointee, ctx.arena),
+			.mutability = common_mutability,
+		};
 	}
 
 	return true;
@@ -4405,26 +4598,35 @@ static bool try_unify_pointers(
 static void unify(
 	Type const &left,
 	Type const &right,
-	UnificationMode mode,
+	TypeConversion conv_left,
+	TypeConversion conv_right,
 	UnificationPhase phase,
 	UnifyOutput out,
 	SemaContext const &ctx,
 	optional<LazyErrorMsg> err
 )
 {
-	if(try_unify_type_deduction_vars(left, right, mode, phase, out, ctx, err))
+	// The order in which (1), (3), and (4) are executed is important because their covered cases
+	// overlap.
+
+	// (1) Cases covered: is<TypeDeductionVar>(left) OR is<TypeDeductionVar>(right)
+	if(try_unify_type_deduction_vars(left, right, conv_left, conv_right, phase, out, ctx, err))
 		return;
 
-	if(try_unify_integer_types(left, right, mode, out, ctx, err))
+	// (2) Cases covered: is_integer_type(left) AND is_integer_type(right)
+	if(try_unify_integer_types(left, right, conv_left, conv_right, out, ctx, err))
 		return;
 
-	if(try_unify_structs(left, right, mode, phase, out, ctx, err))
+	// (3) Cases covered: is<StructType>(left) OR is<StructType>(right)
+	if(try_unify_structs(left, right, conv_left, conv_right, phase, out, ctx, err))
 		return;
 
-	if(try_unify_unions(left, right, mode, phase, out, ctx, err))
+	// (4) Cases covered: is<UnionType>(left) OR is<UnionType>(right)
+	if(try_unify_unions(left, right, conv_left, conv_right, phase, out, ctx, err))
 		return;
 
-	if(try_unify_pointers(left, right, mode, phase, out, ctx, err))
+	// (5) Cases covered: is<PointerType>(left) AND is<PointerType>(right)
+	if(try_unify_pointers(left, right, conv_left, conv_right, phase, out, ctx, err))
 		return;
 
 	left | match
@@ -4433,26 +4635,25 @@ static void unify(
 		{
 			BuiltinType const *right_t = std::get_if<BuiltinType>(&right);
 			if(not right_t)
-				throw_unification_error(left, right, err, mode, ctx.mod);
+				throw_unification_error(left, right, err, ctx.mod);
 
-			// Integer types have already been handled above.
-			// Non-integer builtin types (Never, Unit, Bool) can only be unified
-			// if they are equal.
+			// The case where both left and right are integer types has already been handled above.
+			// Non-integer builtin types (Never, Unit, Bool) can only be unified if they are equal.
 			if(left_t.builtin != right_t->builtin)
-				throw_unification_error(left, right, err, mode, ctx.mod);
+				throw_unification_error(left, right, err, ctx.mod);
 
 			if(out.result) *out.result = left;
 		},
 		[&](VarType const&)
 		{
-			// If we get here, we know `left_t` is a TypeParameterVar (because
-			// we already handled TypeDeductionVars above).
-			// Unification of TypeParameterVars only succeeds if both sides
-			// refer to the same TypeParameterVar (because we don't know which
-			// type they are referring to).
+			// If we get here, we know left and right are TypeParameterVars (because we already
+			// handled TypeDeductionVars above).
+			//
+			// Unification of TypeParameterVars only succeeds if both sides refer to the same
+			// TypeParameterVar as they may be isntantiated with any type.
 
 			if(not equiv(left, right))
-				throw_unification_error(left, right, err, mode, ctx.mod);
+				throw_unification_error(left, right, err, ctx.mod);
 
 			if(out.result) *out.result = left;
 		},
@@ -4462,10 +4663,10 @@ static void unify(
 		},
 
 		// Handled above
-		[&](KnownIntType const&) { throw_unification_error(left, right, err, mode, ctx.mod); },
-		[&](PointerType const&) { throw_unification_error(left, right, err, mode, ctx.mod); },
-		[&](StructType const&) { throw_unification_error(left, right, err, mode, ctx.mod); },
-		[&](UnionType const&) { throw_unification_error(left, right, err, mode, ctx.mod); },
+		[&](KnownIntType const&) { throw_unification_error(left, right, err, ctx.mod); },
+		[&](PointerType const&) { throw_unification_error(left, right, err, ctx.mod); },
+		[&](StructType const&) { throw_unification_error(left, right, err, ctx.mod); },
+		[&](UnionType const&) { throw_unification_error(left, right, err, ctx.mod); },
 
 		[&](ProcTypeUnresolved const&) { assert(!"unify: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) { assert(!"unify: UnionTypeUnresolved"); },
@@ -4650,23 +4851,6 @@ optional<size_t> find_by_name(ProcType const &proc, string_view name)
 	return nullopt;
 }
 
-Parameter const* find_var_member(StructInstance *inst, string_view field)
-{
-	Module *mod = inst->struct_()->sema->type_scope->mod; // This looks disgusting
-
-	for(Parameter const &var_member: inst->own_var_members())
-	{
-		if(name_of(var_member, mod) == field)
-			return &var_member;
-	}
-
-	if(inst->parent())
-		return find_var_member(inst->parent(), field);
-
-	return nullptr;
-}
-
-
 static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaContext &ctx)
 {
 	auto res = expr | match
@@ -4704,7 +4888,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					{
 						throw_sem_error("Invalid operand for not operator: " + reason, token_range_of(expr).first, &mod);
 					};
-					unify(*e.type, *sub_type, UNIFY_EQUAL, &constraints, {}, ctx, LazyErrorMsg(e.sub, error_msg));
+					unify(*e.type, *sub_type, TypeConversion::NONE, TypeConversion::NONE, &constraints, {}, ctx, LazyErrorMsg(e.sub, error_msg));
 				} break;
 
 				case UnaryOp::NEG:
@@ -4751,8 +4935,8 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					Type const *right_type = typecheck_subexpr(*e.right, constraints, ctx);
 
 					UnifyOutput out{
-						.left_expr = e.left,
-						.right_expr = e.right,
+						.on_type_conversion_left = mk_expr_converter(e.left),
+						.on_type_conversion_right = mk_expr_converter(e.right),
 						.result = ctx.arena.alloc<Type>(),
 					};
 					auto uni_error_msg = [](Expr const &expr, string const &reason, Module const &mod)
@@ -4761,7 +4945,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					};
 					unify(
 						*left_type, *right_type,
-						{TypeConversion::IMPLICIT_CTOR, ConversionSide::BOTH},
+						TypeConversion::IMPLICIT_CTOR, TypeConversion::IMPLICIT_CTOR,
 						&constraints,
 						out, ctx,
 						LazyErrorMsg(&expr, uni_error_msg)
@@ -4826,7 +5010,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					{
 						throw_sem_error("Equality operator requires equal types: " + reason, token_range_of(expr).first, &mod);
 					};
-					unify(*left_type, *right_type, UNIFY_EQUAL, &constraints, {}, ctx, LazyErrorMsg(&expr, error_msg));
+					unify(*left_type, *right_type, TypeConversion::NONE, TypeConversion::NONE, &constraints, {}, ctx, LazyErrorMsg(&expr, error_msg));
 
 					e.type = mk_builtin_type(BuiltinTypeDef::BOOL, ctx.arena);
 				} break;
@@ -4843,7 +5027,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 					{
 						throw_sem_error("Invalid operands for comparison operator: " + reason, token_range_of(expr).first, &mod);
 					};
-					unify(*left_type, *right_type, UNIFY_EQUAL, &constraints, {}, ctx, LazyErrorMsg(&expr, uni_error_msg));
+					unify(*left_type, *right_type, TypeConversion::NONE, TypeConversion::NONE, &constraints, {}, ctx, LazyErrorMsg(&expr, uni_error_msg));
 
 					auto integer_check_msg = [](Expr const &expr, string const &reason, Module const &mod)
 					{
@@ -4873,7 +5057,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			if(optional<TypeDeductionVar> pointer_var = get_if_type_deduction_var(*addr_type))
 			{
 				TypeDeductionVar var = ctx.new_type_deduction_var();
-				constraints.add_relational_constraint(var, PointeeTypeConstraint(*pointer_var));
+				constraints.add_relational_constraint(var, UnificationConstraint(SinglePointeeConstraint(*pointer_var)));
 				e.type = ctx.arena.alloc<Type>(VarType(var));
 			}
 			else
@@ -4892,7 +5076,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			if(optional<TypeDeductionVar> array_var = get_if_type_deduction_var(*addr_type))
 			{
 				TypeDeductionVar var = ctx.new_type_deduction_var();
-				constraints.add_relational_constraint(var, ElementTypeConstraint(*array_var));
+				constraints.add_relational_constraint(var, UnificationConstraint(ManyPointeeConstraint(*array_var)));
 				e.type = ctx.arena.alloc<Type>(VarType(var));
 			}
 			else
@@ -4923,7 +5107,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			if(optional<TypeDeductionVar> object_var = get_if_type_deduction_var(*object_type))
 			{
 				TypeDeductionVar var = ctx.new_type_deduction_var();
-				constraints.add_relational_constraint(var, MemberTypeConstraint(*object_var, e.member));
+				constraints.add_relational_constraint(var, UnificationConstraint(MemberConstraint(*object_var, e.member)));
 
 				e.type = ctx.arena.alloc<Type>(VarType(var));
 			}
@@ -4946,9 +5130,9 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 			};
 			unify(
 				*lhs_type, *rhs_type,
-				{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
+				TypeConversion::NONE, TypeConversion::IMPLICIT_CTOR,
 				&constraints,
-				{.right_expr = e.rhs},
+				{.on_type_conversion_right = mk_expr_converter(e.rhs)},
 				ctx,
 				LazyErrorMsg(&expr, error_msg)
 			);
@@ -5030,9 +5214,9 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintSystem &constraints, SemaCo
 				Type *arg_type = typecheck_subexpr(arg.expr, constraints, ctx);
 				unify(
 					param_type, *arg_type,
-					{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
+					TypeConversion::NONE, TypeConversion::IMPLICIT_CTOR,
 					&constraints,
-					{.right_expr = &arg.expr},
+					{.on_type_conversion_right = mk_expr_converter(&arg.expr)},
 					ctx,
 					LazyErrorMsg(&arg.expr, arg_error_msg)
 				);
@@ -5091,12 +5275,6 @@ static Type const* typecheck_expr(Expr &expr, SemaContext &ctx)
 }
 
 
-enum class PatternConversionSide
-{
-	RIGHT,
-	LEFT,
-};
-
 // Checks whether pattern_type <c rhs_type, where <c refers to the subtype relation induced by the
 // provided TypeConversion.
 //
@@ -5104,8 +5282,8 @@ enum class PatternConversionSide
 static Type const* unify_pattern(
 	Pattern &lhs_pattern,
 	Type const &rhs_type,
-	TypeConversion conv,
-	PatternConversionSide dir,
+	TypeConversion lhs_conv,
+	TypeConversion rhs_conv,
 	ConstraintSystem &constraints,
 	SemaContext &ctx,
 	// Output
@@ -5128,8 +5306,8 @@ static Type const* unify_pattern(
 			Type const *sub_type = unify_pattern(
 				*p.sub,
 				*pointer_type->pointee,
-				conv,
-				dir,
+				lhs_conv,
+				rhs_conv,
 				constraints,
 				ctx,
 				requires_lvalue
@@ -5151,8 +5329,8 @@ static Type const* unify_pattern(
 			Type const *sub_type = unify_pattern(
 				*p.sub,
 				sub_rhs_type,
-				conv,
-				dir,
+				lhs_conv,
+				rhs_conv,
 				constraints,
 				ctx,
 				requires_lvalue
@@ -5166,28 +5344,14 @@ static Type const* unify_pattern(
 			{
 				throw_sem_error("Invalid constructor pattern: " + reason, token_range_of(pattern).first, &mod);
 			});
-			if(dir == PatternConversionSide::RIGHT)
-			{
-				unify(
-					*p.ctor, rhs_type,
-					{conv, ConversionSide::RIGHT},
-					&constraints,
-					{},
-					ctx,
-					error_msg
-				);
-			}
-			else
-			{
-				unify(
-					rhs_type, *p.ctor,
-					{conv, ConversionSide::RIGHT},
-					&constraints,
-					{},
-					ctx,
-					error_msg
-				);
-			}
+			unify(
+				*p.ctor, rhs_type,
+				lhs_conv, rhs_conv,
+				&constraints,
+				{},
+				ctx,
+				error_msg
+			);
 
 			// Make sure the constructor is not a type variable
 			if(VarType const *var = std::get_if<VarType>(p.ctor))
@@ -5234,8 +5398,8 @@ static Type const* unify_pattern(
 						unify_pattern(
 							arg.pattern,
 							param_type,
-							conv,
-							dir,
+							lhs_conv,
+							rhs_conv,
 							constraints,
 							ctx,
 							requires_lvalue
@@ -5288,9 +5452,9 @@ static Type const* typecheck_pattern(
 		{
 			unify(
 				*lhs_pattern.provided_type, rhs_type,
-				{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
+				TypeConversion::NONE, TypeConversion::IMPLICIT_CTOR,
 				&constraints,
-				{.right_expr = root_rhs_expr},
+				{.on_type_conversion_right = mk_expr_converter(root_rhs_expr)},
 				ctx,
 				LazyErrorMsg(&lhs_pattern, error_msg)
 			);
@@ -5299,7 +5463,7 @@ static Type const* typecheck_pattern(
 		{
 			unify(
 				rhs_type, *lhs_pattern.provided_type,
-				{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
+				TypeConversion::NONE, TypeConversion::IMPLICIT_CTOR,
 				&constraints,
 				{},
 				ctx,
@@ -5310,8 +5474,7 @@ static Type const* typecheck_pattern(
 		return unify_pattern(
 			lhs_pattern,
 			*lhs_pattern.provided_type,
-			TypeConversion::TRIVIAL,
-			PatternConversionSide::LEFT,
+			TypeConversion::TRIVIAL, TypeConversion::NONE,
 			constraints,
 			ctx,
 			requires_lvalue
@@ -5329,8 +5492,8 @@ static Type const* typecheck_pattern(
 			return unify_pattern(
 				lhs_pattern,
 				rhs_type,
+				TypeConversion::NONE,
 				TypeConversion::IMPLICIT_CTOR,
-				PatternConversionSide::RIGHT,
 				constraints,
 				ctx,
 				requires_lvalue
@@ -5342,7 +5505,7 @@ static Type const* typecheck_pattern(
 				lhs_pattern,
 				rhs_type,
 				TypeConversion::IMPLICIT_CTOR,
-				PatternConversionSide::LEFT,
+				TypeConversion::NONE,
 				constraints,
 				ctx,
 				requires_lvalue
@@ -5410,9 +5573,9 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				unify(
 					*ctx.proc->ret_type,
 					*ret_expr_type,
-					{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
+					TypeConversion::NONE, TypeConversion::IMPLICIT_CTOR,
 					&constraints,
-					{.right_expr = s.ret_expr},
+					{.on_type_conversion_right = mk_expr_converter(s.ret_expr)},
 					ctx,
 					LazyErrorMsg(s.ret_expr, error_msg)
 				);
@@ -5622,9 +5785,9 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 					};
 					unify(
 						*var_member.type, *default_value_type,
-						{TypeConversion::IMPLICIT_CTOR, ConversionSide::RIGHT},
+						TypeConversion::NONE, TypeConversion::IMPLICIT_CTOR,
 						&constraints,
-						{.right_expr = default_value},
+						{.on_type_conversion_right = mk_expr_converter(default_value)},
 						ctx,
 						LazyErrorMsg(default_value, error_msg)
 					);
@@ -5888,6 +6051,10 @@ span.side-info {
 	color: gray;
 }
 
+.entry-struct-subst {
+	display: none;
+}
+
 		</style>
 	</head>
 	<body>
@@ -5896,11 +6063,15 @@ span.side-info {
 
 EventLogger::~EventLogger()
 {
-	m_os <<
+	try
+	{
+		m_os <<
 R"###(
 	</body>
 </html>
-)###";
+)###" << std::flush;
+	}
+	catch(...) {}
 }
 
 void EventLogger::on_declare_items_start()
@@ -6042,7 +6213,7 @@ void EventLogger::on_expr_end()
 
 void EventLogger::on_struct_substitution_start(StructInstance *inst)
 {
-	m_os << "<li>Struct substitution: \n";
+	m_os << "<li class='entry-struct-subst'>Struct substitution: \n";
 		m_os << "<code class='myca-inline'>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
 		m_os << " <span class='side-info'>(" << inst << ")</span>\n";
 		m_os << "<ul>\n";

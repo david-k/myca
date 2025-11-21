@@ -1,0 +1,14 @@
+struct Foo {}
+
+typealias U = Foo | i32;
+
+proc f'T(a: T, b: T) {}
+
+proc main() -> i32
+{
+	let a = Foo();
+	let u: U = 3;
+	f(a, u);
+
+	return 0;
+}

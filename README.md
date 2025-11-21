@@ -4,7 +4,8 @@ Myca is a low-level language with manual memory management. First and foremost,
 the goal is to develop a language that is ergonomic and fun to use. Second, I
 want to experiment with compile-time memory safety so I can sleep at night.
 
-Development is still at a very early stage. The main features currently implemented are:
+Development is still at a very early stage. The main features currently
+implemented are:
 - struct types that combine the functionality of both sum and product types
 - union types with set-like semantics
 - generics

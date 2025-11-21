@@ -113,9 +113,9 @@ int main(int, char *argv[])
 
 	try
 	{
+		std::ofstream event_sink; // Must live longer that the EventLogger in Module
 		Module mod = parse_module(source, Memory{&main_arena, temp_arena});
 
-		std::ofstream event_sink;
 		if(arg_event_log_filename)
 		{
 			event_sink.open(*arg_event_log_filename);

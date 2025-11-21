@@ -1,0 +1,66 @@
+typealias ArithError =
+	| struct DivisionByZero
+	| struct Overflow;
+
+typealias IOError =
+	| struct FileNotFound
+	| struct NoPermission;
+
+typealias Error = ArithError | IOError;
+
+proc safe_div(a: i32, b: i32) -> i32!Error
+{
+	if b == 0 {
+		return Err(DivisionByZero);
+	}
+
+	return a / b;
+}
+
+proc get_error_code(err: Error) -> i32
+{
+	match err
+	{
+		case DivisionByZero { return 1; }
+		case Overflow { return 2; }
+		case FileNotFound { return 3; }
+		case NoPermission { return 4; }
+	}
+}
+
+proc main() -> i32
+{
+	let mut result = 0;
+	match safe_div(12, 3)
+	{
+		case Ok(let v) {
+			result := result + v; // result = 4
+		}
+		case Err(let err) {
+			result := result + get_error_code(err);
+		}
+	}
+
+	match safe_div(7, 0)
+	{
+		case Ok(let v) {
+			result := result + v;
+		}
+		case Err(let err) {
+			result := result + get_error_code(err); // result = 4 + 1 = 5
+		}
+	}
+
+	return result; // 5
+}
+
+
+//------------------------------------------------------------------------------
+struct Result'(TOk, TError)
+{
+	case implicit Ok{value: TOk},
+	case Err{value: TError},
+}
+
+typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
+typealias Err'(TOk, TError) = Result'(TOk, TError).Err;

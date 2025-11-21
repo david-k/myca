@@ -1,0 +1,1 @@
+|22:7| error: Invalid argument: Ambiguous common type for Foo and i32 | Foo

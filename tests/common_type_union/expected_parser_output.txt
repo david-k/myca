@@ -1,0 +1,15 @@
+struct Foo {}
+
+typealias U = i32 | Foo;
+
+proc f'(T)(a: T, b: T) -> Unit
+{
+}
+
+proc main() -> i32
+{
+    let a: Foo = Foo();
+    let u: i32 | Foo = $InitUnion'(i32 | Foo)(3);
+    f'(i32 | Foo)($InitUnion'(i32 | Foo)(a), u);
+    return 0;
+}

@@ -1,0 +1,32 @@
+struct A
+{
+    case Ctor
+    {
+        _: B,
+    },
+}
+
+struct B
+{
+    case Ctor
+    {
+        _: C,
+    },
+}
+
+struct C {}
+
+proc f'(T)(a: T, b: T, c: T) -> Unit
+{
+}
+
+proc main() -> i32
+{
+    let c: C = C();
+    let b: B = B.Ctor(c);
+    let a: A = A.Ctor(B.Ctor(c));
+    f'(A)(a, A.Ctor(b), A.Ctor(B.Ctor(c)));
+    f'(A)(A.Ctor(B.Ctor(c)), A.Ctor(b), a);
+    f'(A)(A.Ctor(B.Ctor(c)), a, A.Ctor(b));
+    return 0;
+}
