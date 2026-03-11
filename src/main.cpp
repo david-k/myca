@@ -11,7 +11,6 @@
 #include "semantics.hpp"
 #include "codegen.hpp"
 
-
 using std::string;
 using std::string_view;
 using std::optional;
@@ -19,18 +18,8 @@ using std::optional;
 using namespace std::string_literals;
 using namespace std::string_view_literals;
 
-
-// Resources:
-// - "Compiling Swift Generics" – Slava Pestov
-//   - https://download.swift.org/docs/assets/generics.pdf
-
-
-//==============================================================================
-// Main
-//==============================================================================
 constexpr size_t MAX_MEMORY      = 50 * 1024*1024;
 constexpr size_t MAX_TEMP_MEMORY = 50 * 1024*1024;
-
 
 #define NEXT(args) (*++args)
 
@@ -42,59 +31,55 @@ int main(int, char *argv[])
 	bool arg_print_types = false;
 	bool arg_print_stats = false;
 
-	// Parse arguments
+	while(NEXT(argv))
 	{
-		while(NEXT(argv))
+		if(*argv == "-o"sv)
 		{
-			if(*argv == "-o"sv)
+			if(!NEXT(argv))
 			{
-				if(!NEXT(argv))
-				{
-					std::cerr << "Error: expected output filename" << std::endl;
-					return 1;
-				}
-				arg_output_filename = *argv;
+				std::cerr << "Error: expected output filename" << std::endl;
+				return 1;
 			}
-			else if(*argv == "--print-types"sv)
-			{
-				arg_print_types = true;
-			}
-			else if(*argv == "--print-stats"sv)
-			{
-				arg_print_stats = true;
-			}
-			else if(*argv == "--enable-log"sv)
-			{
-				if(!NEXT(argv))
-				{
-					std::cerr << "Error: expected event log filename" << std::endl;
-					return 1;
-				}
-				arg_event_log_filename = *argv;
-			}
-			else
-			{
-				if(arg_input_filename) {
-					std::cerr << "Error: input file already provided" << std::endl;
-					return 1;
-				}
-				arg_input_filename = *argv;
-			}
+			arg_output_filename = *argv;
 		}
-
-		if(!arg_input_filename)
+		else if(*argv == "--print-types"sv)
 		{
-			std::cerr << "Error: no input file provided" << std::endl;
-			return 1;
+			arg_print_types = true;
 		}
-
-		if(!arg_output_filename)
+		else if(*argv == "--print-stats"sv)
 		{
-			std::cerr << "Error: no output file provided" << std::endl;
-			return 1;
+			arg_print_stats = true;
+		}
+		else if(*argv == "--log-file"sv)
+		{
+			if(!NEXT(argv))
+			{
+				std::cerr << "Error: expected event log filename" << std::endl;
+				return 1;
+			}
+			arg_event_log_filename = *argv;
+		}
+		else
+		{
+			if(arg_input_filename) {
+				std::cerr << "Error: input file already provided" << std::endl;
+				return 1;
+			}
+			arg_input_filename = *argv;
 		}
 	}
 
+	if(!arg_input_filename)
+	{
+		std::cerr << "Error: no input file provided" << std::endl;
+		return 1;
+	}
+
+	if(!arg_output_filename)
+	{
+		std::cerr << "Error: no output file provided" << std::endl;
+		return 1;
+	}
 
 	std::ifstream file(*arg_input_filename);
 	if(!file) {
@@ -113,7 +98,7 @@ int main(int, char *argv[])
 
 	try
 	{
-		std::ofstream event_sink; // Must live longer that the EventLogger in Module
+		std::ofstream event_sink;
 		Module mod = parse_module(source, Memory{&main_arena, temp_arena});
 
 		if(arg_event_log_filename)

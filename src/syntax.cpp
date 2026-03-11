@@ -14,8 +14,10 @@ using namespace std::string_view_literals;
 
 
 //==============================================================================
-// Tokens
+// Printing
 //==============================================================================
+static constexpr int INDENT_WIDTH = 4;
+
 string_view str(Lexeme tok)
 {
 	switch(tok)
@@ -98,12 +100,6 @@ string_view str(Lexeme tok)
 	UNREACHABLE;
 }
 
-
-//==============================================================================
-// Printing
-//==============================================================================
-static constexpr int INDENT_WIDTH = 4;
-
 string_view str(BuiltinTypeDef t)
 {
 	switch(t)
@@ -122,22 +118,17 @@ string_view str(BuiltinTypeDef t)
 	UNREACHABLE;
 }
 
-string_view text_of(Token const &tok, string_view source)
-{
-	return source.substr(tok.span.begin.pos, tok.span.end.pos - tok.span.begin.pos);
-}
-
 string_view name_of(Path const &path, Module const *mod)
 {
-	Token const &tok = mod->tokens[path.range.first.value];
-	return text_of(tok, mod->source);
+	Token const &tok = mod->parser.token_at(path.range.first);
+	return mod->parser.get_text(tok.span);
 }
 
 string_view name_of(Parameter const &param, Module const *mod)
 {
-	Token const &tok = mod->tokens[param.range.first.value];
+	Token const &tok = mod->parser.token_at(param.range.first);
 	assert(tok.kind == Lexeme::IDENTIFIER);
-	return text_of(tok, mod->source);
+	return mod->parser.get_text(tok.span);
 }
 
 void print_type_args(FixedArray<Type> const *type_args, Module const &mod, std::ostream &os)
@@ -751,7 +742,7 @@ void print(TopLevelItem const &item, Module const &mod, std::ostream &os)
 
 void print(Module const &mod, std::ostream &os)
 {
-	for(TopLevelItem const &item: to_range(mod.items))
+	for(TopLevelItem const &item: to_range(mod.items.list()))
 	{
 		print(item, mod, os);
 		os << "\n\n";
@@ -796,11 +787,6 @@ TokenRange token_range_of(Expr const &expr)
 }
 
 
-TokenRange token_range_from(Expr const &expr, Parser const &parser)
-{
-	return TokenRange{token_range_of(expr).first, parser.prev_tok_idx()};
-}
-
 size_t ProcType::param_count() const
 {
 	return callable | match
@@ -841,361 +827,285 @@ DefaultValueExpr ProcType::param_default_value_at(size_t idx) const
 //==============================================================================
 // Lexing
 //==============================================================================
-namespace
+bool try_consume(Lexer &lexer, string_view expected_str)
 {
-	class Lexer
-	{
-	public:
-		explicit Lexer(string_view source) :
-			m_source{source} {}
-
-		char peek(size_t offset = 0)
-		{
-			size_t p = m_pos + offset;
-			assert(p < m_source.length());
-
-			return m_source[p];
-		}
-
-		optional<char> try_peek(size_t offset = 0)
-		{
-			size_t p = m_pos + offset;
-			if(p < m_source.length())
-				return m_source[p];
-
-			return nullopt;
-		}
-
-		void advance(size_t n = 1)
-		{
-			while(n-- && has_more())
-			{
-				if(m_source[m_pos] == '\n')
-				{
-					m_line += 1;
-					m_column = 1;
-				}
-				else
-					m_column += 1;
-
-				m_pos += 1;
-			}
-		}
-
-		char const* cur() const { return m_source.begin() + m_pos; }
-		char const* end() const { return m_source.end(); }
-
-		size_t remaining() const { return m_source.length() - m_pos; }
-		bool has_more(size_t how_many = 1) const { return m_pos + how_many <= m_source.length(); }
-
-		SourceLocation location() const
-		{
-			return SourceLocation{
-				.pos = m_pos,
-				.line = m_line,
-				.col = m_column,
-			};
-		}
-
-	private:
-		string_view m_source;
-		size_t m_pos = 0;
-		int m_line = 1;
-		int m_column = 1;
-	};
-
-
-	inline bool try_consume(Lexer &lex, string_view str)
-	{
-		if(lex.remaining() < str.length())
-			return false;
-
-		for(size_t i = 0; i < str.length(); ++i)
-		{
-			if(lex.peek(i) != str[i])
-				return false;
-		}
-
-		lex.advance(str.length());
-		return true;
-	}
-
-
-	inline bool is_alphabetic(char ch)
-	{
-		return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
-	}
-
-	inline bool is_digit(char ch)
-	{
-		return ch >= '0' && ch <= '9';
-	}
-
-
-	inline bool is_whitespace(char ch)
-	{
-		return ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r';
-	}
-
-	inline void skip_whitespace(Lexer &lex)
-	{
-		while(lex.has_more() && is_whitespace(lex.peek()))
-			lex.advance();
-	}
-
-	inline bool skip_comment(Lexer &lex)
-	{
-		if(try_consume(lex, "/*"))
-		{
-			while(lex.has_more())
-			{
-				if(try_consume(lex, "*/"))
-					return true;
-
-				lex.advance();
-			}
-
-			throw LexingError{"Unclosed multi-line comment"};
-		}
-
-		if(try_consume(lex, "//"))
-		{
-			while(lex.has_more())
-			{
-				if(try_consume(lex, "\n"))
-					return true;
-
-				lex.advance();
-			}
-		}
-
+	string_view remaining_str = lexer.remaining_string();
+	if(remaining_str.length() < expected_str.length())
 		return false;
-	}
 
-	inline void skip_whitespace_and_comments(Lexer &lex)
-	{
-		do skip_whitespace(lex);
-		while(skip_comment(lex));
-	}
+	if(not remaining_str.starts_with(expected_str))
+		return false;
 
-	inline optional<uint64_t> try_read_number(Lexer &lex)
-	{
-		char const *start_pos = lex.cur();
-		while(lex.has_more() && is_digit(lex.peek()))
-			lex.advance();
+	lexer.advance(expected_str.length());
+	return true;
+}
 
-		if(lex.cur() == start_pos)
-			return {};
-
-		uint64_t integer;
-		std::from_chars_result result = std::from_chars(start_pos, lex.cur(), integer);
-		assert(result.ec == std::errc());
-		assert(result.ptr == lex.cur());
-
-		return integer;
-	}
-
-	inline optional<string_view> try_read_identifier(Lexer &lex)
-	{
-		if(!lex.has_more())
-			return nullopt;
-
-		char ch = lex.peek();
-		if(ch == '_' || is_alphabetic(ch))
-		{
-			char const *id_start = lex.cur();
-			do
-				lex.advance();
-			while(lex.has_more() && (lex.peek() == '_' || is_alphabetic(lex.peek()) || is_digit(lex.peek())));
-
-			return string_view{id_start, lex.cur()};
-		}
-
-		return nullopt;
-	}
-
-	optional<Lexeme> try_read_punctuation(Lexer &lex)
-	{
-		switch(lex.peek())
-		{
-			case '.': lex.advance(); return Lexeme::DOT;
-			case ',': lex.advance(); return Lexeme::COMMA;
-			case ':':
-			{
-				lex.advance(); 
-				if(try_consume(lex, "="))
-					return Lexeme::COLON_EQ;
-
-				return Lexeme::COLON;
-			}
-			case ';': lex.advance(); return Lexeme::SEMICOLON;
-			case '^': lex.advance(); return Lexeme::CIRCUMFLEX;
-			case '&': lex.advance(); return Lexeme::AMPERSAND;
-			case '?': lex.advance(); return Lexeme::QUESTIONMARK;
-			case '!': lex.advance(); return Lexeme::BANG;
-			case '\'': lex.advance(); return Lexeme::SINGLE_QUOTE;
-			case '@': lex.advance(); return Lexeme::AT;
-			case '|': lex.advance(); return Lexeme::BAR;
-			case '(': lex.advance(); return Lexeme::LEFT_PAREN;
-			case ')': lex.advance(); return Lexeme::RIGHT_PAREN;
-			case '{': lex.advance(); return Lexeme::LEFT_BRACE;
-			case '}': lex.advance(); return Lexeme::RIGHT_BRACE;
-			case '[': lex.advance(); return Lexeme::LEFT_BRACKET;
-			case ']': lex.advance(); return Lexeme::RIGHT_BRACKET;
-			case '+': lex.advance(); return Lexeme::PLUS;
-			case '-':
-			{
-				lex.advance();
-				if(lex.try_peek() == '>')
-				{
-					lex.advance();
-					return Lexeme::THIN_ARROW;
-				}
-
-				return Lexeme::MINUS;
-			}
-			case '*': lex.advance(); return Lexeme::STAR;
-			case '/': lex.advance(); return Lexeme::SLASH;
-			case '=':
-			{
-				lex.advance();
-				if(try_consume(lex, "="))
-					return Lexeme::DOUBLE_EQ;
-					
-				return Lexeme::EQ;
-			}
-			case '<':
-			{
-				lex.advance();
-				if(try_consume(lex, "="))
-					return Lexeme::LE;
-					
-				return Lexeme::LT;
-			}
-			case '>':
-			{
-				lex.advance();
-				if(try_consume(lex, "="))
-					return Lexeme::GE;
-					
-				return Lexeme::GT;
-			}
-
-			default: return nullopt;
-		}
-	}
-
-	unordered_map<string_view, Lexeme> const KEYWORDS = {
-		{"true", Lexeme::TRUE},
-		{"false", Lexeme::FALSE},
-		{"let", Lexeme::LET},
-		{"proc", Lexeme::PROC},
-		{"struct", Lexeme::STRUCT},
-		{"case", Lexeme::CASE},
-		{"implicit", Lexeme::IMPLICIT},
-		{"if", Lexeme::IF},
-		{"else", Lexeme::ELSE},
-		{"while", Lexeme::WHILE},
-		{"match", Lexeme::MATCH},
-		{"return", Lexeme::RETURN},
-		{"not", Lexeme::NOT},
-		{"as", Lexeme::AS},
-		{"mut", Lexeme::MUT},
-		{"typealias", Lexeme::TYPEALIAS},
-		{"extern", Lexeme::EXTERN},
-		{"size_of", Lexeme::SIZE_OF},
-		{"make", Lexeme::MAKE},
-
-		{"Never", Lexeme::TYPE_NEVER},
-		{"bool", Lexeme::TYPE_BOOL},
-		{"unit", Lexeme::TYPE_UNIT},
-		{"i8", Lexeme::TYPE_I8},
-		{"u8", Lexeme::TYPE_U8},
-		{"i32", Lexeme::TYPE_I32},
-		{"u32", Lexeme::TYPE_U32},
-		{"isize", Lexeme::TYPE_ISIZE},
-		{"usize", Lexeme::TYPE_USIZE},
-	};
-
-
-	inline optional<Token> next_token(Lexer &lex)
-	{
-		skip_whitespace_and_comments(lex);
-		if(!lex.has_more())
-			return nullopt;
-
-		SourceLocation loc_begin = lex.location();
-		if(optional<uint64_t> int_val = try_read_number(lex))
-		{
-			return Token{
-				.kind = Lexeme::INT_LITERAL,
-				.value = {.int_val = *int_val},
-				.span = {loc_begin, lex.location()},
-			};
-		}
-
-		if(optional<Lexeme> tok_kind = try_read_punctuation(lex))
-		{
-			return Token{
-				.kind = *tok_kind,
-				.span = {loc_begin, lex.location()},
-			};
-		}
-
-		// C string literals
-		if(try_consume(lex, "c\""))
-		{
-			char const *string_start = lex.cur();
-			while(lex.has_more())
-			{
-				if(lex.peek() == '"')
-					break;
-
-				lex.advance();
-			}
-			string_view str_literal(string_start, lex.cur());
-
-			if(!try_consume(lex, "\""))
-				throw LexingError("Missing closing quote");
-
-			return Token{
-				.kind = Lexeme::C_STRING_LITERAL,
-				.value = {.str_val = str_literal},
-				.span = {loc_begin, lex.location()},
-			};
-		}
-
-		if(optional<string_view> id = try_read_identifier(lex))
-		{
-			if(auto keyword_it = KEYWORDS.find(*id); keyword_it != KEYWORDS.end())
-			{
-				return Token{
-					.kind = keyword_it->second,
-					.span = {loc_begin, lex.location()},
-				};
-			}
-
-			return Token{
-				.kind = Lexeme::IDENTIFIER,
-				.span = {loc_begin, lex.location()},
-			};
-		}
-
-		throw LexingError("Invalid character: "s + lex.peek());
-	}
-} // anonymous namespace
-
-
-vector<Token> tokenize(string_view source)
+void consume(Lexer &lexer, string_view expected_str)
 {
-	Lexer lex{source};
+	if(not try_consume(lexer, expected_str))
+		throw LexingError("Unexpected input");
+}
 
-	vector<Token> tokens;
-	while(auto tok = next_token(lex))
-		tokens.push_back(*tok);
 
-	tokens.push_back(Token{.kind = Lexeme::END, .span = {}});
-	return tokens;
+static bool is_alphabetic(char ch)
+{
+	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+}
+
+static bool is_digit(char ch)
+{
+	return ch >= '0' && ch <= '9';
+}
+
+
+static bool is_whitespace(char ch)
+{
+	return ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r';
+}
+
+void skip_whitespace(Lexer &lexer)
+{
+	while(lexer.has_more() && is_whitespace(lexer.get()))
+		lexer.advance();
+}
+
+static bool skip_comment(Lexer &lexer)
+{
+	if(try_consume(lexer, "/*"))
+	{
+		while(lexer.has_more())
+		{
+			if(try_consume(lexer, "*/"))
+				return true;
+
+			lexer.advance();
+		}
+
+		throw LexingError{"Unclosed multi-line comment"};
+	}
+
+	if(try_consume(lexer, "//"))
+	{
+		while(lexer.has_more())
+		{
+			if(try_consume(lexer, "\n"))
+				return true;
+
+			lexer.advance();
+		}
+	}
+
+	return false;
+}
+
+static void skip_whitespace_and_comments(Lexer &lexer)
+{
+	do skip_whitespace(lexer);
+	while(skip_comment(lexer));
+}
+
+optional<uint64_t> try_read_number(Lexer &lexer)
+{
+	size_t start_pos = lexer.local_byte_pos();
+	while(lexer.has_more() && is_digit(lexer.get()))
+		lexer.advance();
+
+	string_view integer_str = lexer.substr_from(start_pos);
+	if(integer_str.empty())
+		return nullopt;
+
+	uint64_t integer;
+	std::from_chars_result result = std::from_chars(integer_str.begin(), integer_str.end(), integer);
+	assert(result.ec == std::errc());
+	assert(result.ptr == integer_str.end());
+
+	return integer;
+}
+
+optional<string_view> try_read_identifier(Lexer &lexer)
+{
+	if(!lexer.has_more())
+		return nullopt;
+
+	char ch = lexer.get();
+	if(ch == '_' || is_alphabetic(ch))
+	{
+		size_t id_start_pos = lexer.local_byte_pos();
+		do
+			lexer.advance();
+		while(lexer.has_more() && (lexer.get() == '_' || is_alphabetic(lexer.get()) || is_digit(lexer.get())));
+
+		return lexer.substr_from(id_start_pos);
+	}
+
+	return nullopt;
+}
+
+optional<Lexeme> try_read_punctuation(Lexer &lexer)
+{
+	switch(lexer.get())
+	{
+		case '.': lexer.advance(); return Lexeme::DOT;
+		case ',': lexer.advance(); return Lexeme::COMMA;
+		case ':':
+		{
+			lexer.advance(); 
+			if(try_consume(lexer, "="))
+				return Lexeme::COLON_EQ;
+
+			return Lexeme::COLON;
+		}
+		case ';': lexer.advance(); return Lexeme::SEMICOLON;
+		case '^': lexer.advance(); return Lexeme::CIRCUMFLEX;
+		case '&': lexer.advance(); return Lexeme::AMPERSAND;
+		case '?': lexer.advance(); return Lexeme::QUESTIONMARK;
+		case '!': lexer.advance(); return Lexeme::BANG;
+		case '\'': lexer.advance(); return Lexeme::SINGLE_QUOTE;
+		case '@': lexer.advance(); return Lexeme::AT;
+		case '|': lexer.advance(); return Lexeme::BAR;
+		case '(': lexer.advance(); return Lexeme::LEFT_PAREN;
+		case ')': lexer.advance(); return Lexeme::RIGHT_PAREN;
+		case '{': lexer.advance(); return Lexeme::LEFT_BRACE;
+		case '}': lexer.advance(); return Lexeme::RIGHT_BRACE;
+		case '[': lexer.advance(); return Lexeme::LEFT_BRACKET;
+		case ']': lexer.advance(); return Lexeme::RIGHT_BRACKET;
+		case '+': lexer.advance(); return Lexeme::PLUS;
+		case '-':
+		{
+			lexer.advance();
+			if(try_consume(lexer, ">"))
+				return Lexeme::THIN_ARROW;
+
+			return Lexeme::MINUS;
+		}
+		case '*': lexer.advance(); return Lexeme::STAR;
+		case '/': lexer.advance(); return Lexeme::SLASH;
+		case '=':
+		{
+			lexer.advance();
+			if(try_consume(lexer, "="))
+				return Lexeme::DOUBLE_EQ;
+				
+			return Lexeme::EQ;
+		}
+		case '<':
+		{
+			lexer.advance();
+			if(try_consume(lexer, "="))
+				return Lexeme::LE;
+				
+			return Lexeme::LT;
+		}
+		case '>':
+		{
+			lexer.advance();
+			if(try_consume(lexer, "="))
+				return Lexeme::GE;
+				
+			return Lexeme::GT;
+		}
+
+		default: return nullopt;
+	}
+}
+
+unordered_map<string_view, Lexeme> const KEYWORDS = {
+	{"true", Lexeme::TRUE},
+	{"false", Lexeme::FALSE},
+	{"let", Lexeme::LET},
+	{"proc", Lexeme::PROC},
+	{"struct", Lexeme::STRUCT},
+	{"case", Lexeme::CASE},
+	{"implicit", Lexeme::IMPLICIT},
+	{"if", Lexeme::IF},
+	{"else", Lexeme::ELSE},
+	{"while", Lexeme::WHILE},
+	{"match", Lexeme::MATCH},
+	{"return", Lexeme::RETURN},
+	{"not", Lexeme::NOT},
+	{"as", Lexeme::AS},
+	{"mut", Lexeme::MUT},
+	{"typealias", Lexeme::TYPEALIAS},
+	{"extern", Lexeme::EXTERN},
+	{"size_of", Lexeme::SIZE_OF},
+	{"make", Lexeme::MAKE},
+
+	{"Never", Lexeme::TYPE_NEVER},
+	{"bool", Lexeme::TYPE_BOOL},
+	{"unit", Lexeme::TYPE_UNIT},
+	{"i8", Lexeme::TYPE_I8},
+	{"u8", Lexeme::TYPE_U8},
+	{"i32", Lexeme::TYPE_I32},
+	{"u32", Lexeme::TYPE_U32},
+	{"isize", Lexeme::TYPE_ISIZE},
+	{"usize", Lexeme::TYPE_USIZE},
+};
+
+optional<Token> next_token(Lexer &lexer)
+{
+	skip_whitespace_and_comments(lexer);
+	if(!lexer.has_more())
+		return nullopt;
+
+	SourceLocation loc_begin = lexer.location();
+	if(optional<uint64_t> int_val = try_read_number(lexer))
+	{
+		return Token{
+			.kind = Lexeme::INT_LITERAL,
+			.value = {.int_val = *int_val},
+			.span = {loc_begin, lexer.location()},
+		};
+	}
+
+	if(optional<Lexeme> tok_kind = try_read_punctuation(lexer))
+	{
+		return Token{
+			.kind = *tok_kind,
+			.span = {loc_begin, lexer.location()},
+		};
+	}
+
+	// C string literals
+	if(try_consume(lexer, "c\""))
+	{
+		size_t string_start_pos = lexer.local_byte_pos();
+		while(lexer.has_more())
+		{
+			if(lexer.get() == '"')
+				break;
+
+			lexer.advance();
+		}
+		string_view string_literal = lexer.substr_from(string_start_pos);
+
+		if(!try_consume(lexer, "\""))
+			throw LexingError("Missing closing quote");
+
+		return Token{
+			.kind = Lexeme::C_STRING_LITERAL,
+			.value = {.str_val = string_literal},
+			.span = {loc_begin, lexer.location()},
+		};
+	}
+
+	if(optional<string_view> id = try_read_identifier(lexer))
+	{
+		if(auto keyword_it = KEYWORDS.find(*id); keyword_it != KEYWORDS.end())
+		{
+			return Token{
+				.kind = keyword_it->second,
+				.span = {loc_begin, lexer.location()},
+			};
+		}
+
+		return Token{
+			.kind = Lexeme::IDENTIFIER,
+			.value = {.str_val = *id},
+			.span = {loc_begin, lexer.location()},
+		};
+	}
+
+	throw LexingError("Invalid character: "s + lexer.get());
 }
 
 
@@ -1209,12 +1119,12 @@ namespace
 		explicit TokenRanger(Parser &parser) :
 			parser(&parser)
 		{
-			first = parser.tok_idx();
+			first = parser.token_idx();
 		}
 
 		TokenRange get()
 		{
-			return TokenRange(first, TokenIdx(parser->tok_idx().value - 1));
+			return TokenRange(first, TokenIdx(parser->token_idx().value - 1));
 		}
 
 		TokenIdx first;
@@ -1224,8 +1134,9 @@ namespace
 
 static Token const& consume(Parser &parser, Lexeme kind)
 {
-	if(parser.tok().kind != kind)
-		throw ParseError(str(parser.location()) + ": Expected "s + str(kind) + ", got " + str(parser.tok().kind));
+	Token const &actual_token = parser.get();
+	if(actual_token.kind != kind)
+		throw ParseError(str(actual_token.span.begin) + ": Expected "s + str(kind) + ", got " + str(parser.get().kind));
 
 	return parser.next();
 }
@@ -1233,12 +1144,12 @@ static Token const& consume(Parser &parser, Lexeme kind)
 static string_view consume_identifier(Parser &parser)
 {
 	Token const &tok = consume(parser, Lexeme::IDENTIFIER);
-	return parser.source.substr(tok.span.begin.pos, tok.span.end.pos - tok.span.begin.pos);
+	return tok.value.str_val;
 }
 
 static optional<Token> try_consume(Parser &parser, Lexeme kind)
 {
-	if(parser.tok().kind != kind)
+	if(parser.get().kind != kind)
 		return std::nullopt;
 
 	return parser.next();
@@ -1246,7 +1157,7 @@ static optional<Token> try_consume(Parser &parser, Lexeme kind)
 
 [[noreturn]] static void throw_parse_error(string const &msg, TokenIdx tok_idx, Parser &parser)
 {
-	Token const &tok = parser.tok(tok_idx);
+	Token const &tok = parser.token_at(tok_idx);
 	throw ParseError("|" + str(tok.span.begin) + "| error: " + msg);
 }
 
@@ -1254,7 +1165,6 @@ static optional<Token> try_consume(Parser &parser, Lexeme kind)
 //--------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------
-static Type parse_type(Parser &parser, Memory M);
 static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path = true);
 static Type parse_union_type(Parser &parser, Memory M);
 
@@ -1272,10 +1182,10 @@ static FixedArray<Type>* parse_type_arg_list(Parser &parser, Memory M)
 	ListBuilder<Type> type_args(M.temp);
 	if(try_consume(parser, Lexeme::LEFT_PAREN))
 	{
-		while(parser.peek() != Lexeme::RIGHT_PAREN)
+		while(parser.get().kind != Lexeme::RIGHT_PAREN)
 		{
 			type_args.append(parse_type(parser, M));
-			if(parser.peek() != Lexeme::RIGHT_PAREN)
+			if(parser.get().kind != Lexeme::RIGHT_PAREN)
 				consume(parser, Lexeme::COMMA);
 		}
 		consume(parser, Lexeme::RIGHT_PAREN);
@@ -1347,8 +1257,8 @@ static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 			Type pointee = parse_prefix_type(parser, M);
 			return PointerType(
 				ranger.get(),
-				PointerType::SINGLE,
 				M.main->alloc<Type>(pointee),
+				PointerType::SINGLE,
 				mutability
 			);
 		}
@@ -1361,8 +1271,8 @@ static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 			Type pointee = parse_prefix_type(parser, M);
 			return PointerType(
 				ranger.get(),
-				PointerType::MANY,
 				M.main->alloc<Type>(pointee),
+				PointerType::MANY,
 				mutability
 			);
 		}
@@ -1389,10 +1299,10 @@ static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 		{
 			ListBuilder<Type> params(M.temp);
 			consume(parser, Lexeme::LEFT_PAREN);
-			while(parser.peek() != Lexeme::RIGHT_PAREN)
+			while(parser.get().kind != Lexeme::RIGHT_PAREN)
 			{
 				params.append(parse_type(parser, M));
-				if(parser.peek() != Lexeme::RIGHT_PAREN)
+				if(parser.get().kind != Lexeme::RIGHT_PAREN)
 					consume(parser, Lexeme::COMMA);
 			}
 			consume(parser, Lexeme::RIGHT_PAREN);
@@ -1407,10 +1317,6 @@ static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 		case Lexeme::STRUCT:
 		{
 			StructItem struct_ = parse_struct(parser, StructParseContext::INLINE, M);
-
-			if(struct_.type_params->count)
-				throw_parse_error("Inline struct definition cannot have type parameters", ranger.first, parser);
-
 			return InlineStructType(
 				ranger.get(),
 				M.main->alloc<StructItem>(struct_)
@@ -1427,7 +1333,7 @@ static Type parse_result_type(Parser &parser, Memory M)
 	Type type = parse_prefix_type(parser, M);
 	if(optional<Token> bang_tok = try_consume(parser, Lexeme::BANG))
 	{
-		TokenRange bang_token_range{parser.prev_tok_idx(), parser.prev_tok_idx()};
+		TokenRange bang_token_range{parser.prev_token_idx(), parser.prev_token_idx()};
 		FixedArray<Type> *type_args = alloc_fixed_array<Type>(2, *M.main);
 		type_args->items[0] = type;
 		type_args->items[1] = parse_prefix_type(parser, M);
@@ -1442,7 +1348,7 @@ static Type parse_union_type(Parser &parser, Memory M)
 {
 	TokenRanger ranger(parser);
 	Type type = parse_result_type(parser, M);
-	if(parser.peek() == Lexeme::BAR)
+	if(parser.get().kind == Lexeme::BAR)
 	{
 		ListBuilder<Type> alternatives(M.temp);
 		alternatives.append(type);
@@ -1455,7 +1361,7 @@ static Type parse_union_type(Parser &parser, Memory M)
 	return type;
 }
 
-static Type parse_type(Parser &parser, Memory M)
+Type parse_type(Parser &parser, Memory M)
 {
 	return parse_union_type(parser, M);
 }
@@ -1552,13 +1458,12 @@ namespace
 		}
 	}
 
-
 	Expr parse_expr(Parser &parser, OperatorInfo prev_op, Memory M)
 	{
 		Expr expr = parse_prefix_expr(parser, M);
 		for(;;)
 		{
-			optional<OperatorInfo> next_op = get_operator_info(parser.tok().kind);
+			optional<OperatorInfo> next_op = get_operator_info(parser.get().kind);
 			if(!next_op)
 				break;
 
@@ -1573,7 +1478,6 @@ namespace
 
 		return expr;
 	}
-
 
 	Expr parse_prefix_expr(Parser &parser, Memory M)
 	{
@@ -1664,7 +1568,6 @@ namespace
 		}
 	}
 
-
 	Expr parse_infix_expr(Parser &parser, Expr left, Memory M)
 	{
 		Token tok = parser.next();
@@ -1674,7 +1577,7 @@ namespace
 			{
 				string_view member_name = consume_identifier(parser);
 				return MemberAccessExpr(
-					token_range_from(left, parser),
+					TokenRange{token_range_of(left).first, parser.prev_token_idx()},
 					M.main->alloc<Expr>(left),
 					member_name
 				);
@@ -1692,7 +1595,7 @@ namespace
 			{
 				Expr right = parse_expr(parser, *get_operator_info(tok.kind), M);
 				return BinaryExpr(
-					token_range_from(left, parser),
+					TokenRange{token_range_of(left).first, parser.prev_token_idx()},
 					M.main->alloc<Expr>(left),
 					M.main->alloc<Expr>(right),
 					BinaryOp(tok.kind)
@@ -1703,7 +1606,7 @@ namespace
 			{
 				Expr right = parse_expr(parser, *get_operator_info(tok.kind), M);
 				return AssignmentExpr(
-					token_range_from(left, parser),
+					TokenRange{token_range_of(left).first, parser.prev_token_idx()},
 					M.main->alloc<Expr>(left),
 					M.main->alloc<Expr>(right)
 				);
@@ -1712,7 +1615,7 @@ namespace
 			case Lexeme::LEFT_PAREN:
 			{
 				ListBuilder<Argument> args(M.temp);
-				while(parser.peek() != Lexeme::RIGHT_PAREN)
+				while(parser.get().kind != Lexeme::RIGHT_PAREN)
 				{
 					TokenRanger arg_ranger(parser);
 					Argument arg;
@@ -1728,26 +1631,31 @@ namespace
 					arg.range = arg_ranger.get();
 					args.append(arg);
 
-					if(parser.peek() != Lexeme::RIGHT_PAREN)
+					if(parser.get().kind != Lexeme::RIGHT_PAREN)
 						consume(parser, Lexeme::COMMA);
 				}
 				consume(parser, Lexeme::RIGHT_PAREN);
 
 				return CallExpr(
-					token_range_from(left, parser),
+					TokenRange{token_range_of(left).first, parser.prev_token_idx()},
 					M.main->alloc<Expr>(left),
 					args.to_array(*M.main)
 				);
 			}
 
-			case Lexeme::CIRCUMFLEX: return DerefExpr(token_range_from(left, parser), M.main->alloc<Expr>(left));
+			case Lexeme::CIRCUMFLEX:
+				return DerefExpr(
+					TokenRange{token_range_of(left).first,
+					parser.prev_token_idx()},
+					M.main->alloc<Expr>(left)
+				);
 
 			case Lexeme::LEFT_BRACKET:
 			{
 				Expr index = parse_expr(parser, NO_PREVIOUS_OP, M);
 				consume(parser, Lexeme::RIGHT_BRACKET);
 				return IndexExpr(
-					token_range_from(left, parser),
+					TokenRange{token_range_of(left).first, parser.prev_token_idx()},
 					M.main->alloc<Expr>(left),
 					M.main->alloc<Expr>(index)
 				);
@@ -1757,7 +1665,7 @@ namespace
 			{
 				Type target_type = parse_type(parser, M);
 				return AsExpr(
-					token_range_from(left, parser),
+					TokenRange{token_range_of(left).first, parser.prev_token_idx()},
 					M.main->alloc<Expr>(left),
 					M.main->alloc<Type>(target_type)
 				);
@@ -1770,7 +1678,7 @@ namespace
 				optional<Pattern> error_capture;
 				if(try_consume(parser, Lexeme::ELSE))
 				{
-					if(parser.peek() != Lexeme::LEFT_BRACE)
+					if(parser.tok().kind != Lexeme::LEFT_BRACE)
 					{
 						Pattern error_pat = parse_pattern(parser, mod);
 						error_capture = pattern_Ctor(
@@ -1808,7 +1716,7 @@ static Pattern parse_pattern(Parser &parser, Memory M);
 static Pattern parse_primary_pattern(Parser &parser, Memory M)
 {
 	TokenRanger ranger(parser);
-	switch(parser.tok().kind)
+	switch(parser.get().kind)
 	{
 		case Lexeme::LET:
 		{
@@ -1823,7 +1731,8 @@ static Pattern parse_primary_pattern(Parser &parser, Memory M)
 
 		case Lexeme::IDENTIFIER:
 		{
-			if(text_of(parser.tok(), parser.source) == "_")
+			Token const &ident_token = parser.get();
+			if(parser.get_text(ident_token.span) == "_")
 			{
 				parser.next();
 				return Pattern(WildcardPattern(ranger.get()), nullptr);
@@ -1836,13 +1745,13 @@ static Pattern parse_primary_pattern(Parser &parser, Memory M)
 			if(try_consume(parser, Lexeme::LEFT_PAREN))
 			{
 				has_parens = true;
-				while(parser.peek() != Lexeme::RIGHT_PAREN)
+				while(parser.get().kind != Lexeme::RIGHT_PAREN)
 				{
 					args.append(PatternArgument{
 						.pattern = parse_pattern(parser, M),
 						.param_name = {},
 					});
-					if(parser.peek() != Lexeme::RIGHT_PAREN)
+					if(parser.get().kind != Lexeme::RIGHT_PAREN)
 						consume(parser, Lexeme::COMMA);
 				}
 				consume(parser, Lexeme::RIGHT_PAREN);
@@ -1872,7 +1781,6 @@ static Pattern parse_pattern(Parser &parser, Memory M)
 	{
 		if(try_consume(parser, Lexeme::CIRCUMFLEX))
 			p = Pattern(DerefPattern(ranger.get(), M.main->alloc<Pattern>(p)), nullptr);
-	
 		else if(try_consume(parser, Lexeme::AMPERSAND))
 		{
 			IsMutable mutability = IsMutable::NO;
@@ -1881,10 +1789,8 @@ static Pattern parse_pattern(Parser &parser, Memory M)
 
 			p = Pattern(AddressOfPattern(ranger.get(), M.main->alloc<Pattern>(p), mutability), nullptr);
 		}
-
 		else if(try_consume(parser, Lexeme::COLON))
 			p.provided_type = M.main->alloc<Type>(parse_type(parser, M));
-
 		else
 			break;
 	}
@@ -1896,112 +1802,108 @@ static Pattern parse_pattern(Parser &parser, Memory M)
 //--------------------------------------------------------------------
 // Statements
 //--------------------------------------------------------------------
-namespace
+static Stmt parse_stmt(Parser &parser, Memory M);
+
+static BlockStmt parse_block_stmt(Parser &parser, Memory M)
 {
-	Stmt parse_stmt(Parser &parser, Memory M);
+	TokenRanger ranger(parser);
+	ListBuilder<Stmt> stmts(M.temp);
 
-	BlockStmt parse_block_stmt(Parser &parser, Memory M)
+	consume(parser, Lexeme::LEFT_BRACE);
+	for(;;)
 	{
-		TokenRanger ranger(parser);
-		ListBuilder<Stmt> stmts(M.temp);
+		if(parser.get().kind == Lexeme::RIGHT_BRACE)
+			break;
 
-		consume(parser, Lexeme::LEFT_BRACE);
-		for(;;)
-		{
-			if(parser.peek() == Lexeme::RIGHT_BRACE)
-				break;
-
-			stmts.append(parse_stmt(parser, M));
-		}
-		consume(parser, Lexeme::RIGHT_BRACE);
-
-		return BlockStmt(ranger.get(), stmts.to_array(*M.main));
+		stmts.append(parse_stmt(parser, M));
 	}
+	consume(parser, Lexeme::RIGHT_BRACE);
 
-	Stmt parse_stmt(Parser &parser, Memory M)
+	return BlockStmt(ranger.get(), stmts.to_array(*M.main));
+}
+
+static Stmt parse_stmt(Parser &parser, Memory M)
+{
+	TokenRanger ranger(parser);
+	switch(parser.get().kind)
 	{
-		TokenRanger ranger(parser);
-		switch(parser.tok_kind())
+		case Lexeme::LET:
 		{
-			case Lexeme::LET:
+			Pattern lhs = parse_pattern(parser, M);
+			consume(parser, Lexeme::EQ);
+			Expr init_expr = parse_expr(parser, M);
+			consume(parser, Lexeme::SEMICOLON);
+
+			return LetStmt(ranger.get(), M.main->alloc<Pattern>(lhs), M.main->alloc<Expr>(init_expr));
+		}
+
+		case Lexeme::RETURN:
+		{
+			parser.next();
+			Expr *NULLABLE ret_expr = nullptr;
+			if(!try_consume(parser, Lexeme::SEMICOLON))
 			{
-				Pattern lhs = parse_pattern(parser, M);
-				consume(parser, Lexeme::EQ);
-				Expr init_expr = parse_expr(parser, M);
+				ret_expr = M.main->alloc<Expr>(parse_expr(parser, M));
 				consume(parser, Lexeme::SEMICOLON);
-
-				return LetStmt(ranger.get(), M.main->alloc<Pattern>(lhs), M.main->alloc<Expr>(init_expr));
 			}
 
-			case Lexeme::RETURN:
+			return ReturnStmt(ranger.get(), ret_expr);
+		}
+
+		case Lexeme::IF:
+		{
+			parser.next();
+			Expr cond = parse_expr(parser, M);
+			Stmt then = parse_block_stmt(parser, M);
+			Stmt *NULLABLE else_ = nullptr;
+			if(try_consume(parser, Lexeme::ELSE))
+				else_ = M.main->alloc<Stmt>(parse_block_stmt(parser, M));
+
+			return IfStmt(
+				ranger.get(),
+				M.main->alloc<Expr>(cond),
+				M.main->alloc<Stmt>(then),
+				else_
+			);
+		}
+
+		case Lexeme::WHILE:
+		{
+			parser.next();
+			Expr cond = parse_expr(parser, M);
+			Stmt body = parse_block_stmt(parser, M);
+
+			return WhileStmt(ranger.get(), M.main->alloc<Expr>(cond), M.main->alloc<Stmt>(body));
+		}
+
+		case Lexeme::MATCH:
+		{
+			parser.next();
+			Expr subject = parse_expr(parser, M);
+			consume(parser, Lexeme::LEFT_BRACE);
+			ListBuilder<MatchArm> arms(M.temp);
+			while(parser.get().kind != Lexeme::RIGHT_BRACE)
 			{
-				parser.next();
-				Expr *NULLABLE ret_expr = nullptr;
-				if(!try_consume(parser, Lexeme::SEMICOLON))
-				{
-					ret_expr = M.main->alloc<Expr>(parse_expr(parser, M));
-					consume(parser, Lexeme::SEMICOLON);
-				}
+				consume(parser, Lexeme::CASE);
 
-				return ReturnStmt(ranger.get(), ret_expr);
-			}
-
-			case Lexeme::IF:
-			{
-				parser.next();
-				Expr cond = parse_expr(parser, M);
-				Stmt then = parse_block_stmt(parser, M);
-				Stmt *NULLABLE else_ = nullptr;
-				if(try_consume(parser, Lexeme::ELSE))
-					else_ = M.main->alloc<Stmt>(parse_block_stmt(parser, M));
-
-				return IfStmt(
-					ranger.get(),
-					M.main->alloc<Expr>(cond),
-					M.main->alloc<Stmt>(then),
-					else_
-				);
-			}
-
-			case Lexeme::WHILE:
-			{
-				parser.next();
-				Expr cond = parse_expr(parser, M);
+				Pattern capture = parse_pattern(parser, M);
 				Stmt body = parse_block_stmt(parser, M);
 
-				return WhileStmt(ranger.get(), M.main->alloc<Expr>(cond), M.main->alloc<Stmt>(body));
+				arms.append(MatchArm(capture, body));
 			}
+			consume(parser, Lexeme::RIGHT_BRACE);
 
-			case Lexeme::MATCH:
-			{
-				parser.next();
-				Expr subject = parse_expr(parser, M);
-				consume(parser, Lexeme::LEFT_BRACE);
-				ListBuilder<MatchArm> arms(M.temp);
-				while(parser.peek() != Lexeme::RIGHT_BRACE)
-				{
-					consume(parser, Lexeme::CASE);
+			return MatchStmt(ranger.get(), M.main->alloc<Expr>(subject), arms.to_array(*M.main));
+		}
 
-					Pattern capture = parse_pattern(parser, M);
-					Stmt body = parse_block_stmt(parser, M);
-
-					arms.append(MatchArm(capture, body));
-				}
-				consume(parser, Lexeme::RIGHT_BRACE);
-
-				return MatchStmt(ranger.get(), M.main->alloc<Expr>(subject), arms.to_array(*M.main));
-			}
-
-			default:
-			{
-				Expr expr = parse_expr(parser, M);
-				consume(parser, Lexeme::SEMICOLON);
-				return ExprStmt(ranger.get(), M.main->alloc<Expr>(expr));
-			}
+		default:
+		{
+			Expr expr = parse_expr(parser, M);
+			consume(parser, Lexeme::SEMICOLON);
+			return ExprStmt(ranger.get(), M.main->alloc<Expr>(expr));
 		}
 	}
-
-} // anonymous namespace
+}
 
 
 //--------------------------------------------------------------------
@@ -2011,7 +1913,7 @@ static TypeParameter parse_type_param(Parser &parser)
 {
 	string_view type_var_name = consume_identifier(parser);
 	return TypeParameter{
-		.range = {parser.prev_tok_idx(), parser.prev_tok_idx()},
+		.range = {parser.prev_token_idx(), parser.prev_token_idx()},
 		.name = type_var_name,
 	};
 }
@@ -2023,10 +1925,10 @@ static FixedArray<TypeParameter>* parse_type_param_list(Parser &parser, Memory M
 	{
 		if(try_consume(parser, Lexeme::LEFT_PAREN))
 		{
-			while(parser.peek() != Lexeme::RIGHT_PAREN)
+			while(parser.get().kind != Lexeme::RIGHT_PAREN)
 			{
 				type_params.append(parse_type_param(parser));
-				if(parser.peek() != Lexeme::RIGHT_PAREN)
+				if(parser.get().kind != Lexeme::RIGHT_PAREN)
 					consume(parser, Lexeme::COMMA);
 			}
 			consume(parser, Lexeme::RIGHT_PAREN);
@@ -2056,7 +1958,7 @@ static ProcItem parse_proc(Parser &parser, Memory M)
 	// Parse parameters
 	consume(parser, Lexeme::LEFT_PAREN);
 	ListBuilder<Parameter> params(M.temp);
-	while(parser.peek() != Lexeme::RIGHT_PAREN)
+	while(parser.get().kind != Lexeme::RIGHT_PAREN)
 	{
 		TokenRanger param_ranger(parser);
 		string_view param_name = consume_identifier(parser);
@@ -2079,11 +1981,11 @@ static ProcItem parse_proc(Parser &parser, Memory M)
 		param.range = param_ranger.get();
 		params.append(param);
 
-		if(parser.peek() != Lexeme::RIGHT_PAREN)
+		if(parser.get().kind != Lexeme::RIGHT_PAREN)
 			consume(parser, Lexeme::COMMA);
 	}
-	consume(parser, Lexeme::RIGHT_PAREN);
 
+	consume(parser, Lexeme::RIGHT_PAREN);
 	proc.params = params.to_array(*M.main);
 
 	// Parse return type
@@ -2115,7 +2017,7 @@ static StructItem parse_struct(Parser &parser, StructParseContext struct_context
 	ListBuilder<Member> members(M.temp);
 	if(try_consume(parser, Lexeme::LEFT_BRACE))
 	{
-		while(parser.peek() != Lexeme::RIGHT_BRACE)
+		while(parser.get().kind != Lexeme::RIGHT_BRACE)
 		{
 			if(try_consume(parser, Lexeme::CASE))
 			{
@@ -2143,7 +2045,7 @@ static StructItem parse_struct(Parser &parser, StructParseContext struct_context
 				members.append(member);
 			}
 
-			if(parser.peek() != Lexeme::RIGHT_BRACE)
+			if(parser.get().kind != Lexeme::RIGHT_BRACE)
 				consume(parser, Lexeme::COMMA);
 		}
 		consume(parser, Lexeme::RIGHT_BRACE);
@@ -2160,9 +2062,9 @@ static StructItem parse_struct(Parser &parser, StructParseContext struct_context
 	return struct_;
 }
 
-static TopLevelItem parse_top_level_item(Parser &parser, Memory M)
+TopLevelItem parse_top_level_item(Parser &parser, Memory M)
 {
-	switch(parser.tok_kind())
+	switch(parser.get().kind)
 	{
 		case Lexeme::PROC:
 			return parse_proc(parser, M);
@@ -2192,7 +2094,7 @@ static TopLevelItem parse_top_level_item(Parser &parser, Memory M)
 			TokenRanger ranger(parser);
 			parser.next();
 
-			if(parser.peek() == Lexeme::PROC)
+			if(parser.get().kind == Lexeme::PROC)
 			{
 				ProcItem proc = parse_proc(parser, M);
 				proc.is_extern = true;
@@ -2200,7 +2102,7 @@ static TopLevelItem parse_top_level_item(Parser &parser, Memory M)
 				return proc;
 			}
 
-			if(parser.peek() == Lexeme::STRUCT)
+			if(parser.get().kind == Lexeme::STRUCT)
 			{
 				StructItem struct_ = parse_struct(parser, StructParseContext::TOP_LEVEL, M);
 				struct_.is_extern = true;
@@ -2212,22 +2114,22 @@ static TopLevelItem parse_top_level_item(Parser &parser, Memory M)
 		}
 
 		default:
-			throw_parse_error("Invalid token while parsing top-level item: "s + str(parser.tok_kind()), parser.tok_idx(), parser);
+			throw_parse_error("Invalid token while parsing top-level item: "s + str(parser.get().kind), parser.token_idx(), parser);
 	}
 }
 
-
 Module parse_module(string_view source, Memory M)
 {
-	vector<Token> tokens = tokenize(source);
-	Parser parser(source, tokens);
+	Module mod{
+		.parser = Parser(source),
+		.items = ListBuilder<TopLevelItem>(*M.main),
+	};
 
-	ListBuilder<TopLevelItem> items(*M.main);
-	while(parser.tok_kind() != Lexeme::END)
+	while(mod.parser.get().kind != Lexeme::END)
 	{
-		TopLevelItem item = parse_top_level_item(parser, M);
-		items.append(item);
+		TopLevelItem item = parse_top_level_item(mod.parser, M);
+		mod.items.append(item);
 	}
 
-	return Module(items.list(), std::move(tokens), source);
+	return mod;
 }

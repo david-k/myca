@@ -1,5 +1,6 @@
 #pragma once
 
+#include <initializer_list>
 #include <iterator>
 #include <ranges>
 #include <sstream>
@@ -11,10 +12,9 @@
 #include <cassert>
 #include <unordered_map>
 #include <generator>
-
+#include <vector>
 
 using namespace std::string_literals;
-
 
 #define NULLABLE
 
@@ -24,15 +24,17 @@ using namespace std::string_literals;
 	#define NO_DANGLING [[gnu::no_dangling]]
 #endif
 
-
 #define UNREACHABLE assert(!"unreachable")
 #define TODO(MSG) throw std::runtime_error("TODO: "s + (MSG))
+
+using std::vector;
+using std::string;
+using std::string_view;
 
 
 //==============================================================================
 // Memory management
 //==============================================================================
-
 // Adapted from https://nullprogram.com/blog/2023/09/27/
 class Arena
 {
@@ -81,7 +83,6 @@ private:
 	char *m_end;
 };
 
-
 // Pass this to functions that need to allocate memory.
 // Pass by value so the temp allocator is automatically cleared upon return.
 struct Memory
@@ -94,15 +95,12 @@ struct Memory
 //==============================================================================
 // Strings and output formatting
 //==============================================================================
-
 // Why is this not part of the standard library?
 inline std::string operator + (std::string str, std::string_view view)
 {
 	str.append(view.begin(), view.end());
 	return str;
 }
-
-constexpr auto deref = [](auto *p) -> const decltype(*p)& { return *p; };
 
 template<typename RangeT, typename FuncT = std::identity>
 struct RangeFmt
@@ -150,16 +148,17 @@ inline std::ostream& operator << (std::ostream &os, RangeFmt<RangeT, FuncT> cons
 //==============================================================================
 // Variant matching
 //==============================================================================
-
-// The following is taken from https://github.com/AVasK/vx to make std::visit more ergonomic.
+// The following is taken from https://github.com/AVasK/vx to make std::visit
+// more ergonomic.
+//
 // Example:
 //
 //     std::variant<int, float> var;
-//     var | match {
+//     var | match
+//     {
 //         [](int i) { ... },
 //         [](float f) { ... },
 //     };
-//
 template<class... Ts>
 struct match : Ts...  {
 	using Ts::operator()...;
@@ -183,7 +182,6 @@ constexpr decltype(auto) operator | (T &v, match<Fs...> const &match)
     return visit(match, v);
 }
 
-
 template<typename T, typename ...Ss>
 bool is(std::variant<Ss...> const &v)
 {
@@ -195,13 +193,8 @@ bool is(std::variant<Ss...> const &v)
 // Ranges/containers
 //==============================================================================
 
-// Segment array: https://danielchasehooper.com/posts/segment_array/
-// - Dynamic array with stable pointers, can be used with arena allocators
-
-
-//--------------------------------------------------------------------
-// Range
-//--------------------------------------------------------------------
+// Segment arrays seem useful: https://danielchasehooper.com/posts/segment_array/
+// (dynamic array with stable pointers, can be used with arena allocators)
 
 // A simple pair of iterators
 template<typename It>
@@ -231,10 +224,6 @@ decltype(auto) reversed(RangeT const &r)
 	return Range{r.rbegin(), r.rend()};
 }
 
-
-//--------------------------------------------------------------------
-// FixedArray
-//--------------------------------------------------------------------
 
 // Disable warning to allow flexible array members.
 // Unfortunately, it seems there is no specific warning flag for flexible array members, so we
@@ -306,7 +295,6 @@ FixedArray<T>* clone(FixedArray<T> const *arr, Arena &arena)
 }
 
 
-//--------------------------------------------------------------------
 template<typename T>
 struct List
 {
@@ -318,6 +306,13 @@ template<typename T>
 std::generator<T&> to_range(List<T> *list)
 {
 	for(List<T> *item = list; item; item = item->next)
+		co_yield item->value;
+}
+
+template<typename T>
+std::generator<T const&> to_range(List<T> const *list)
+{
+	for(List<T> const *item = list; item; item = item->next)
 		co_yield item->value;
 }
 
@@ -340,6 +335,7 @@ public:
 	}
 
 	List<T>* list() { return head; }
+	List<T> const* list() const { return head; }
 
 	FixedArray<T>* to_array(Arena &arr_arena)
 	{
@@ -361,7 +357,6 @@ private:
 };
 
 
-//--------------------------------------------------------------------
 struct TransparentStringHash
 {
 	using is_transparent = void;
@@ -389,45 +384,9 @@ using UnorderedStringMap = std::unordered_map<
 
 
 //==============================================================================
-// Hashing
-//==============================================================================
-
-// According to https://stackoverflow.com/a/50978188/3491462 this is not how Boost does it anymore
-// but it will do for now.
-inline void combine_hashes(size_t &seed, size_t hash)
-{
-    seed ^= hash + 0x9e3779b9 + (seed<<6) + (seed>>2);
-}
-
-template<typename T>
-inline size_t compute_hash(T const &t)
-{
-	return std::hash<T>()(t);
-}
-
-
-
-//==============================================================================
 // Int128
 //==============================================================================
 using Int128 = __int128_t;
-
-
-template<>
-struct std::hash<Int128>
-{
-	size_t operator () (Int128 value) const
-	{
-		__uint128_t u = value;
-		uint64_t low = uint64_t(u);
-		uint64_t high = uint64_t(u >> 64);
-
-		size_t h = compute_hash(low);
-		combine_hashes(h, compute_hash(high));
-
-		return h;
-	}
-};
 
 inline std::ostream& operator << (std::ostream &os, Int128 value)
 {
@@ -456,4 +415,125 @@ inline std::string str(Int128 xint)
 	std::stringstream ss;
 	ss << xint;
 	return std::move(ss).str();
+}
+
+
+//==============================================================================
+// Hashing
+//==============================================================================
+// According to https://stackoverflow.com/a/50978188/3491462 this is not how
+// Boost does it anymore but it will do for now.
+inline void combine_hashes(size_t &seed, size_t hash)
+{
+    seed ^= hash + 0x9e3779b9 + (seed<<6) + (seed>>2);
+}
+
+template<typename T>
+inline size_t compute_hash(T const &t)
+{
+	return std::hash<T>()(t);
+}
+
+
+//==============================================================================
+// Simple table renderer for the terminal
+//==============================================================================
+struct TTable
+{
+	struct Style
+	{
+		int padding = 1;
+	};
+
+	void add_row(std::initializer_list<string> row) {
+		rows.emplace_back(row);
+	}
+
+	inline void print(std::ostream &os) const;
+
+	Style style;
+	vector<vector<string>> rows;
+};
+
+inline vector<size_t> compute_column_widths(vector<vector<string>> const &rows)
+{
+	vector<size_t> column_widths;
+	for(vector<string> const &row: rows)
+	{
+		if(column_widths.size() < row.size())
+			column_widths.resize(row.size());
+
+		for(size_t i = 0; i < row.size(); ++i)
+			column_widths[i] = std::max(column_widths[i], row[i].length());
+	}
+
+	return column_widths;
+}
+
+enum VFramePosition
+{
+	V_TOP,
+	V_MIDDLE,
+	V_BOTTOM,
+};
+
+enum HFramePosition
+{
+	H_LEFT,
+	H_MIDDLE,
+	H_RIGHT,
+};
+
+constexpr std::string_view table_box_chars[][3] = {
+	{"┌", "┬", "┐"},
+	{"├", "┼", "┤"},
+	{"└", "┴", "┘"},
+};
+
+inline void print_inner_horizontal_line(
+	std::ostream &os,
+	std::vector<size_t> const &column_widths,
+	VFramePosition pos,
+	TTable::Style const &style
+)
+{
+	for(size_t col = 0; col < column_widths.size(); ++col)
+	{
+		if(col != 0)
+			os << table_box_chars[pos][H_MIDDLE];
+
+		for(size_t i = 0; i < column_widths[col] + 2*style.padding; ++i)
+			os << "─";
+	}
+}
+
+void TTable::print(std::ostream &os) const
+{
+	vector<size_t> column_widths = compute_column_widths(rows);
+	os << "┌"; print_inner_horizontal_line(os, column_widths, V_TOP, style); os << "┐\n";
+	for(size_t row_idx = 0; row_idx < rows.size(); ++row_idx)
+	{
+		if(row_idx != 0)
+		{
+			os << "├";
+			print_inner_horizontal_line(os, column_widths, V_MIDDLE, style);
+			os << "┤\n";
+		}
+
+		vector<string> const &row = rows[row_idx];
+		size_t col_idx = 0;
+		for(; col_idx < row.size(); ++col_idx)
+		{
+			os << "│" << string(style.padding, ' ');
+			os << row[col_idx];
+			os << string((column_widths[col_idx] - row[col_idx].length()) + style.padding, ' ');
+		}
+
+		for(; col_idx < column_widths.size(); ++col_idx)
+			os << "│" << string(2*style.padding + column_widths[col_idx], ' ');
+
+		os << "│\n";
+	}
+
+	os << "└"; print_inner_horizontal_line(os, column_widths, V_BOTTOM, style); os << "┘\n";
 }

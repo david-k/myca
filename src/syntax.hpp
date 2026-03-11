@@ -13,7 +13,6 @@
 
 #include "utils.hpp"
 
-
 using std::optional;
 using std::nullopt;
 using std::string;
@@ -103,14 +102,12 @@ enum class Lexeme
 	END,
 };
 
-
 struct SourceLocation
 {
 	size_t pos = 0;
 	int line = 0;
 	int col = 0;
 };
-
 
 struct SourceSpan
 {
@@ -131,15 +128,14 @@ struct Token
 	SourceSpan span;
 };
 
-
 string_view str(Lexeme tok);
 inline string str(SourceLocation loc) { return std::to_string(loc.line) + ":" + std::to_string(loc.col); }
 
 struct TokenIdx { uint32_t value; };
 struct TokenRange { TokenIdx first{}, last{}; };
 
-static constexpr TokenIdx INVALID_TOKEN_IDX = TokenIdx(-1);
-static constexpr TokenRange UNKNOWN_TOKEN_RANGE = TokenRange(INVALID_TOKEN_IDX, INVALID_TOKEN_IDX);
+inline constexpr TokenIdx INVALID_TOKEN_IDX = TokenIdx(-1);
+inline constexpr TokenRange UNKNOWN_TOKEN_RANGE = TokenRange(INVALID_TOKEN_IDX, INVALID_TOKEN_IDX);
 
 
 //==============================================================================
@@ -157,7 +153,6 @@ struct StructItem;
 struct ProcTypeInstance;
 struct TypeParameter;
 struct Expr;
-
 
 struct TypeParameterVar
 {
@@ -238,8 +233,8 @@ struct PointerType
 	};
 
 	TokenRange range;
-	Kind kind;
 	Type *pointee;
+	Kind kind;
 	IsMutable mutability;
 };
 
@@ -265,6 +260,7 @@ struct ProcTypeUnresolved
 
 struct NoDefaultValue {};
 struct ExprPending {};
+
 struct DefaultValueExpr : variant<NoDefaultValue, ExprPending, Expr*>
 {
 	using variant::variant;
@@ -334,6 +330,15 @@ TokenRange token_range_of(Type const &type);
 
 
 template<>
+struct std::hash<TypeDeductionVar>
+{
+	size_t operator () (TypeDeductionVar var) const
+	{
+		return compute_hash(var.id);
+	}
+};
+
+template<>
 struct std::hash<::VarType>
 {
 	size_t operator () (::VarType var) const
@@ -347,7 +352,7 @@ struct std::hash<::VarType>
 			},
 			[&](TypeDeductionVar v)
 			{
-				::combine_hashes(h, ::compute_hash(v.id));
+				::combine_hashes(h, ::compute_hash(v));
 			},
 		};
 
@@ -409,7 +414,7 @@ struct std::hash<Type>
 			[&](ProcTypeUnresolved const&) { assert(!"hash<Type>: ProcTypeUnresolved"); },
 			[&](UnionTypeUnresolved const&) { assert(!"hash<Type>: UnionTypeUnresolved"); },
 			[&](Path const&) { assert(!"hash<Type>: Path"); },
-			[&](InlineStructType const&) { assert(!"hash<InlineStructType>: Path"); },
+			[&](InlineStructType const&) { assert(!"hash<Type>: InlineStructType"); },
 		};
 
 		return h;
@@ -454,7 +459,6 @@ struct StringLiteralExpr
 	Type *NULLABLE type = nullptr;
 };
 
-
 enum class UnaryOp
 {
 	NOT = int(Lexeme::NOT),
@@ -469,7 +473,6 @@ struct UnaryExpr
 
 	Type *NULLABLE type = nullptr;
 };
-
 
 enum class BinaryOp
 {
@@ -494,7 +497,6 @@ struct BinaryExpr
 
 	Type *NULLABLE type = nullptr;
 };
-
 
 // The current syntax for taking a mutable address is `&mut var`, which is quite long.
 // Potential alternatives:
@@ -617,7 +619,6 @@ struct UnionInitExpr
 	Type *NULLABLE type = nullptr;
 };
 
-
 struct Expr : variant<
 	IntLiteralExpr,
 	BoolLiteralExpr,
@@ -643,7 +644,6 @@ struct Expr : variant<
 	using variant::variant;
 };
 
-
 struct Argument
 {
 	TokenRange range;
@@ -653,12 +653,10 @@ struct Argument
 	int param_idx = 0; // Available after semantic analysis
 };
 
-
 void print(Expr const &expr, Module const &mod, std::ostream &os);
 Type* type_of(Expr &expr);
 Type const* type_of(Expr const &expr);
 TokenRange token_range_of(Expr const &expr);
-
 
 static_assert(sizeof(Expr) == 64, "sizeof(Expr) is getting larger...");
 
@@ -734,7 +732,6 @@ struct Pattern : variant
 
 	Type *NULLABLE provided_type;
 };
-
 
 struct PatternArgument
 {
@@ -898,6 +895,246 @@ using TopLevelItem = variant<
 	AliasItem
 >;
 
+
+//==============================================================================
+// Lexing
+//==============================================================================
+class LexingError : public std::runtime_error
+{
+public:
+	explicit LexingError(string const &msg) :
+		std::runtime_error{msg} {}
+};
+
+class Lexer
+{
+public:
+	Lexer(
+		string_view source,
+		SourceLocation initial_location = {.pos = 0, .line = 1, .col = 1}
+	) :
+		m_source{source},
+		m_initial_byte_pos{initial_location.pos},
+		m_byte_pos{0},
+		m_line{initial_location.line},
+		m_column{initial_location.col} {}
+
+	string_view source() const {
+		return m_source;
+	}
+
+	size_t local_byte_pos() const {
+		return m_byte_pos;
+	}
+
+	size_t initial_byte_pos() const {
+		return m_initial_byte_pos;
+	}
+
+	char get()
+	{
+		assert(m_byte_pos < m_source.length());
+		return m_source[m_byte_pos];
+	}
+
+	SourceLocation location() const
+	{
+		return SourceLocation{
+			.pos = m_initial_byte_pos + m_byte_pos,
+			.line = m_line,
+			.col = m_column,
+		};
+	}
+
+	string_view remaining_string() const {
+		return {m_source.begin() + m_byte_pos, m_source.end()};
+	}
+
+	// Returns the substring from start_pos to the current position
+	string_view substr_from(size_t start_pos) const {
+		return m_source.substr(start_pos, m_byte_pos - start_pos);
+	}
+
+	bool has_more(size_t how_many = 1) const {
+		return m_byte_pos + how_many <= m_source.length();
+	}
+
+	void advance(size_t n = 1)
+	{
+		while(n-- && has_more())
+		{
+			if(m_source[m_byte_pos] == '\n')
+			{
+				m_line += 1;
+				m_column = 1;
+			}
+			else
+				m_column += 1;
+
+			m_byte_pos += 1;
+		}
+	}
+
+private:
+	string_view m_source;
+	size_t m_initial_byte_pos;
+	size_t m_byte_pos;
+	int m_line;
+	int m_column;
+};
+
+void skip_whitespace(Lexer &lexer);
+void consume(Lexer &lexer, string_view expected_str);
+bool try_consume(Lexer &lexer, string_view expected_str);
+optional<string_view> try_read_identifier(Lexer &lexer);
+optional<uint64_t> try_read_number(Lexer &lexer);
+optional<Token> next_token(Lexer &lex);
+
+
+//==============================================================================
+// Parsing
+//==============================================================================
+class ParseError : public std::runtime_error
+{
+public:
+	ParseError(std::string const &msg) :
+		std::runtime_error{msg} {}
+};
+
+class Parser
+{
+public:
+	Parser() = default;
+
+	explicit Parser(string_view source)
+	{
+		append_source(source);
+		fetch_tokens_until(m_token_pos);
+	}
+
+	Token const& get() const
+	{
+		if (m_token_pos < m_tokens.size())
+			return m_tokens[m_token_pos];
+
+		return m_end_token;
+	}
+
+	Token const& token_at(TokenIdx idx) const
+	{
+		if (idx.value < m_tokens.size())
+			return m_tokens[idx.value];
+
+		return m_end_token;
+	}
+
+	Token const& next()
+	{
+		fetch_tokens_until(m_token_pos + 1);
+		if (m_token_pos < m_tokens.size())
+			return m_tokens[m_token_pos++];
+
+		return m_end_token;
+	}
+
+	void rewind()
+	{
+		assert(m_token_pos > 0);
+		m_token_pos -= 1;
+	}
+
+	TokenIdx token_idx() const {
+		return TokenIdx(m_token_pos);
+	}
+
+	TokenIdx prev_token_idx() const {
+		return TokenIdx(m_token_pos > 0 ? m_token_pos - 1 : 0);
+	}
+
+	Lexer const& lexer() const {
+		return m_lexer;
+	}
+
+	string_view get_text(SourceSpan span) const
+	{
+		size_t start = span.begin.pos;
+		size_t end = span.end.pos;
+		size_t current_offset = 0;
+
+		// Linear search is okay for now...
+		for (string_view source: m_sources)
+		{
+			if (start < current_offset + source.length())
+			{
+				// SourceSpans cannot cross source boundaries
+				assert(end <= current_offset + source.length());
+				return source.substr(start - current_offset, end - start);
+			}
+
+			current_offset += source.length();
+		}
+
+		assert(!"Invalid SourceSpan");
+	}
+
+	size_t bytes_consumed() const
+	{
+		if (m_token_pos > 0)
+			return m_tokens[m_token_pos - 1].span.end.pos;
+
+		return 0;
+	}
+
+	void append_source(string_view new_source)
+	{
+		SourceLocation prev_end = get().span.begin;
+		m_tokens.erase(m_tokens.begin() + m_token_pos, m_tokens.end());
+
+		if (m_sources.size())
+		{
+			string_view &prev_source = m_sources.back();
+			size_t unprocessed = (m_lexer.initial_byte_pos() + prev_source.length()) - prev_end.pos;
+			prev_source.remove_suffix(unprocessed);
+		}
+
+		m_sources.push_back(new_source);
+		m_lexer = Lexer(new_source, prev_end);
+		fetch_tokens_until(m_token_pos);
+	}
+
+private:
+	void fetch_tokens_until(size_t pos)
+	{
+		while(pos >= m_tokens.size())
+		{
+			if(optional<Token> tok = next_token(m_lexer))
+				m_tokens.push_back(*tok);
+			else
+				break;
+		}
+
+		m_end_token.span.begin = m_end_token.span.end = m_lexer.location();
+	}
+
+	Lexer m_lexer = {""};
+	vector<string_view> m_sources;
+	vector<Token> m_tokens;
+	size_t m_token_pos = 0; // Index of the next token to be processed
+
+	// It's a member so we can return a reference to it
+	Token m_end_token{
+		.kind = Lexeme::END,
+		.span = {
+			.begin = {.pos = 0, .line = 1, .col = 1},
+			.end = {.pos = 0, .line = 1, .col = 1},
+		},
+	};
+};
+
+
+//==============================================================================
+// Module
+//==============================================================================
 class TypeEnv;
 struct ConstraintSystem;
 
@@ -948,111 +1185,17 @@ private:
 
 struct Module
 {
-	List<TopLevelItem> *items;
-	vector<Token> tokens;
-	string_view source;
+	Parser parser;
+	ListBuilder<TopLevelItem> items;
 	optional<EventLogger> logger{};
 
 	std::unique_ptr<SemaModule> NULLABLE sema{}; // Available after semantic analysis
 };
 
-
 string_view name_of(Parameter const &param, Module const *mod);
 void print(TopLevelItem const &item, Module const &mod, std::ostream &os);
 void print(Module const &mod, std::ostream &os);
 
-
-//==============================================================================
-// Lexing
-//==============================================================================
-class LexingError : public std::runtime_error
-{
-public:
-	explicit LexingError(string const &msg) :
-		std::runtime_error{msg} {}
-};
-
-vector<Token> tokenize(string_view source);
-
-
-//==============================================================================
-// Parsing
-//==============================================================================
-class ParseError : public std::runtime_error
-{
-public:
-	ParseError(std::string const &msg) :
-		std::runtime_error{msg} {}
-};
-
-struct Parser
-{
-	explicit Parser(string_view source, span<Token> tokens) :
-		tokens{tokens},
-		source(source) {}
-
-	Token const& tok() const
-	{
-		assert(pos < tokens.size());
-		return tokens[pos];
-	}
-
-	Token const& tok(TokenIdx idx) const
-	{
-		assert(idx.value < tokens.size());
-		return tokens[idx.value];
-	}
-
-	void rewind()
-	{
-		assert(pos > 0);
-		pos -= 1;
-	}
-
-	optional<Lexeme> peek(size_t i = 0) const
-	{
-		if(pos + i < tokens.size())
-			return tokens[pos + i].kind;
-
-		return nullopt;
-	}
-
-	Lexeme tok_kind() const
-	{
-		assert(pos < tokens.size());
-		return tokens[pos].kind;
-	}
-
-	Token const& next()
-	{
-		assert(pos < tokens.size());
-		return tokens[pos++];
-	}
-
-	SourceLocation prev_loc() const
-	{
-		assert(pos > 0 && pos <= tokens.size());
-		return tokens[pos - 1].span.end;
-	}
-
-	Token const& prev_tok() const
-	{
-		assert(pos > 0 && pos <= tokens.size());
-		return tokens[pos - 1];
-	}
-
-	SourceLocation location() const
-	{
-		assert(pos < tokens.size());
-		return tokens[pos].span.begin;
-	}
-
-	TokenIdx tok_idx() const { return TokenIdx(pos); }
-	TokenIdx prev_tok_idx() const { return TokenIdx(pos > 0 ? pos - 1 : 0); }
-
-	span<Token> tokens;
-	string_view source;
-	size_t pos = 0;
-};
-
+Type parse_type(Parser &parser, Memory M);
+TopLevelItem parse_top_level_item(Parser &parser, Memory M);
 Module parse_module(string_view source, Memory M);

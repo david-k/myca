@@ -4,7 +4,6 @@
 #include <bits/elements_of.h>
 #include <memory>
 #include <ostream>
-#include <ranges>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -15,7 +14,6 @@
 #include "syntax.hpp"
 #include "utils.hpp"
 
-
 using std::variant;
 using std::vector;
 using std::string;
@@ -25,6 +23,8 @@ using std::unordered_set;
 using std::span;
 
 
+//==============================================================================
+// (Top-level) items
 //==============================================================================
 struct Scope;
 
@@ -68,6 +68,7 @@ struct Var
 //==============================================================================
 // Type environment
 //==============================================================================
+bool equiv(Type const &a, Type const &b);
 bool type_var_occurs_in(VarType var, Type const &type);
 Type materialize_known_int(KnownIntType known_int);
 
@@ -99,6 +100,22 @@ public:
 		return it->second;
 	}
 
+	bool update(VarType var, Type const &new_type)
+	{
+		assert(not type_var_occurs_in(var, new_type));
+
+		auto it = m_env.find(var);
+		if(it == m_env.end())
+		{
+			m_env.emplace(var, new_type);
+			return true;
+		}
+
+		bool updated = not equiv(new_type, it->second);
+		it->second = new_type;
+		return updated;
+	}
+
 	void add(VarType var, Type const &type)
 	{
 		// Required by unification and would lead to infinite recursion in substitute()
@@ -109,17 +126,9 @@ public:
 	}
 
 	bool empty() const { return m_env.empty(); }
+	unordered_map<VarType, Type> const& mapping() const { return m_env; }
 
-	unordered_map<VarType, Type> const& env() const { return m_env; }
-
-	void materialize()
-	{
-		for(auto &[_, type]: m_env)
-		{
-			if(KnownIntType *known_int = std::get_if<KnownIntType>(&type))
-				type = materialize_known_int(*known_int);
-		}
-	}
+	void materialize(class InstanceRegistry &registry);
 
 	void print(std::ostream &os, Module const &mod) const
 	{
@@ -167,14 +176,21 @@ private:
 //==============================================================================
 class InstanceRegistry;
 
+bool have_common_vars(unordered_set<VarType> const &occurring_vars, TypeEnv const &env);
 
 struct TypeArgList
 {
+	bool needs_subsitution(TypeEnv const &env) const
+	{
+		return has_known_ints or have_common_vars(occurring_vars, env);
+	}
+
 	// Fully resolved and must not contain KnownIntTypes
 	FixedArray<Type> *args;
 
 	unordered_set<VarType> occurring_vars{};
 	bool has_type_deduction_vars = false;
+	bool has_known_ints = false;
 };
 
 struct MemoryLayout
@@ -215,7 +231,6 @@ struct CaseMemberRegion
 };
 
 using InstanceMember = variant<Parameter, StructInstance*>;
-
 using TypeInstance = variant<StructInstance*, UnionInstance*>;
 
 template<>
@@ -230,7 +245,6 @@ struct std::hash<::TypeInstance>
 		};
 	}
 };
-
 
 // A key that uniquely identifies a StructInstance.
 struct StructInstanceKey
@@ -328,12 +342,12 @@ public:
 
 	CaseMemberRegion cases_layout() const { assert(m_cases_layout); return *m_cases_layout; }
 	Type const* discriminator_type() const;
-
 	unordered_set<TypeInstance> const& own_type_deps() const { return m_type_deps; }
 
 private:
-	InstanceRegistry *m_registry;
+	void compute_dependent_properties();
 
+	InstanceRegistry *m_registry;
 	StructItem const *m_struct;
 	TypeArgList m_type_args;
 	StructInstance *m_parent;
@@ -359,8 +373,6 @@ private:
 	Type *NULLABLE m_discriminator_type = nullptr; // if `m_struct->num_case_members > 0`
 	optional<CaseMemberRegion> m_cases_layout{}; // if `m_struct->num_case_members > 0`
 	unordered_set<TypeInstance> m_type_deps{};
-
-	void compute_dependent_properties();
 };
 
 
@@ -413,10 +425,8 @@ public:
 
 	TypeEnv create_type_env() const;
 
-	bool is_concrete() const { return m_type_args.occurring_vars.empty(); }
-
-	bool is_deduction_complete() const { return not m_type_args.has_type_deduction_vars; }
-
+	bool is_concrete() const { return m_type_args.occurring_vars.empty() and not m_type_args.has_known_ints; }
+	bool is_deduction_complete() const { return not m_type_args.has_type_deduction_vars and not m_type_args.has_known_ints; }
 	ProcInstanceKey key() { return ProcInstanceKey(m_proc, m_type_args.args); }
 
 	Type* get_type()
@@ -438,6 +448,8 @@ public:
 	DefaultValueExpr get_param_default_value(size_t idx);
 
 private:
+	void compute_dependent_properties();
+
 	InstanceRegistry *m_registry;
 	ProcItem const *m_proc;
 	TypeArgList m_type_args;
@@ -445,8 +457,6 @@ private:
 	// Dependent properties (those that depend on `m_type_args`).
 	// Lazily computed by compute_dependent_properties().
 	Type *m_type = nullptr;
-
-	void compute_dependent_properties();
 };
 
 
@@ -481,16 +491,19 @@ struct ProcTypeInstanceKey
 
 struct ProcTypeInstance
 {
+	bool needs_subsitution(TypeEnv const &env) const
+	{
+		return has_known_ints or have_common_vars(occurring_vars, env);
+	}
+
+	bool is_deduction_complete() const { return not has_type_deduction_vars and not has_known_ints; }
+
 	FixedArray<Type> *params;
 	Type *ret;
-
 	unordered_set<VarType> occurring_vars;
 	bool has_type_deduction_vars;
-
-	bool is_deduction_complete() const { return not has_type_deduction_vars; }
+	bool has_known_ints;
 };
-
-
 
 bool operator == (ProcTypeInstanceKey const &a, ProcTypeInstanceKey const &b);
 
@@ -517,8 +530,6 @@ struct UnionInstanceKey
 	span<Type const*> alternatives;
 };
 
-bool equiv(Type const &a, Type const &b);
-
 struct TypeEquiv
 {
 	bool operator () (Type const &a, Type const &b) const
@@ -534,16 +545,24 @@ public:
 	UnionInstance(
 		vector<Type const*> &&alternatives,
 		unordered_set<VarType> &&occurring_vars,
-		bool has_type_deduction_vars
+		bool has_type_deduction_vars,
+		bool has_known_ints
 	) :
 		m_alternatives(std::move(alternatives)),
 		m_occurring_vars(std::move(occurring_vars)),
-		m_has_type_deduction_vars(has_type_deduction_vars) {}
+		m_has_type_deduction_vars(has_type_deduction_vars),
+		m_has_known_ints(has_known_ints) {}
 
-	bool is_concrete() const { return m_occurring_vars.empty(); }
+	bool is_concrete() const { return m_occurring_vars.empty() and not m_has_known_ints; }
 	bool has_type_deduction_vars() const { return m_has_type_deduction_vars; }
-	bool is_deduction_complete() const { return not m_has_type_deduction_vars; }
+	bool has_known_ints() const { return m_has_known_ints; }
+	bool is_deduction_complete() const { return not m_has_type_deduction_vars and not m_has_known_ints; }
 	unordered_set<VarType> const& occurring_vars() const { return m_occurring_vars; }
+
+	bool needs_subsitution(TypeEnv const &env) const
+	{
+		return m_has_known_ints or have_common_vars(m_occurring_vars, env);
+	}
 
 	vector<Type const*> const& alternatives() { return m_alternatives; }
 
@@ -563,9 +582,12 @@ public:
 	unordered_set<TypeInstance> const& type_deps() const { return m_type_deps; }
 
 private:
+	void compute_properties();
+
 	vector<Type const*> m_alternatives;
 	unordered_set<VarType> m_occurring_vars;
 	bool m_has_type_deduction_vars;
+	bool m_has_known_ints;
 
 	// Memory layout
 	LayoutComputationState m_layout_state = LayoutComputationState::PENDING;
@@ -576,10 +598,7 @@ private:
 	using AltIdxMap = unordered_map<Type, size_t, std::hash<Type>, TypeEquiv>;
 	bool m_properties_computed = false;
 	AltIdxMap m_alt_to_idx;
-
-	void compute_properties();
 };
-
 
 
 bool operator == (UnionInstanceKey const &a, UnionInstanceKey const &b);
@@ -632,12 +651,17 @@ struct NewInstanceListener : InstanceRegistryListener
 };
 
 struct BestEffortSubstitution {};
-struct FullDeductionSubsitution
+struct FullDeductionSubstitution
 {
 	TokenRange region_being_substituted;
 };
-struct FullSubsitution {};
-using SubstitutionMode = variant<BestEffortSubstitution, FullDeductionSubsitution, FullSubsitution>;
+struct FullSubstitution {};
+
+using SubstitutionMode = variant<
+	BestEffortSubstitution,
+	FullDeductionSubstitution,
+	FullSubstitution
+>;
 
 class InstanceRegistry
 {
@@ -787,6 +811,421 @@ void for_each_instance(InstanceRegistry &registry, Func &&func)
 
 
 //==============================================================================
+// Sema context
+//==============================================================================
+
+// Holds all the state needed during semantic analysis
+struct SemaContext
+{
+	SemaContext(Module &mod, Arena &arena) :
+		mod(&mod),
+		arena(arena) {}
+
+	Module *mod;
+	Arena &arena;
+	ProcItem *NULLABLE proc = nullptr; // The current procedure being analyzed
+
+	TypeDeductionVar new_type_deduction_var()
+	{
+		return TypeDeductionVar(next_deduction_id++);
+	}
+
+	uint32_t next_deduction_id = 0;
+};
+
+
+//==============================================================================
+// Unification
+//==============================================================================
+struct SemaContext;
+struct ConstraintSystem;
+
+enum class TypeConversion
+{
+	// Allows:
+	// - Merging of KnownIntTypes
+	// - Conversion of KnownIntTypes to those concrete integer types that can hold it
+	NONE,
+
+	// Allows:
+	// - Everything allowed by NONE
+	// - Any type conversions where the memory layout remains the same and the subtyping relation is
+	//   respected. For example, the conversion Option.Some ==> Option is allowed, but i32 ==> u32 is
+	//   not.
+	TRIVIAL,
+
+	// Allows:
+	// - Everything allowed by TRIVIAL
+	// - Implicit struct constructors
+	// - Union constructors
+	// - Safe integer promotions
+	IMPLICIT_CTOR,
+};
+
+using ThrowExprErrorFn = void (*)(Expr const &expr, string const &reason, Module const &mod);
+using ThrowPatternErrorFn = void (*)(Pattern const &pattern, string const &reason, Module const &mod);
+
+class LazyErrorMsg
+{
+public:
+	LazyErrorMsg(Expr const *expr, ThrowExprErrorFn fn) :
+		m_error_fns(std::pair(expr, fn)) {}
+
+	LazyErrorMsg(Pattern const *pattern, ThrowPatternErrorFn fn) :
+		m_error_fns(std::pair(pattern, fn)) {}
+
+	[[noreturn]] void throw_error(string const &reason, Module const &mod) const
+	{
+		m_error_fns | match
+		{
+			[&](std::pair<Expr const*, ThrowExprErrorFn> expr_fn)
+			{
+				expr_fn.second(*expr_fn.first, reason, mod);
+			},
+			[&](std::pair<Pattern const*, ThrowPatternErrorFn> pattern_fn)
+			{
+				pattern_fn.second(*pattern_fn.first, reason, mod);
+			},
+		};
+
+		assert(!"ThrowErrorFn returned");
+	}
+
+private:
+	variant <
+		std::pair<Expr const*, ThrowExprErrorFn>,
+		std::pair<Pattern const*, ThrowPatternErrorFn>
+	> m_error_fns;
+};
+
+
+struct ConstructorConversion
+{
+	StructInstance *ctor;
+};
+
+struct UnionConversion
+{
+	UnionInstance *union_;
+	Type alt;
+};
+
+using ConversionInfo = variant<ConstructorConversion, UnionConversion>;
+
+struct TypeConversionEvent
+{
+	TypeConversionEvent(TypeConversion kind) :
+		kind(kind) {}
+
+	TypeConversionEvent(ConstructorConversion info) :
+		kind(TypeConversion::IMPLICIT_CTOR),
+		info(info) {}
+
+	TypeConversionEvent(UnionConversion info) :
+		kind(TypeConversion::IMPLICIT_CTOR),
+		info(info) {}
+
+	TypeConversion const kind;
+	optional<ConversionInfo> const info;
+};
+
+
+class Subst
+{
+public:
+	virtual Type const* try_get(TypeDeductionVar var) = 0;
+
+	virtual void apply_conversion(TypeConversionEvent const &event, Expr *expr) = 0;
+
+	virtual void set(
+		TypeDeductionVar var,
+		TypeConversion var_conv,
+		Expr *NULLABLE var_expr,
+		Type const &type,
+		TypeConversion type_conv,
+		Expr *NULLABLE type_expr,
+		optional<LazyErrorMsg> error_msg
+	) = 0;
+};
+
+class Unifier
+{
+public:
+	explicit Unifier(SemaContext const &ctx) :
+		m_ctx(ctx) {}
+
+	Unifier(Unifier const &rhs) :
+		m_ctx(rhs.m_ctx),
+		m_left(rhs.m_left),
+		m_right(rhs.m_right),
+		m_conv_left(rhs.m_conv_left),
+		m_conv_right(rhs.m_conv_right),
+		m_err(rhs.m_err),
+		m_subst(rhs.m_subst),
+		m_is_swapped(rhs.m_is_swapped),
+		m_expr_left(rhs.m_expr_left),
+		m_expr_right(rhs.m_expr_right),
+		m_result(rhs.m_result) {}
+
+	Unifier& left(Type const &type, TypeConversion conv, Expr *expr = nullptr)
+	{
+		m_left = &type;
+		m_conv_left = conv;
+		m_expr_left = expr;
+		m_is_swapped = false;
+
+		return *this;
+	}
+
+	Unifier& right(Type const &type, TypeConversion conv, Expr *expr = nullptr)
+	{
+		m_right = &type;
+		m_conv_right = conv;
+		m_expr_right = expr;
+		m_is_swapped = false;
+
+		return *this;
+	}
+
+	Unifier& set(Subst *subst) { m_subst = subst; return *this; }
+	Unifier& set(optional<LazyErrorMsg> const &err) { m_err = err; return *this; }
+	Unifier& result(Type *res) { m_result = res; return *this; }
+
+	void go();
+
+	SemaContext const& ctx() const { return m_ctx; }
+	optional<LazyErrorMsg> err() const { return m_err; }
+
+private:
+	bool try_unify_integer_types();
+	bool try_unify_type_deduction_vars();
+	bool try_unify_structs();
+	bool try_unify_unions();
+	bool try_unify_pointers();
+
+	Unifier sides_swapped() const
+	{
+		Unifier swapped(*this);
+		std::swap(swapped.m_left, swapped.m_right);
+		std::swap(swapped.m_conv_left, swapped.m_conv_right);
+		std::swap(swapped.m_expr_left, swapped.m_expr_right);
+		swapped.m_is_swapped = not m_is_swapped;
+
+		return swapped;
+	}
+
+	Type const* lookup(TypeDeductionVar var) const
+	{
+		assert(m_subst);
+		Type const *type = m_subst->try_get(var);
+		assert(type);
+
+		return type;
+	}
+
+	Type const* try_lookup(TypeDeductionVar var) const
+	{
+		if(not m_subst)
+			return nullptr;
+
+		return m_subst->try_get(var);
+	}
+
+	void emit_conversion(TypeConversionEvent const &ev, Expr *expr)
+	{
+		if(not m_subst or not expr)
+			return;
+
+		m_subst->apply_conversion(ev, expr);
+	}
+
+	SemaContext const &m_ctx;
+	Type const *m_left;
+	Type const *m_right;
+	TypeConversion m_conv_left;
+	TypeConversion m_conv_right;
+	optional<LazyErrorMsg> m_err;
+	Subst *m_subst = nullptr;
+	bool m_is_swapped = false;
+
+	Expr *m_expr_left = nullptr;
+	Expr *m_expr_right = nullptr;
+	Type *m_result = nullptr;
+};
+
+
+//==============================================================================
+// Constraints
+//==============================================================================
+struct IntegerCheck
+{
+	LazyErrorMsg error_msg;
+	Type const *type;
+};
+
+struct CastCheck
+{
+	Expr *expr;
+	Type const *target_type;
+};
+
+struct LValueCheck
+{
+	Expr *expr;
+	IsMutable mutability;
+};
+
+// A check that is performed on a type after all TypeDeductionVars have been deduced
+using TypeCheck = variant<
+	IntegerCheck,
+	CastCheck,
+	LValueCheck
+>;
+
+
+struct MemberTypeModifier
+{
+	friend bool operator == (MemberTypeModifier, MemberTypeModifier) = default;
+	string_view member;
+};
+struct PointeeTypeModifier
+{
+	friend bool operator == (PointeeTypeModifier, PointeeTypeModifier) = default;
+	PointerType::Kind pointer_kind;
+};
+struct NoModifier
+{
+	friend bool operator == (NoModifier, NoModifier) = default;
+};
+using ConstraintModifier = variant<NoModifier, MemberTypeModifier, PointeeTypeModifier>;
+
+template<>
+struct std::hash<ConstraintModifier>
+{
+	size_t operator () (ConstraintModifier m) const
+	{
+		size_t h = compute_hash(m.index());
+		m | match
+		{
+			[&](MemberTypeModifier t) { combine_hashes(h, compute_hash(t.member)); },
+			[&](PointeeTypeModifier t) { combine_hashes(h, compute_hash((int)t.pointer_kind)); },
+			[&](NoModifier) {},
+		};
+
+		return h;
+	}
+};
+
+
+using NodeIdx = size_t;
+
+struct ConstraintEdge
+{
+	TypeConversion var_conv = TypeConversion::NONE;
+	Expr *NULLABLE var_expr = nullptr;
+
+	Type type;
+	TypeConversion type_conv = TypeConversion::NONE;
+	Expr *NULLABLE type_expr = nullptr;
+	ConstraintModifier type_modifier = NoModifier();
+
+	optional<LazyErrorMsg> error_msg{};
+};
+
+inline bool operator == (ConstraintEdge const &a, ConstraintEdge const &b)
+{
+	return
+		a.var_conv == b.var_conv and
+		a.var_expr == b.var_expr and
+		equiv(a.type, b.type) and
+		a.type_conv == b.type_conv and
+		a.type_expr == b.type_expr and
+		a.type_modifier == b.type_modifier;
+}
+
+template<>
+struct std::hash<ConstraintEdge>
+{
+	size_t operator () (ConstraintEdge const &edge) const
+	{
+		size_t h = 0;
+		combine_hashes(h, compute_hash((int)edge.var_conv));
+		combine_hashes(h, compute_hash(edge.var_expr));
+		combine_hashes(h, compute_hash(edge.type));
+		combine_hashes(h, compute_hash((int)edge.type_conv));
+		combine_hashes(h, compute_hash(edge.type_expr));
+		combine_hashes(h, compute_hash(edge.type_modifier));
+
+		return h;
+	}
+};
+
+
+struct ErrorMsg { string msg; };
+
+struct ConstraintNode
+{
+	bool add_edge(ConstraintEdge const &edge)
+	{
+		if(edge.var_conv == TypeConversion::NONE)
+			return push_edges.insert(edge).second;
+
+		return pull_edges.insert(edge).second;
+	}
+
+	TypeDeductionVar var;
+	unordered_set<ConstraintEdge> push_edges{};
+	unordered_set<ConstraintEdge> pull_edges{};
+	optional<ErrorMsg> error = nullopt;
+};
+
+struct ConstraintSystem
+{
+	explicit ConstraintSystem(Module const &mod) :
+		mod(mod) {}
+
+	void add_check(TypeCheck const &check);
+	bool add_relational_constraint(
+		TypeDeductionVar var,
+		ConstraintEdge const &edge
+	);
+
+	ConstraintNode& get_node(TypeDeductionVar var)
+	{
+		auto it = nodes.find(var);
+		if(it != nodes.end())
+			return it->second;
+
+		auto res = nodes.insert({var, ConstraintNode{
+			.var = var,
+			.push_edges = {},
+			.pull_edges = {},
+		}});
+
+		return res.first->second;
+	}
+
+	void print(std::ostream &os) const;
+
+	Module const &mod;
+	unordered_map<TypeDeductionVar, ConstraintNode> nodes;
+	vector<TypeCheck> checks;
+};
+
+inline TypeConversion lub(TypeConversion a, TypeConversion b)
+{
+	return (TypeConversion)std::max((int)a, (int)b);
+}
+
+inline TypeConversion glb(TypeConversion a, TypeConversion b)
+{
+	return (TypeConversion)std::min((int)a, (int)b);
+}
+
+TypeEnv create_subst_from_constraints(ConstraintSystem &constraints, SemaContext &ctx);
+
+
+//==============================================================================
 // Scope
 //==============================================================================
 struct Module;
@@ -848,9 +1287,15 @@ BuiltinTypeDef smallest_int_type_for(Int128 value);
 
 Type const* is_optional_ptr(StructInstance const *struct_);
 Type const* is_optional_ptr(Type const &type);
+optional<TypeDeductionVar> get_if_type_deduction_var(Type const &type);
 
 Stmt clone(Stmt const &stmt, Arena &arena);
 void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry, SubstitutionMode mode);
+
+void declare_item(TopLevelItem &item, SemaContext &ctx);
+
+void resolve_type(Type &type, Scope *scope, SemaContext &ctx);
+void resolve_item(TopLevelItem &item, SemaContext &ctx);
 
 MemoryLayout compute_layout(Type const &type);
 void compute_type_layouts(Module &mod);

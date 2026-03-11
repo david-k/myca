@@ -92,7 +92,7 @@ class TestExecutionPlan:
                     test_src_dir / "main.myca",
                     "-o", test_build_dir / "main.c",
                     "--print-types",
-                    "--enable-log", test_build_dir / "compiler_log.html",
+                    "--log-file", test_build_dir / "compiler_log.html",
                 ],
                 stdout_filename,
                 stderr_filename,
@@ -213,7 +213,7 @@ def run_test(test_src_dir: Path, test_build_dir: Path, myca_bin: Path) -> bool:
         expected_return_code = int(expected_return_code_filepath.read_text().strip())
         plan.expect_return_code(expected_return_code)
 
-    print("Running " + test_src_dir.name + "... ", end="")
+    print("Testing \"" + test_src_dir.name + "\"... ", end="")
 
     if not plan.has_steps():
         print("ERROR: Invalid test")
@@ -240,11 +240,12 @@ if not myca_bin.exists():
 
 num_successes = 0
 num_failures = 0
-for test_src_dir in sorted((project_dir / "tests").iterdir()):
+integration_subdir = Path("tests/integration")
+for test_src_dir in sorted((project_dir / integration_subdir).iterdir()):
     if not test_src_dir.is_dir() or test_src_dir.name in TESTS_TO_IGNORE:
         continue
 
-    test_build_dir = build_dir / "tests" / test_src_dir.name
+    test_build_dir = build_dir / integration_subdir / test_src_dir.name
     test_build_dir.mkdir(parents = True, exist_ok = True)
     if run_test(test_src_dir, test_build_dir, myca_bin):
         num_successes += 1

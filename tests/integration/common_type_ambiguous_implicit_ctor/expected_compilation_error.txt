@@ -1,0 +1,1 @@
+|22:4| error: Invalid argument: Ambiguous common type for Bar and Foo

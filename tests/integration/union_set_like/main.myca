@@ -13,7 +13,7 @@ typealias B =
 	| Foo
 	| Bar;
 
-// Both A and B refer to the same union type
+// Both A and B refer to the same union type: Foo | Bar | Baz
 
 proc main() -> i32
 {

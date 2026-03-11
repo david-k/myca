@@ -622,7 +622,7 @@ void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type
 		[&](AddressOfPattern const &p)
 		{
 			string addr_expr = generate_c_cast(
-				PointerType(UNKNOWN_TOKEN_RANGE, PointerType::SINGLE, &const_cast<Type&>(rhs_type), p.mutability),
+				PointerType(UNKNOWN_TOKEN_RANGE, &const_cast<Type&>(rhs_type), PointerType::SINGLE, p.mutability),
 				"&(" + rhs_expr + ")",
 				*p.type
 			);
@@ -1039,7 +1039,7 @@ struct ConcreteProcInstance
 		if(proc->proc()->body)
 		{
 			body = clone(*proc->proc()->body, proc->registry()->arena());
-			substitute_types_in_stmt(*body, proc->create_type_env(), *proc->registry(), FullSubsitution());
+			substitute_types_in_stmt(*body, proc->create_type_env(), *proc->registry(), FullSubstitution());
 		}
 	}
 
@@ -1049,7 +1049,7 @@ struct ConcreteProcInstance
 
 void generate_c(Module &mod, CBackend &backend)
 {
-	for(TopLevelItem &item: to_range(mod.items))
+	for(TopLevelItem &item: to_range(mod.items.list()))
 	{
 		item | match
 		{
