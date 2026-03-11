@@ -1,6 +1,7 @@
 struct List'T
 {
 	value: T,
+	// Optional pointer to the next List item (pointers are non-null by default)
 	next: ?^List'T = None,
 }
 

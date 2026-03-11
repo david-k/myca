@@ -30,11 +30,11 @@ proc factorial(n: u32) -> u32
 An generic `Option` type similar to the one from Rust and other languages:
 
 ```
-// Structs in Myca can be used for both sum and product types. Here, we create a
-// sum type.
+// Structs in Myca can be used for sum types, product types, or a mixture of
+// both. Here, we use `case` to define a sum type.
 struct Option'T
 {
-    // By marking this variant as implicit, we can assign values of type T
+    // By marking this variant as implicit we can assign values of type T
     // directly to Option'T without having to wrap it in Option.Some
     case implicit Some{value: T},
 
@@ -72,36 +72,10 @@ proc main() -> i32
 }
 ```
 
-Defining a simple AST for expressions:
-
-```
-struct Type
-{
-    case Bool,
-    case Int,
-}
-
-struct BinaryOp
-{
-    case Add,
-    case Sub,
-    case Mul,
-    case Div,
-
-    case And,
-    case Or,
-}
-
-struct Expr
-{
-    case Bool{value: bool},
-    case Int{value: i32},
-    case Binary{left: ^Expr, right: ^Expr, op: BinaryOp},
-
-    // `type` is automatically added to the constructors of the above cases
-    type: ?Type = None,
-}
-```
+Some more examples:
+- [Simple dynamic array](tests/integration/example_array/main.myca)
+- [Simple list](tests/integration/example_list/main.myca)
+- [A `Result` type](tests/integration/example_safe_div_result/main.myca)
 
 ## Building
 
@@ -115,7 +89,7 @@ cmake -B build
 cmake --build build
 
 # Running the tests
-make test -C build/
+make -C build/ run-tests
 
 # Compiling a *.myca file
 ./build/myca hello.myca -o hello.c && gcc hello.c -o hello
