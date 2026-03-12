@@ -4573,6 +4573,9 @@ TypeEnv create_subst_from_constraints(ConstraintSystem &constraints, SemaContext
 			apply_conversion(event, expr, ctx.arena);
 	}
 
+	for(TypeCheck const &check: constraints.checks)
+		do_check(check, env, ctx);
+
 	return env;
 }
 

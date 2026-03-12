@@ -11,21 +11,14 @@ typealias AorB =
 	| struct B;
 */
 
-////////// BUG //////////
-/*struct A {
+
+struct A {
 	x: struct X { v: i32 } = X(3)
 }
-let x = A.X(99); // This causes a crash
-*/
-
-
-proc foo'T(a: T, b: T) {}
-
-typealias U = struct A{} | struct B{};
 
 proc main() -> i32
 {
-	foo(B(), A() as U); // TODO This fails at code generation
+	let x = A.X(99); // This causes a crash
 }
 
 

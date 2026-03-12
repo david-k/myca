@@ -1,3 +1,19 @@
+struct Result'(TOk, TError)
+{
+    case Ok
+    {
+        value: TOk,
+    },
+    case Err
+    {
+        value: TError,
+    },
+}
+
+typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
+
+typealias Err'(TOk, TError) = Result'(TOk, TError).Err;
+
 typealias ArithError = DivisionByZero | Overflow;
 
 typealias IOError = FileNotFound | NoPermission;
@@ -64,18 +80,3 @@ proc main() -> i32
     return result;
 }
 
-struct Result'(TOk, TError)
-{
-    case Ok
-    {
-        value: TOk,
-    },
-    case Err
-    {
-        value: TError,
-    },
-}
-
-typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
-
-typealias Err'(TOk, TError) = Result'(TOk, TError).Err;

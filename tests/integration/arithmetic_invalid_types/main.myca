@@ -1,0 +1,6 @@
+struct A {}
+
+proc main() -> i32
+{
+	let a = A() + A();
+}
