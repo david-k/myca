@@ -1,0 +1,15 @@
+proc main() -> i32
+{
+    let b: A'(i8).B = A'(i8).B(.y=A'(i8).X(7), .x=A'(i8).X((5 as i8)));
+    let x: A'(i32).X = A'(i32).X(.v=23);
+    return ((x.v + b.y.v) + b.x.v);
+}
+
+struct A'(T)
+{
+    case B
+    {
+        y: A'(T).X,
+    },
+    x: A'(T).X,
+}

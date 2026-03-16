@@ -242,8 +242,8 @@ static string mangle_type_segment(Type const &type)
 			string segment = std::to_string(struct_.inst->struct_()->name.length()) + struct_.inst->struct_()->name;
 			segment += mangle_type_args(struct_.inst->type_args());
 
-			if(struct_.inst->parent())
-				return mangle_type_segment(StructType(UNKNOWN_TOKEN_RANGE, struct_.inst->parent())) + segment;
+			if(struct_.inst->decl_parent())
+				return mangle_type_segment(StructType(UNKNOWN_TOKEN_RANGE, struct_.inst->decl_parent())) + segment;
 
 			return segment;
 		},
@@ -830,8 +830,8 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 // case member
 void create_c_struct_initial_vars(StructInstance *struct_inst, optional<size_t> child_case_idx, CStruct *result)
 {
-	if(struct_inst->parent())
-		create_c_struct_initial_vars(struct_inst->parent(), struct_inst->case_idx(), result);
+	if(struct_inst->is_case_member())
+		create_c_struct_initial_vars(struct_inst->decl_parent(), struct_inst->case_idx(), result);
 
 	if(struct_inst->struct_()->num_case_members)
 		result->add(CMember(get_discr_name(struct_inst), child_case_idx, *struct_inst->discriminator_type()));
@@ -852,16 +852,16 @@ void create_c_struct_trailing_vars(StructInstance *struct_inst, CStruct *result)
 		result->add(CMember(member_name, *member.type));
 	}
 
-	if(struct_inst->parent())
+	if(struct_inst->is_case_member())
 	{
-		size_t additional_padding = struct_inst->root()->cases_layout().end() - result->cur_layout.size;
+		size_t additional_padding = struct_inst->variant_root()->cases_layout().end() - result->cur_layout.size;
 		if(additional_padding)
 		{
 			for(size_t i = 0; i < additional_padding; ++i)
 				result->add(CMember(BuiltinType(UNKNOWN_TOKEN_RANGE, BuiltinTypeDef::U8)));
 		}
 
-		create_c_struct_trailing_vars(struct_inst->parent(), result);
+		create_c_struct_trailing_vars(struct_inst->decl_parent(), result);
 	}
 }
 
@@ -1007,7 +1007,7 @@ void _sort_types_by_deps(
 				for(TypeInstance dep: inst->own_type_deps())
 					_sort_types_by_deps(dep, result, visited, mod);
 
-				inst = inst->parent();
+				inst = inst->decl_parent();
 			}
 		},
 		[&](UnionInstance const *inst)

@@ -1,25 +1,29 @@
-////////// BUG //////////
-/*struct A'T { case implicit Init{v: T} }
-typealias AorB =
-	| A // TODO This should not be allowed. Make AorB generic and pass its type parameters to A
-	| struct B;
-*/
+// TODO Also check that a proc's parameter types and return type are deduction complete
 
-////////// BUG //////////
-/*typealias AorB =
-	| struct A'T { case implicit Init{v: T} } // This causes a crash
-	| struct B;
-*/
-
-
-struct A {
-	x: struct X { v: i32 } = X(3)
+proc foo(a: struct A { v: bool }) -> struct X { v: i8 }
+{
+	if a.v {
+		return X(7);
+	} else {
+		return X(23);
+	}
 }
 
 proc main() -> i32
 {
-	let x = A.X(99); // This causes a crash
+	return foo(foo.A(false));
+	//let x: struct X'T { v: T } = X(false); // TODO Make this work
 }
+
+
+/*struct Foo'T
+{
+	struct X {}
+
+	struct Y {
+		x: X, // Foo'(T).X
+	}
+}*/
 
 
 //------------------------------------------------------------------------------

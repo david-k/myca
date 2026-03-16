@@ -1,0 +1,16 @@
+proc main() -> i32
+{
+	// Note how the type of `b` is deduced as `A'(i8).B`
+	let b = A.B(.y = A.X(7), .x = A.X(5 as i8));
+	let x = A.X(.v = 23);
+	return x.v + b.y.v + b.x.v;
+}
+
+struct A'T
+{
+	case B
+	{
+		y: X,
+	},
+	x: struct X { v: T },
+}

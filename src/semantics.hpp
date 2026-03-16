@@ -30,11 +30,11 @@ struct Scope;
 
 struct Struct
 {
-	StructItem *parent;
+	StructItem *decl_parent;
 	Scope *type_scope;
 	FixedArray<Parameter const*> *NULLABLE ctor_params = nullptr;
 	int num_initial_var_members = 0;
-	int depth = 0;
+	int variant_depth = 0;
 };
 
 struct Proc
@@ -246,17 +246,22 @@ struct std::hash<::TypeInstance>
 	}
 };
 
+
 // A key that uniquely identifies a StructInstance.
 struct StructInstanceKey
 {
-	StructInstanceKey(StructItem const *struct_, FixedArray<Type> *NULLABLE type_args, StructInstance *NULLABLE parent) :
+	StructInstanceKey(
+		StructItem const *struct_,
+		FixedArray<Type> *NULLABLE type_args,
+		StructInstance *NULLABLE decl_parent
+	) :
 		struct_(struct_),
 		type_args(type_args and type_args->count == 0 ? nullptr : type_args),
-		parent(parent) {}
+		decl_parent(decl_parent) {}
 
 	StructItem const *struct_;
 	FixedArray<Type> *NULLABLE type_args;
-	StructInstance *NULLABLE parent;
+	StructInstance *NULLABLE decl_parent;
 };
 
 enum class LayoutComputationState
@@ -266,7 +271,6 @@ enum class LayoutComputationState
 	DONE,
 };
 
-
 // Once constructed, the type arguments never change
 class StructInstance
 {
@@ -274,38 +278,43 @@ public:
 	StructInstance(
 		StructItem const *struct_,
 		TypeArgList const &type_args,
-		StructInstance *parent,
+		StructInstance *decl_parent,
 		size_t id,
 		InstanceRegistry *registry
 	) :
 		m_registry(registry),
 		m_struct(struct_),
 		m_type_args(type_args),
-		m_parent(parent),
+		m_decl_parent(decl_parent),
 		m_id(id) {}
 
 
 	Module const& mod() const;
 
 	StructItem const* struct_() const { return m_struct; }
-	StructInstance *NULLABLE parent() { return m_parent; }
-	StructInstance const *NULLABLE parent() const { return m_parent; }
+	StructInstance* decl_parent() const { return m_decl_parent; }
 	TypeArgList const& type_args() const { return m_type_args; }
+	bool is_case_member() const { return m_struct->is_case_member; }
 
-	StructInstance *NULLABLE root()
+	StructInstance *NULLABLE variant_parent() const
 	{
-		if(m_parent)
-			return m_parent->root();
+		return is_case_member() ? m_decl_parent : nullptr;
+	}
+
+	StructInstance *variant_root()
+	{
+		if(is_case_member() and m_decl_parent)
+			return m_decl_parent->variant_root();
 
 		return this;
 	}
 
 	size_t id() const { return m_id; }
-	int depth() const { return m_struct->sema->depth; }
+	int variant_depth() const { return m_struct->sema->variant_depth; }
 
 	TypeEnv create_type_env() const;
 
-	StructInstanceKey key() { return StructInstanceKey(m_struct, m_type_args.args, m_parent); }
+	StructInstanceKey key() { return StructInstanceKey(m_struct, m_type_args.args, m_decl_parent); }
 
 	// Returns true if all type arguments are concrete, i.e., if none of them contains a type variable
 	bool is_concrete() const;
@@ -350,7 +359,7 @@ private:
 	InstanceRegistry *m_registry;
 	StructItem const *m_struct;
 	TypeArgList m_type_args;
-	StructInstance *m_parent;
+	StructInstance *m_decl_parent;
 	size_t m_id;
 	bool m_finalized = false;
 
@@ -384,7 +393,7 @@ struct std::hash<::StructInstanceKey>
 	size_t operator () (::StructInstanceKey const &key) const
 	{
 		size_t h = ::compute_hash(key.struct_);
-		::combine_hashes(h, ::compute_hash(key.parent));
+		::combine_hashes(h, ::compute_hash(key.decl_parent));
 
 		if(key.type_args)
 		{
@@ -676,13 +685,13 @@ public:
 	StructInstance* get_struct_instance(
 		StructItem const *struct_,
 		FixedArray<Type> *NULLABLE type_args,
-		StructInstance *NULLABLE parent
+		StructInstance *NULLABLE decl_parent
 	);
 
 	StructInstance* get_struct_instance(
 		StructItem const *struct_,
 		TypeArgList const &type_args,
-		StructInstance *NULLABLE parent
+		StructInstance *NULLABLE decl_parent
 	);
 
 	// Apply `subst` to `type_args` before retrieving the StructInstance. Note that `subst` is
@@ -694,9 +703,11 @@ public:
 		StructItem const *struct_,
 		TypeArgList const &type_args,
 		TypeEnv const &subst,
-		StructInstance *NULLABLE parent,
+		StructInstance *NULLABLE decl_parent,
 		SubstitutionMode mode
 	);
+
+	StructInstance* get_struct_self_instance(StructItem const *struct_);
 
 	ProcInstance* get_proc_instance(ProcItem const *proc, FixedArray<Type> *NULLABLE type_args);
 	ProcInstance* get_proc_instance(ProcItem const *proc, TypeArgList const &type_args);
@@ -736,6 +747,8 @@ private:
 	unordered_map<ProcInstanceKey, ProcInstance> m_proc_instances;
 	unordered_map<ProcTypeInstanceKey, ProcTypeInstance> m_proc_type_instances;
 	unordered_map<UnionInstanceKey, UnionInstance> m_union_instances;
+
+	unordered_map<StructItem const*, StructInstance*> m_self_instances;
 
 	size_t next_struct_id() const { return m_struct_instances.size(); }
 	StructInstance* add_struct_instance(StructInstance &&new_inst);
@@ -1234,13 +1247,6 @@ using ScopeItem = variant<Var, TypeParameter*, ProcItem*, StructItem*, AliasItem
 
 struct Scope
 {
-	Module *mod;
-	Scope *NULLABLE parent = nullptr;
-	vector<std::unique_ptr<Scope>> children;
-	UnorderedStringMap<ScopeItem> items_by_name;
-	bool accept_item_decls;
-
-
 	explicit Scope(Module *mod, bool accept_item_decls, Scope *NULLABLE parent = nullptr) :
 		mod(mod),
 		parent(parent),
@@ -1262,6 +1268,12 @@ struct Scope
 
 	// Lookup
 	ScopeItem& lookup(string_view const &name, TokenIdx sloc, bool traverse_upwards = true);
+
+	Module *mod;
+	Scope *NULLABLE parent = nullptr;
+	vector<std::unique_ptr<Scope>> children;
+	UnorderedStringMap<ScopeItem> items_by_name;
+	bool accept_item_decls;
 };
 
 

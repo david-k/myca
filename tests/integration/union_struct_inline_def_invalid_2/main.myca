@@ -1,0 +1,3 @@
+typealias AorB =
+	| struct A'T { v: T }
+	| struct B;

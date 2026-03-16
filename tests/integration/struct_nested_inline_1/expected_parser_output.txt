@@ -1,0 +1,15 @@
+proc main() -> i32
+{
+    let b: A.B = A.B();
+    let x: A.X = A.X(99);
+    return ((x.v + b.y.v) + b.x.v);
+}
+
+struct A
+{
+    case B
+    {
+        y: A.X = A.X(4),
+    },
+    x: A.X = A.X(3),
+}

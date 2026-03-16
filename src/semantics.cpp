@@ -717,8 +717,8 @@ static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &t
 		[&](StructType const &t)
 		{
 			TypeStatInfo info;
-			if(t.inst->parent())
-				info.merge(gather_type_vars(Type(StructType(UNKNOWN_TOKEN_RANGE, t.inst->parent())), type_vars, deduction_vars_only));
+			if(t.inst->decl_parent())
+				info.merge(gather_type_vars(Type(StructType(UNKNOWN_TOKEN_RANGE, t.inst->decl_parent())), type_vars, deduction_vars_only));
 
 			for(VarType v: t.inst->type_args().occurring_vars)
 				gather_type_vars(v, type_vars, deduction_vars_only);
@@ -761,6 +761,12 @@ static TypeStatInfo get_type_stats(Type const &type)
 	return gather_type_vars(type, type_vars);
 }
 
+static bool is_deduction_complete(Type const &type)
+{
+	TypeStatInfo info = get_type_stats(type);
+	return not info.has_type_deduction_vars and not info.has_known_ints;
+}
+
 static TypeArgList create_type_arg_list(FixedArray<Type> *NULLABLE type_args, Arena &arena)
 {
 	if(not type_args)
@@ -777,48 +783,59 @@ static TypeArgList create_type_arg_list(FixedArray<Type> *NULLABLE type_args, Ar
 	return arg_list;
 }
 
+static void check_struct_parents(StructItem const *struct_, StructInstance *NULLABLE decl_parent)
+{
+	assert((struct_->sema->decl_parent == nullptr) == (decl_parent == nullptr));
+	assert(not struct_->sema->decl_parent or struct_->sema->decl_parent == decl_parent->struct_());
+}
 
 // `type_args` must already be resolved
 StructInstance* InstanceRegistry::get_struct_instance(
 	StructItem const *struct_,
 	FixedArray<Type> *NULLABLE type_args,
-	StructInstance *NULLABLE parent
+	StructInstance *NULLABLE decl_parent
 )
 {
-	auto it = m_struct_instances.find(StructInstanceKey(struct_, type_args, parent));
+	check_struct_parents(struct_, decl_parent);
+
+	auto it = m_struct_instances.find(StructInstanceKey(struct_, type_args, decl_parent));
 	if(it != m_struct_instances.end())
 		return &it->second;
 
 	TypeArgList type_arg_list = create_type_arg_list(type_args, m_arena);
-	return add_struct_instance(StructInstance(struct_, type_arg_list, parent, next_struct_id(), this));
+	return add_struct_instance(StructInstance(struct_, type_arg_list, decl_parent, next_struct_id(), this));
 }
 
 StructInstance* InstanceRegistry::get_struct_instance(
 	StructItem const *struct_,
 	TypeArgList const &type_args,
-	StructInstance *NULLABLE parent
+	StructInstance *NULLABLE decl_parent
 )
 {
-	auto it = m_struct_instances.find(StructInstanceKey(struct_, type_args.args, parent));
+	check_struct_parents(struct_, decl_parent);
+
+	auto it = m_struct_instances.find(StructInstanceKey(struct_, type_args.args, decl_parent));
 	if(it != m_struct_instances.end())
 		return &it->second;
 
-	return add_struct_instance(StructInstance(struct_, type_args, parent, next_struct_id(), this));
+	return add_struct_instance(StructInstance(struct_, type_args, decl_parent, next_struct_id(), this));
 }
 
 StructInstance* InstanceRegistry::get_struct_instance(
 	StructItem const *struct_,
 	TypeArgList const &type_args,
 	TypeEnv const &subst,
-	StructInstance *NULLABLE parent,
+	StructInstance *NULLABLE decl_parent,
 	SubstitutionMode mode
 )
 {
+	check_struct_parents(struct_, decl_parent);
+
 	void *original_mem_pos = m_arena.current_ptr();
 	TypeArgList new_args = clone(type_args, m_arena);
 	substitute(new_args, subst, *this, mode);
 
-	auto it = m_struct_instances.find(StructInstanceKey(struct_, new_args.args, parent));
+	auto it = m_struct_instances.find(StructInstanceKey(struct_, new_args.args, decl_parent));
 	if(it != m_struct_instances.end())
 	{
 		// Free `new_args` since we only needed it for lookup
@@ -826,7 +843,7 @@ StructInstance* InstanceRegistry::get_struct_instance(
 		return &it->second;
 	}
 
-	return add_struct_instance(StructInstance(struct_, new_args, parent, next_struct_id(), this));
+	return add_struct_instance(StructInstance(struct_, new_args, decl_parent, next_struct_id(), this));
 }
 
 StructInstance* InstanceRegistry::add_struct_instance(StructInstance &&new_inst)
@@ -839,6 +856,33 @@ StructInstance* InstanceRegistry::add_struct_instance(StructInstance &&new_inst)
 		l->on_new_struct_instance(inst);
 
 	return inst;
+}
+
+StructInstance* InstanceRegistry::get_struct_self_instance(StructItem const *struct_)
+{
+	auto it = m_self_instances.find(struct_);
+	if(it != m_self_instances.end())
+		return it->second;
+
+	FixedArray<Type> *type_args = nullptr;
+	if(struct_->type_params->count)
+	{
+		type_args = alloc_fixed_array<Type>(struct_->type_params->count, m_arena);
+		for(auto const &[idx, type_param]: *struct_->type_params | std::views::enumerate)
+		{
+			TypeParameterVar var(type_param.range, &type_param);
+			new (type_args->items+idx) Type(VarType(var));
+		}
+	}
+
+	StructInstance *decl_parent_inst = nullptr;
+	if(struct_->sema->decl_parent)
+		decl_parent_inst = get_struct_self_instance(struct_->sema->decl_parent);
+
+	StructInstance *self_inst = get_struct_instance(struct_, type_args, decl_parent_inst);
+	m_self_instances.insert({struct_, self_inst});
+
+	return self_inst;
 }
 
 std::generator<StructInstance&> InstanceRegistry::struct_instances()
@@ -1083,8 +1127,8 @@ Module const& StructInstance::mod() const
 TypeEnv StructInstance::create_type_env() const
 {
 	TypeEnv env;
-	if(m_parent)
-		env = m_parent->create_type_env();
+	if(m_decl_parent)
+		env = m_decl_parent->create_type_env();
 
 	::create_type_env(m_struct->type_params, m_type_args.args, env, *m_registry);
 
@@ -1093,14 +1137,14 @@ TypeEnv StructInstance::create_type_env() const
 
 bool StructInstance::is_concrete() const
 {
-	bool parent_concrete = m_parent ? m_parent->is_concrete() : true;
+	bool parent_concrete = m_decl_parent ? m_decl_parent->is_concrete() : true;
 	return parent_concrete && m_type_args.occurring_vars.empty() and not m_type_args.has_known_ints;
 }
 
 bool StructInstance::is_deduction_complete() const
 {
-	bool parent_is_deduction_complete = m_parent ?
-		m_parent->is_deduction_complete() : true;
+	bool parent_is_deduction_complete = m_decl_parent ?
+		m_decl_parent->is_deduction_complete() : true;
 
 	return parent_is_deduction_complete and not m_type_args.has_type_deduction_vars and not m_type_args.has_known_ints;
 }
@@ -1123,10 +1167,10 @@ StructInstance* StructInstance::implicit_case()
 
 int StructInstance::case_idx()
 {
-	assert(m_parent);
+	assert(is_case_member());
 
-	if(not m_parent->m_dependent_properties_computed)
-		m_parent->compute_dependent_properties();
+	if(not m_decl_parent->m_dependent_properties_computed)
+		m_decl_parent->compute_dependent_properties();
 
 	return m_case_idx;
 }
@@ -1167,18 +1211,27 @@ std::generator<Parameter&> StructInstance::trailing_var_members()
 
 	size_t first_idx = m_struct->sema->num_initial_var_members + m_struct->num_case_members;
 	for(size_t i = first_idx; i < m_members->count; ++i)
-		co_yield std::get<Parameter>(m_members->items[i]);
+	{
+		try{
+			co_yield std::get<Parameter>(m_members->items[i]);
+		}
+		catch(...) {
+			std::cout << "Struct: " << m_struct->name << std::endl;
+			std::cout << "member idx: " << i << "/" << m_members->count << std::endl;
+			throw;
+		}
+	}
 }
 
 std::generator<Parameter const&> StructInstance::all_var_members()
 {
-	if(m_parent)
-		co_yield std::ranges::elements_of(m_parent->initial_var_members());
+	if(is_case_member())
+		co_yield std::ranges::elements_of(m_decl_parent->initial_var_members());
 
 	co_yield std::ranges::elements_of(own_var_members());
 
-	if(m_parent)
-		co_yield std::ranges::elements_of(m_parent->trailing_var_members());
+	if(is_case_member())
+		co_yield std::ranges::elements_of(m_decl_parent->trailing_var_members());
 }
 
 
@@ -1352,8 +1405,8 @@ void StructInstance::finalize_typechecking()
 	if(not m_dependent_properties_computed)
 		compute_dependent_properties();
 
-	if(m_parent)
-		m_parent->finalize_typechecking();
+	if(m_decl_parent)
+		m_decl_parent->finalize_typechecking();
 
 	// TODO Store and re-use the `env` created in compute_dependent_properties()
 	TypeEnv env = create_type_env();
@@ -1378,8 +1431,8 @@ void StructInstance::finalize_typechecking()
 
 MemoryLayout StructInstance::layout()
 {
-	if(m_parent)
-		return m_parent->layout();
+	if(is_case_member())
+		return m_decl_parent->layout();
 
 	return compute_own_layout();
 }
@@ -1398,7 +1451,7 @@ bool operator == (StructInstanceKey const &a, StructInstanceKey const &b)
 	if(a.struct_ != b.struct_)
 		return false;
 
-	if(a.parent != b.parent)
+	if(a.decl_parent != b.decl_parent)
 		return false;
 
 	size_t type_arg_count = a.type_args ? a.type_args->count : 0;
@@ -1575,7 +1628,7 @@ static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRe
 //==============================================================================
 static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent, Scope *scope, SemaContext &ctx);
 
-static void declare_types(Type const &type, Scope *scope, SemaContext &ctx)
+static void declare_types(Type const &type, Scope *scope, StructItem *NULLABLE decl_parent, SemaContext &ctx)
 {
 	type | match
 	{
@@ -1585,19 +1638,19 @@ static void declare_types(Type const &type, Scope *scope, SemaContext &ctx)
 		[&](ProcTypeUnresolved const &t)
 		{
 			for(Type const &param: *t.params)
-				declare_types(param, scope, ctx);
+				declare_types(param, scope, decl_parent, ctx);
 
-			declare_types(*t.ret, scope, ctx);
+			declare_types(*t.ret, scope, decl_parent, ctx);
 		},
 		[&](UnionTypeUnresolved const &t)
 		{
 			for(Type &alt: *t.alternatives)
-				declare_types(alt, scope, ctx);
+				declare_types(alt, scope, decl_parent, ctx);
 		},
 		[&](Path const&) {},
 		[&](InlineStructType const &t)
 		{
-			declare_struct_item(t.struct_, nullptr, scope, ctx);
+			declare_struct_item(t.struct_, decl_parent, scope, ctx);
 		},
 		[&](StructType const&) {},
 		[&](ProcType const&) {},
@@ -1621,14 +1674,14 @@ static std::generator<Parameter&> trailing_var_members(StructItem *struct_)
 
 static std::generator<Parameter&> all_var_members(StructItem *struct_)
 {
-	if(struct_->sema->parent)
-		co_yield std::ranges::elements_of(initial_var_members(struct_->sema->parent));
+	if(struct_->is_case_member)
+		co_yield std::ranges::elements_of(initial_var_members(struct_->sema->decl_parent));
 
 	co_yield std::ranges::elements_of(initial_var_members(struct_));
 	co_yield std::ranges::elements_of(trailing_var_members(struct_));
 
-	if(struct_->sema->parent)
-		co_yield std::ranges::elements_of(trailing_var_members(struct_->sema->parent));
+	if(struct_->is_case_member)
+		co_yield std::ranges::elements_of(trailing_var_members(struct_->sema->decl_parent));
 }
 
 std::generator<StructItem*> own_case_members(StructItem *struct_)
@@ -1645,7 +1698,8 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 
 	scope->declare_struct(struct_);
 	struct_->sema = ctx.arena.alloc<Struct>(parent, scope->new_child(true));
-	struct_->sema->depth = parent ? parent->sema->depth + 1 : 0;
+	if(struct_->is_case_member)
+		struct_->sema->variant_depth = parent->sema->variant_depth + 1;
 
 	// Declare type parameters
 	size_t num_type_params = struct_->type_params->count;
@@ -1682,7 +1736,7 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 				if(state == CASE_MEMBERS)
 					state = TRAILING_VAR_MEMBERS;
 
-				declare_types(*var_member.type, struct_->sema->type_scope, ctx);
+				declare_types(*var_member.type, struct_->sema->type_scope, struct_, ctx);
 				bool inserted = member_names.insert(name_of(var_member, ctx.mod)).second;
 				if(not inserted)
 					throw_sem_error("A member with this name has already been declared", var_member.range.first, ctx.mod);
@@ -1706,13 +1760,16 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 		};
 	}
 
-	// In the struct has a constructor, create an array with all the constructor parameters, i.e.,
+	// If the struct has a constructor, create an array with all the constructor parameters, i.e.,
 	// all the variable members.
 	if(struct_->has_constructor())
 	{
 		size_t param_count = 0;
-		for(StructItem *cur_item = struct_; cur_item; cur_item = cur_item->sema->parent)
+		for(StructItem *cur_item = struct_; cur_item;)
+		{
 			param_count += cur_item->num_var_members();
+			cur_item = cur_item->is_case_member ? cur_item->sema->decl_parent : nullptr;
+		}
 
 		struct_->sema->ctor_params = alloc_fixed_array<Parameter const*>(param_count, ctx.arena);
 		for(auto const &[idx, var_member]: all_var_members(struct_) | std::views::enumerate)
@@ -1730,10 +1787,12 @@ void declare_item(TopLevelItem &item, SemaContext &ctx)
 			proc.sema->param_vars = alloc_fixed_array<Var*>(proc.params->count, ctx.arena);
 			for(auto const& [idx, param]: *proc.params | std::views::enumerate)
 			{
-				declare_types(*param.type, proc.sema->scope, ctx);
+				declare_types(*param.type, proc.sema->scope, nullptr, ctx);
 				Var *param_var = proc.sema->scope->declare_var(name_of(param, ctx.mod), IsMutable::NO, param.range);
 				proc.sema->param_vars->items[idx] = param_var;
 			}
+
+			declare_types(*proc.ret_type, proc.sema->scope, nullptr /* TODO decl_parent */, ctx);
 
 			size_t num_type_params = proc.type_params->count;
 			for(size_t i = 0; i < num_type_params; ++i)
@@ -1751,7 +1810,7 @@ void declare_item(TopLevelItem &item, SemaContext &ctx)
 		[&](AliasItem &alias)
 		{
 			alias.sema = ctx.arena.alloc<Alias>(ctx.mod->sema->globals->new_child(false));
-			declare_types(*alias.aliased_type, alias.sema->scope, ctx);
+			declare_types(*alias.aliased_type, alias.sema->scope, nullptr, ctx);
 
 			size_t num_type_params = alias.type_params->count;
 			for(size_t i = 0; i < num_type_params; ++i)
@@ -1783,23 +1842,28 @@ static Type resolve_path_to_type(Path const &path, Scope *scope, SemaContext &ct
 static Expr resolve_path_to_expr(Path const &path, Scope *scope, SemaContext &ctx);
 
 static FixedArray<Type>* resolve_type_args(
-	FixedArray<Type> *args,
+	FixedArray<Type> *NULLABLE args,
 	size_t num_type_params,
 	Scope *scope,
 	SemaContext &ctx
 )
 {
+	size_t num_args = args ? args->count : 0;
+	assert(num_args <= num_type_params);
 	FixedArray<Type> *resolved_type_args = alloc_fixed_array<Type>(num_type_params, ctx.arena);
+
 	size_t cur_idx = 0;
-	for(Type const &arg: *args)
+	if(num_args)
 	{
-		resolved_type_args->items[cur_idx] = arg;
-		resolve_type(resolved_type_args->items[cur_idx], scope, ctx);
-		++cur_idx;
+		for(Type const &arg: *args)
+		{
+			resolved_type_args->items[cur_idx] = arg;
+			resolve_type(resolved_type_args->items[cur_idx], scope, ctx);
+			++cur_idx;
+		}
 	}
 
-	assert(args->count <= num_type_params);
-	size_t num_missing_args = num_type_params - args->count;
+	size_t num_missing_args = num_type_params - num_args;
 	while(num_missing_args--)
 		new (&resolved_type_args->items[cur_idx++]) Type(VarType(ctx.new_type_deduction_var()));
 
@@ -1819,8 +1883,53 @@ static StructInstance* try_get_struct(PathParent parent)
 	};
 }
 
+enum class PathSegment
+{
+	// This is the first segment of the complete path
+	HEAD,
+	// This is one of the remaining segments of the complete path
+	TAIL,
+};
 
-static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Scope *scope, SemaContext &ctx)
+// The lookup of the head of `path` starts at `decl_parent` (or `ambient_scope` is
+// there is no `decl_parent`). The type args of `path` are always looked up in `ambient_scope`. The
+// resolved type/procedure of the head of `path` becomes the `decl_parent` when resolving
+// `path.child`.
+//
+// Example 1:
+// ---------
+//
+//   proc foo'T() -> A.B'(T) {…}
+//
+// Assume we want to resolve the path `A.B'(T)`:
+//
+// 1. path=A.B'(T), decl_parent=foo, ambient_scope=scope_of(foo)
+//    - `A` is looked up in the decl_parent `foo`
+//    - `resolve_path()` is then called recursively with the remaining path and the decl_parent set to `A`
+//
+// 2. path=B'(T), decl_parent=A, ambient_scope=scope_of(foo)
+//    - `B` is looked up in the decl_parent `A`
+//    - The type argument `T` is looked up in the ambient scope `scope_of(foo)`
+//
+// Example 2:
+// ---------
+//
+//   struct S {
+//       struct X {}
+//       x: X
+//   };
+//
+// Assume we want to resolve the path `X` occuring in the member declaration of `x`.
+//
+// 1. path=X, decl_parent=S, ambient_scope=scope_of(S)
+//    - `X` is looked up in the decl_parent `S`
+//
+static variant<Expr, Type> resolve_path(
+	Path const &path,
+	PathParent parent,
+	Scope *ambient_scope,
+	SemaContext &ctx
+)
 {
 	ScopeItem *resolved_item = parent | match
 	{
@@ -1832,7 +1941,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			else if(name == "!")
 				name = "Result";
 
-			return &scope->lookup(name, path.range.first);
+			return &ambient_scope->lookup(name, path.range.first);
 		},
 		[&](StructInstance *parent_inst)
 		{
@@ -1849,11 +1958,16 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
-			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, scope, ctx);
-			StructInstance *inst = ctx.mod->sema->insts.get_struct_instance(struct_, resolved_type_args, try_get_struct(parent));
+			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, ctx);
+
+			StructInstance *parent_inst = try_get_struct(parent);
+			if(not parent_inst and struct_->sema->decl_parent)
+				parent_inst = ctx.mod->sema->insts.get_struct_self_instance(struct_->sema->decl_parent);
+
+			StructInstance *inst = ctx.mod->sema->insts.get_struct_instance(struct_, resolved_type_args, parent_inst);
 
 			if(path.child)
-				return resolve_path(*path.child, inst, scope, ctx);
+				return resolve_path(*path.child, inst, ambient_scope, ctx);
 
 			return StructType(path.range, inst);
 		},
@@ -1866,7 +1980,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
-			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, scope, ctx);
+			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, ctx);
 
 			ProcInstance *inst = ctx.mod->sema->insts.get_proc_instance(proc, resolved_type_args);;
 			return ProcExpr(path.range, inst);
@@ -1881,7 +1995,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
-			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, scope, ctx);
+			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, ctx);
 			TypeEnv env = create_type_env(alias->type_params, resolved_type_args, ctx.mod->sema->insts);
 
 			Type type = clone(*alias->aliased_type, ctx.arena);
@@ -1893,7 +2007,7 @@ static variant<Expr, Type> resolve_path(Path const &path, PathParent parent, Sco
 				if(not struct_type)
 					throw_sem_error("Type has no members", path.range.first, ctx.mod);
 
-				return resolve_path(*path.child, struct_type->inst, scope, ctx);
+				return resolve_path(*path.child, struct_type->inst, ambient_scope, ctx);
 			}
 
 			return type;
@@ -2022,7 +2136,30 @@ void resolve_type(Type &type, Scope *scope, SemaContext &ctx)
 		},
 		[&](InlineStructType &t)
 		{
-			StructInstance *inst = ctx.mod->sema->insts.get_struct_instance(t.struct_, nullptr, nullptr);
+			resolve_struct(*t.struct_, ctx);
+
+			// What should happen if you delcare a generic inline struct?
+			//
+			//   let x: struct X'S { v: S } = X(3);
+			//
+			// (Ignoring the fact that it doesn't look like a useful feature. But who the hell
+			// knows.)
+			//
+			// What I decided to do is to rewrite the declaration of `x` as follows:
+			//
+			//   let x: X'(?_0) = X'(i32)(3);
+			//
+			// Since `struct X'S { v: S }` is a type constructor and not an actual type I
+			// automatically generate TypeDeductionVars for its type arguments. After type checking,
+			// the type of `x` will be deduced as `X'(i32)`.
+
+			StructInstance *decl_parent_inst = nullptr;
+			if(t.struct_->sema->decl_parent)
+				decl_parent_inst = ctx.mod->sema->insts.get_struct_self_instance(t.struct_->sema->decl_parent);
+
+			FixedArray<Type> *type_args = resolve_type_args(nullptr, t.struct_->type_params->count, scope, ctx);
+			StructInstance *inst = ctx.mod->sema->insts.get_struct_instance(t.struct_, type_args, decl_parent_inst);
+
 			type = StructType(t.range, inst);
 		},
 		[&](StructType const&) {},
@@ -2210,6 +2347,32 @@ static void resolve_struct(StructItem &struct_, SemaContext &ctx)
 			{
 				assert(var_member.type);
 				resolve_param(var_member, struct_.sema->type_scope, ctx);
+				if(not is_deduction_complete(*var_member.type))
+				{
+					// I was playing with the idea of allowing type deduction basically everywhere,
+					// including struct members:
+					//
+					//   struct Foo'T
+					//   {
+					//       x: Option = Some(3),
+					//   }
+					//
+					// Here, the type of `x` would be deduced as `Option'i32`. However, the problem
+					// is that type deduction happens type checking, and type checking is done one
+					// struct/proc at a time. If, for example, some other struct `Bar` is using
+					// `Foo` and is type-checked before it, then the type for `x` would not be
+					// deduced yet. This could be solved by lazily type-checking on demand, but then
+					// I would also need to take care of cycles (though I believe
+					// `check_default_value_deps()` already takes care of this?).
+					//
+					// This is too much trouble for a feature that was the result of asking "Can I?"
+					// instead of "Should I?". Nobody is going to miss this feature.
+					throw_sem_error(
+						"Member type of \""s + name_of(var_member, ctx.mod) + "\" is incomplete",
+						var_member.range.first,
+						ctx.mod
+					);
+				}
 			},
 			[&](StructItem *case_member)
 			{
@@ -2229,6 +2392,21 @@ static void resolve_alias(AliasItem &alias, SemaContext &ctx)
 
 	alias.sema->resolution_state = ResolutionState::IN_PROGRESS;
 	resolve_type(*alias.aliased_type, alias.sema->scope, ctx);
+	if(not is_deduction_complete(*alias.aliased_type))
+	{
+		// Having an alias alternative like
+		//
+		//   typealias U = struct A'T { v: T } | Foo;
+		//
+		// doesn't make sense because type constructors are not first-class. What you can do instead
+		// is to lift the type parameter to the typealias:
+		//
+		//   struct A'T { v: T }
+		//   typealias U'T = A'T | Foo;
+		//
+		throw_sem_error("Aliased type is incomplete", alias.range.first, ctx.mod);
+	}
+
 	alias.sema->resolution_state = ResolutionState::DONE;
 }
 
@@ -2239,9 +2417,15 @@ void resolve_item(TopLevelItem &item, SemaContext &ctx)
 		[&](ProcItem &proc)
 		{
 			for(Parameter &param: *proc.params)
+			{
 				resolve_param(param, proc.sema->scope, ctx);
+				if(not is_deduction_complete(*param.type))
+					throw_sem_error("Parameter type is incomplete", token_range_of(*param.type).first, ctx.mod);
+			}
 
 			resolve_type(*proc.ret_type, proc.sema->scope, ctx);
+			if(not is_deduction_complete(*proc.ret_type))
+				throw_sem_error("Return type is incomplete", token_range_of(*proc.ret_type).first, ctx.mod);
 
 			if(proc.body)
 				resolve_stmt(*proc.body, proc.sema->scope, ctx);
@@ -2345,8 +2529,8 @@ static StructInstance* substitute_types_in_struct(
 
 	StructInstance *new_parent = nullptr;
 	bool parent_modified = false;
-	if(inst->parent())
-		new_parent = substitute_types_in_struct(inst->parent(), env, registry, mode, &parent_modified);
+	if(inst->decl_parent())
+		new_parent = substitute_types_in_struct(inst->decl_parent(), env, registry, mode, &parent_modified);
 
 	if(parent_modified or inst->type_args().needs_subsitution(env))
 	{
@@ -3436,8 +3620,8 @@ static void unify_structs_eq(
 			do
 			{
 				unify_type_args(left->type_args(), right->type_args(), error_msg, subst, ctx);
-				left = left->parent();
-				right = right->parent();
+				left = left->decl_parent();
+				right = right->decl_parent();
 			}
 			while(left);
 		}
@@ -3465,20 +3649,20 @@ static bool try_convert_struct_to_parent(
 
 static std::pair<StructInstance*, StructInstance*> common_parent(StructInstance *left, StructInstance *right)
 {
-	int min_depth = std::min(left->depth(), right->depth());
-	while(left->depth() > min_depth)
-		left = left->parent();
+	int min_depth = std::min(left->variant_depth(), right->variant_depth());
+	while(left->variant_depth() > min_depth)
+		left = left->variant_parent();
 
-	while(right->depth() > min_depth)
-		right = right->parent();
+	while(right->variant_depth() > min_depth)
+		right = right->variant_parent();
 
 	do
 	{
 		if(left->struct_() == right->struct_())
 			return {left, right};
 
-		left = left->parent();
-		right = right->parent();
+		left = left->variant_parent();
+		right = right->variant_parent();
 	} while(left);
 
 	return {nullptr, nullptr};
@@ -4616,8 +4800,8 @@ Parameter const* find_var_member(StructInstance *inst, string_view field)
 			return &var_member;
 	}
 
-	if(inst->parent())
-		return find_var_member(inst->parent(), field);
+	if(inst->variant_parent())
+		return find_var_member(inst->variant_parent(), field);
 
 	return nullptr;
 }
@@ -5758,7 +5942,7 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 								throw_sem_error("Must match against a case member", token_range_of(arm.capture).first, ctx.mod);
 
 							StructInstance *arm_inst = arm_struct_type->inst;
-							if(arm_inst->parent() != subject)
+							if(arm_inst->variant_parent() != subject)
 								throw_sem_error("Must match against a case member", token_range_of(arm.capture).first, ctx.mod);
 
 							if(!matched_cases.insert(arm_inst).second)
@@ -5905,7 +6089,6 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 					LOGGER(ctx.mod->logger, on_data, subst);
 
 					substitute_types_in_expr(*default_value, subst, ctx.mod->sema->insts, FullDeductionSubstitution(token_range_of(*default_value)));
-
 					LOGGER(ctx.mod->logger, on_expr_end);
 				}
 			},
@@ -6012,8 +6195,8 @@ void check_default_values(SemaContext const &ctx)
 //==============================================================================
 Type const* is_optional_ptr(StructInstance const *struct_)
 {
-	while(struct_->parent())
-		struct_ = struct_->parent();
+	while(struct_->is_case_member())
+		struct_ = struct_->variant_parent();
 
 	if(struct_->struct_()->name == "Option" and is<PointerType>(struct_->type_args().args->items[0]))
 		return &struct_->type_args().args->items[0];
@@ -6049,8 +6232,8 @@ MemoryLayout compute_layout(Type const &type, unordered_set<TypeInstance> *paren
 				parent_type_deps->insert(t.inst);
 
 			StructInstance *cur = t.inst;
-			while(cur->parent())
-				cur = cur->parent();
+			while(cur->is_case_member())
+				cur = cur->variant_parent();
 
 			if(is_optional_ptr(cur))
 				return MemoryLayout{.size = 8, .alignment = 8};

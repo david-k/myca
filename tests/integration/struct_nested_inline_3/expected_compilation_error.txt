@@ -1,0 +1,1 @@
+|8:2| error: Member type of "x" is incomplete

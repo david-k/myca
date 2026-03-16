@@ -860,7 +860,10 @@ struct ProcItem
 	Proc *NULLABLE sema = nullptr; // Available after semantic analysis
 };
 
-using Member = variant<Parameter, struct StructItem*>;
+struct StructMember { struct StructItem *struct_; };
+struct CaseMember { struct StructItem *struct_; };
+// using Member = variant<Parameter, StructMember, CaseMember>; TODO Use this
+using Member = variant<Parameter, StructItem*>;
 
 struct StructItem
 {
@@ -872,6 +875,7 @@ struct StructItem
 	bool ctor_without_parens = false;
 	bool is_extern = false;
 	int num_case_members = 0;
+	bool is_case_member = false;
 
 	int num_var_members() const { return members->count - num_case_members; }
 	bool has_constructor() const { return num_case_members == 0; }

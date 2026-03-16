@@ -1,0 +1,9 @@
+proc main() -> i32
+{
+	let a = A(A.X(3));
+}
+
+struct A
+{
+	x: struct X'T { v: T },
+}

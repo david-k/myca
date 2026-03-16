@@ -176,9 +176,9 @@ static void print_proc_type(FixedArray<Type> const *params, Type const *ret_type
 
 void print_struct_type(StructInstance const *inst, Module const &mod, std::ostream &os)
 {
-	if(inst->parent())
+	if(inst->decl_parent())
 	{
-		print_struct_type(inst->parent(), mod, os);
+		print_struct_type(inst->decl_parent(), mod, os);
 		os << ".";
 	}
 
@@ -2056,6 +2056,9 @@ static StructItem parse_struct(Parser &parser, StructParseContext struct_context
 		if(struct_context == StructParseContext::TOP_LEVEL)
 			consume(parser, Lexeme::SEMICOLON);
 	}
+
+	if(struct_context == StructParseContext::CASE_MEMBER)
+		struct_.is_case_member = true;
 
 	struct_.members = members.to_array(*M.main);
 	struct_.range = ranger.get();
