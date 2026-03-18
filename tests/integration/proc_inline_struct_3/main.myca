@@ -1,0 +1,11 @@
+proc foo'T(v: T) -> X'T
+{
+	let x: struct X'S { a: T, b: S } = X(v, v);
+	return x;
+}
+
+proc main() -> i32
+{
+	let x = foo(23);
+	return x.a + x.b;
+}

@@ -1,0 +1,8 @@
+proc main() -> i32
+{
+	let a = 3;
+	struct S
+	{
+		value: i32 = a,
+	}
+}

@@ -174,16 +174,27 @@ static void print_proc_type(FixedArray<Type> const *params, Type const *ret_type
 	print(*ret_type, mod, os);
 }
 
-void print_struct_type(StructInstance const *inst, Module const &mod, std::ostream &os)
+void print_decl_container(DeclContainerInst cont, Module const &mod, std::ostream &os)
 {
-	if(inst->decl_parent())
+	if(cont.decl_parent())
 	{
-		print_struct_type(inst->decl_parent(), mod, os);
+		print_decl_container(*cont.decl_parent(), mod, os);
 		os << ".";
 	}
 
-	os << inst->struct_()->name;
-	print_type_args(inst->type_args().args, mod, os);
+	cont | match
+	{
+		[&](StructInstance *inst)
+		{
+			os << inst->struct_()->name;
+		},
+		[&](ProcInstance *inst)
+		{
+			os << inst->proc()->name;
+		},
+	};
+
+	print_type_args(cont.type_args().args, mod, os);
 }
 
 void print(VarType const &var, std::ostream &os)
@@ -235,7 +246,7 @@ void print(Type const &type, Module const &mod, std::ostream &os)
 		},
 		[&](StructType const &t)
 		{
-			print_struct_type(t.inst, mod, os);
+			print_decl_container(t.inst, mod, os);
 		},
 		[&](UnionTypeUnresolved const &t)
 		{
@@ -514,6 +525,8 @@ void print(Pattern const &pattern, Module const &mod, std::ostream &os)
 	}
 }
 
+void print(StructItem const &struct_, bool is_top_level, int indent, Module const &mod, std::ostream &os);
+
 void print(Stmt const &stmt, int indent, Module const &mod, std::ostream &os)
 {
 	stmt | match
@@ -577,6 +590,10 @@ void print(Stmt const &stmt, int indent, Module const &mod, std::ostream &os)
 			os << "\n";
 			print(*s.body, indent, mod, os);
 		},
+		[&](DeclStmt const &s)
+		{
+			print(*s.item, true, indent, mod, os);
+		},
 		[&](MatchStmt const &s)
 		{
 			os << string(indent*INDENT_WIDTH, ' ') << "match ";
@@ -630,8 +647,6 @@ void print(Parameter const &param, Module const &mod, std::ostream &os)
 			os << "<EXPR_PENDING>";
 	}
 }
-
-void print(StructItem const &struct_, bool is_top_level, int indent, Module const &mod, std::ostream &os);
 
 void print(Member const &member, int indent, Module const &mod, std::ostream &os)
 {
@@ -1894,6 +1909,12 @@ static Stmt parse_stmt(Parser &parser, Memory M)
 			consume(parser, Lexeme::RIGHT_BRACE);
 
 			return MatchStmt(ranger.get(), M.main->alloc<Expr>(subject), arms.to_array(*M.main));
+		}
+
+		case Lexeme::STRUCT:
+		{
+			StructItem struct_ = parse_struct(parser, StructParseContext::TOP_LEVEL, M);
+			return DeclStmt(ranger.get(), M.main->alloc<StructItem>(struct_));
 		}
 
 		default:

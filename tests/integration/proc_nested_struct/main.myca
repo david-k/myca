@@ -1,0 +1,15 @@
+proc main() -> i32
+{
+	struct S
+	{
+		value: i32,
+	}
+
+	let x = S(23);
+	return inc(x).value;
+}
+
+proc inc(s: main.S) -> main.S
+{
+	return main.S(s.value + 1);
+}

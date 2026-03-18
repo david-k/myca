@@ -455,6 +455,10 @@ Stmt clone(Stmt const &stmt, Arena &arena)
 				clone_ptr(s.body, arena)
 			);
 		},
+		[&](DeclStmt const &s) -> Stmt
+		{
+			return s;
+		},
 		[&](MatchStmt const &s) -> Stmt
 		{
 			return MatchStmt(
@@ -636,6 +640,68 @@ static void substitute(
 	SubstitutionMode mode
 );
 
+
+TypeEnv DeclContainerInst::create_type_env() const
+{
+	return *this | match
+	{
+		[](auto *inst) { return inst->create_type_env(); }
+	};
+}
+
+bool DeclContainerInst::is_concrete() const
+{
+	return *this | match
+	{
+		[](auto *inst) { return inst->is_concrete(); }
+	};
+}
+
+bool DeclContainerInst::is_deduction_complete() const
+{
+	return *this | match
+	{
+		[](auto *inst) { return inst->is_deduction_complete(); }
+	};
+}
+
+void DeclContainerInst::finalize_typechecking()
+{
+	*this | match
+	{
+		[](StructInstance *inst) { inst->finalize_typechecking(); },
+		[](ProcInstance*) {},
+	};
+}
+
+TypeArgList const& DeclContainerInst::type_args() const
+{
+	return *this | match
+	{
+		[](StructInstance *inst) -> TypeArgList const& { return inst->type_args(); },
+		[](ProcInstance *inst) -> TypeArgList const& { return inst->type_args(); },
+	};
+}
+
+optional<DeclContainerInst> DeclContainerInst::decl_parent() const
+{
+	return *this | match
+	{
+		[](StructInstance *inst) { return inst->decl_parent(); },
+		[](ProcInstance *inst) { return inst->decl_parent(); },
+	};
+}
+
+Scope* DeclContainerInst::scope() const
+{
+	return *this | match
+	{
+		[](StructInstance *inst) { return inst->struct_()->sema->type_scope; },
+		[](ProcInstance *inst) { return inst->proc()->sema->scope; },
+	};
+}
+
+
 void TypeEnv::materialize(class InstanceRegistry &registry)
 {
 	for(auto &[_, type]: m_env)
@@ -700,7 +766,36 @@ struct TypeStatInfo
 	bool has_known_ints = false;
 };
 
-static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &type_vars, bool deduction_vars_only = false)
+static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &type_vars, bool deduction_vars_only = false);
+
+static TypeStatInfo gather_type_vars(DeclContainerInst cont, unordered_set<VarType> &type_vars, bool deduction_vars_only = false)
+{
+	TypeStatInfo info;
+	if(cont.decl_parent())
+		info.merge(gather_type_vars(*cont.decl_parent(), type_vars, deduction_vars_only));
+
+	TypeArgList const &type_args = cont | match
+	{
+		[&](StructInstance *decl_parent_inst) -> TypeArgList const&
+		{
+			return decl_parent_inst->type_args();
+		},
+		[&](ProcInstance *decl_parent_inst) -> TypeArgList const&
+		{
+			return decl_parent_inst->type_args();
+		},
+	};
+
+	for(VarType v: type_args.occurring_vars)
+		gather_type_vars(v, type_vars, deduction_vars_only);
+
+	info.has_type_deduction_vars |= type_args.has_type_deduction_vars;
+	info.has_known_ints |= type_args.has_known_ints;
+
+	return info;
+}
+
+static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &type_vars, bool deduction_vars_only)
 {
 	return type | match
 	{
@@ -716,16 +811,7 @@ static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &t
 		},
 		[&](StructType const &t)
 		{
-			TypeStatInfo info;
-			if(t.inst->decl_parent())
-				info.merge(gather_type_vars(Type(StructType(UNKNOWN_TOKEN_RANGE, t.inst->decl_parent())), type_vars, deduction_vars_only));
-
-			for(VarType v: t.inst->type_args().occurring_vars)
-				gather_type_vars(v, type_vars, deduction_vars_only);
-
-			info.has_type_deduction_vars |= t.inst->type_args().has_type_deduction_vars;
-			info.has_known_ints |= t.inst->type_args().has_known_ints;
-			return info;
+			return gather_type_vars(t.inst, type_vars, deduction_vars_only);
 		},
 		[&](UnionType const &t)
 		{
@@ -783,17 +869,32 @@ static TypeArgList create_type_arg_list(FixedArray<Type> *NULLABLE type_args, Ar
 	return arg_list;
 }
 
-static void check_struct_parents(StructItem const *struct_, StructInstance *NULLABLE decl_parent)
+static void check_struct_parents(StructItem const *struct_, optional<DeclContainerInst> decl_parent)
 {
-	assert((struct_->sema->decl_parent == nullptr) == (decl_parent == nullptr));
-	assert(not struct_->sema->decl_parent or struct_->sema->decl_parent == decl_parent->struct_());
+	if(struct_->sema->decl_parent)
+	{
+		*struct_->sema->decl_parent | match
+		{
+			[&](StructItem *parent_item)
+			{
+				assert(decl_parent and decl_parent->try_as_struct()->struct_() == parent_item);
+			},
+			[&](ProcItem *parent_item)
+			{
+				assert(decl_parent and decl_parent->as_proc()->proc() == parent_item);
+			},
+		};
+	}
+	else {
+		assert(not decl_parent.has_value());
+	}
 }
 
 // `type_args` must already be resolved
 StructInstance* InstanceRegistry::get_struct_instance(
 	StructItem const *struct_,
 	FixedArray<Type> *NULLABLE type_args,
-	StructInstance *NULLABLE decl_parent
+	optional<DeclContainerInst> decl_parent
 )
 {
 	check_struct_parents(struct_, decl_parent);
@@ -809,7 +910,7 @@ StructInstance* InstanceRegistry::get_struct_instance(
 StructInstance* InstanceRegistry::get_struct_instance(
 	StructItem const *struct_,
 	TypeArgList const &type_args,
-	StructInstance *NULLABLE decl_parent
+	optional<DeclContainerInst> decl_parent
 )
 {
 	check_struct_parents(struct_, decl_parent);
@@ -825,7 +926,7 @@ StructInstance* InstanceRegistry::get_struct_instance(
 	StructItem const *struct_,
 	TypeArgList const &type_args,
 	TypeEnv const &subst,
-	StructInstance *NULLABLE decl_parent,
+	optional<DeclContainerInst> decl_parent,
 	SubstitutionMode mode
 )
 {
@@ -860,8 +961,8 @@ StructInstance* InstanceRegistry::add_struct_instance(StructInstance &&new_inst)
 
 StructInstance* InstanceRegistry::get_struct_self_instance(StructItem const *struct_)
 {
-	auto it = m_self_instances.find(struct_);
-	if(it != m_self_instances.end())
+	auto it = m_struct_self_instances.find(struct_);
+	if(it != m_struct_self_instances.end())
 		return it->second;
 
 	FixedArray<Type> *type_args = nullptr;
@@ -875,14 +976,52 @@ StructInstance* InstanceRegistry::get_struct_self_instance(StructItem const *str
 		}
 	}
 
-	StructInstance *decl_parent_inst = nullptr;
+	optional<DeclContainerInst> decl_parent_inst = nullopt;
 	if(struct_->sema->decl_parent)
-		decl_parent_inst = get_struct_self_instance(struct_->sema->decl_parent);
+		decl_parent_inst = get_self_instance(*struct_->sema->decl_parent);
 
 	StructInstance *self_inst = get_struct_instance(struct_, type_args, decl_parent_inst);
-	m_self_instances.insert({struct_, self_inst});
+	m_struct_self_instances.insert({struct_, self_inst});
 
 	return self_inst;
+}
+
+ProcInstance* InstanceRegistry::get_proc_self_instance(ProcItem const *proc)
+{
+	auto it = m_proc_self_instances.find(proc);
+	if(it != m_proc_self_instances.end())
+		return it->second;
+
+	FixedArray<Type> *type_args = nullptr;
+	if(proc->type_params->count)
+	{
+		type_args = alloc_fixed_array<Type>(proc->type_params->count, m_arena);
+		for(auto const &[idx, type_param]: *proc->type_params | std::views::enumerate)
+		{
+			TypeParameterVar var(type_param.range, &type_param);
+			new (type_args->items+idx) Type(VarType(var));
+		}
+	}
+
+	ProcInstance *self_inst = get_proc_instance(proc, type_args);
+	m_proc_self_instances.insert({proc, self_inst});
+
+	return self_inst;
+}
+
+DeclContainerInst InstanceRegistry::get_self_instance(DeclContainer decl)
+{
+	return decl | match
+	{
+		[&](StructItem *parent_item) -> DeclContainerInst
+		{
+			return get_struct_self_instance(parent_item);
+		},
+		[&](ProcItem *parent_item) -> DeclContainerInst
+		{
+			return get_proc_self_instance(parent_item);
+		}
+	};
 }
 
 std::generator<StructInstance&> InstanceRegistry::struct_instances()
@@ -1169,8 +1308,14 @@ int StructInstance::case_idx()
 {
 	assert(is_case_member());
 
-	if(not m_decl_parent->m_dependent_properties_computed)
-		m_decl_parent->compute_dependent_properties();
+	if(m_decl_parent)
+	{
+		if(StructInstance *parent_inst = m_decl_parent->try_as_struct())
+		{
+			if(not parent_inst->m_dependent_properties_computed)
+				parent_inst->compute_dependent_properties();
+		}
+	}
 
 	return m_case_idx;
 }
@@ -1226,12 +1371,12 @@ std::generator<Parameter&> StructInstance::trailing_var_members()
 std::generator<Parameter const&> StructInstance::all_var_members()
 {
 	if(is_case_member())
-		co_yield std::ranges::elements_of(m_decl_parent->initial_var_members());
+		co_yield std::ranges::elements_of(m_decl_parent->as_struct()->initial_var_members());
 
 	co_yield std::ranges::elements_of(own_var_members());
 
 	if(is_case_member())
-		co_yield std::ranges::elements_of(m_decl_parent->trailing_var_members());
+		co_yield std::ranges::elements_of(m_decl_parent->as_struct()->trailing_var_members());
 }
 
 
@@ -1432,7 +1577,7 @@ void StructInstance::finalize_typechecking()
 MemoryLayout StructInstance::layout()
 {
 	if(is_case_member())
-		return m_decl_parent->layout();
+		return m_decl_parent->as_struct()->layout();
 
 	return compute_own_layout();
 }
@@ -1626,9 +1771,9 @@ static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRe
 //==============================================================================
 // Pass 1: Declare procs, structs and aliases
 //==============================================================================
-static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent, Scope *scope, SemaContext &ctx);
+static void declare_struct_item(StructItem *struct_, optional<DeclContainer> decl_parent, Scope *scope, SemaContext &ctx);
 
-static void declare_types(Type const &type, Scope *scope, StructItem *NULLABLE decl_parent, SemaContext &ctx)
+static void declare_types(Type const &type, Scope *scope, optional<DeclContainer> decl_parent, SemaContext &ctx)
 {
 	type | match
 	{
@@ -1659,6 +1804,57 @@ static void declare_types(Type const &type, Scope *scope, StructItem *NULLABLE d
 	};
 }
 
+static void declare_types_in_pattern(Pattern &pattern, Scope *scope, optional<DeclContainer> decl_parent, SemaContext &ctx)
+{
+	if(pattern.provided_type)
+		declare_types(*pattern.provided_type, scope, decl_parent, ctx);
+}
+
+static void declare_types_in_stmt(Stmt &stmt, Scope *scope, optional<DeclContainer> decl_parent, SemaContext &ctx)
+{
+	stmt | match
+	{
+		[&](LetStmt const &s)
+		{
+			declare_types_in_pattern(*s.lhs, scope, decl_parent, ctx);
+		},
+		[&](ExprStmt const&) {},
+		[&](BlockStmt &s)
+		{
+			// For example, in declare_item(), the scope of a proc's BlockStmt is set to the scope
+			// of the proc
+			if(not s.scope)
+				s.scope = scope->new_child(true);
+
+			for(Stmt &child_stmt: *s.stmts)
+				declare_types_in_stmt(child_stmt, s.scope, decl_parent, ctx);
+		},
+		[&](ReturnStmt const&) {},
+		[&](IfStmt const &s)
+		{
+			declare_types_in_stmt(*s.then, scope, decl_parent, ctx);
+			if(s.else_)
+				declare_types_in_stmt(*s.else_, scope, decl_parent, ctx);
+		},
+		[&](WhileStmt const &s)
+		{
+			declare_types_in_stmt(*s.body, scope, decl_parent, ctx);
+		},
+		[&](DeclStmt const &s)
+		{
+			declare_struct_item(s.item, decl_parent, scope, ctx);
+		},
+		[&](MatchStmt &s)
+		{
+			for(MatchArm &arm: *s.arms)
+			{
+				arm.scope = scope->new_child(true);
+				declare_types_in_stmt(arm.stmt, arm.scope, decl_parent, ctx);
+			}
+		},
+	};
+}
+
 static std::generator<Parameter&> initial_var_members(StructItem *struct_)
 {
 	for(int i = 0; i < struct_->sema->num_initial_var_members; ++i)
@@ -1675,13 +1871,13 @@ static std::generator<Parameter&> trailing_var_members(StructItem *struct_)
 static std::generator<Parameter&> all_var_members(StructItem *struct_)
 {
 	if(struct_->is_case_member)
-		co_yield std::ranges::elements_of(initial_var_members(struct_->sema->decl_parent));
+		co_yield std::ranges::elements_of(initial_var_members(struct_->sema->decl_parent->as_struct()));
 
 	co_yield std::ranges::elements_of(initial_var_members(struct_));
 	co_yield std::ranges::elements_of(trailing_var_members(struct_));
 
 	if(struct_->is_case_member)
-		co_yield std::ranges::elements_of(trailing_var_members(struct_->sema->decl_parent));
+		co_yield std::ranges::elements_of(trailing_var_members(struct_->sema->decl_parent->as_struct()));
 }
 
 std::generator<StructItem*> own_case_members(StructItem *struct_)
@@ -1692,14 +1888,14 @@ std::generator<StructItem*> own_case_members(StructItem *struct_)
 		co_yield std::get<StructItem*>(struct_->members->items[i]);
 }
 
-static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent, Scope *scope, SemaContext &ctx)
+static void declare_struct_item(StructItem *struct_, optional<DeclContainer> decl_parent, Scope *scope, SemaContext &ctx)
 {
 	assert(not struct_->ctor_without_parens or struct_->members->count == 0);
 
 	scope->declare_struct(struct_);
-	struct_->sema = ctx.arena.alloc<Struct>(parent, scope->new_child(true));
+	struct_->sema = ctx.arena.alloc<Struct>(decl_parent, scope->new_child(true));
 	if(struct_->is_case_member)
-		struct_->sema->variant_depth = parent->sema->variant_depth + 1;
+		struct_->sema->variant_depth = decl_parent->as_struct()->sema->variant_depth + 1;
 
 	// Declare type parameters
 	size_t num_type_params = struct_->type_params->count;
@@ -1768,7 +1964,7 @@ static void declare_struct_item(StructItem *struct_, StructItem *NULLABLE parent
 		for(StructItem *cur_item = struct_; cur_item;)
 		{
 			param_count += cur_item->num_var_members();
-			cur_item = cur_item->is_case_member ? cur_item->sema->decl_parent : nullptr;
+			cur_item = cur_item->is_case_member ? cur_item->sema->decl_parent->as_struct() : nullptr;
 		}
 
 		struct_->sema->ctor_params = alloc_fixed_array<Parameter const*>(param_count, ctx.arena);
@@ -1787,12 +1983,12 @@ void declare_item(TopLevelItem &item, SemaContext &ctx)
 			proc.sema->param_vars = alloc_fixed_array<Var*>(proc.params->count, ctx.arena);
 			for(auto const& [idx, param]: *proc.params | std::views::enumerate)
 			{
-				declare_types(*param.type, proc.sema->scope, nullptr, ctx);
+				declare_types(*param.type, proc.sema->scope, &proc, ctx);
 				Var *param_var = proc.sema->scope->declare_var(name_of(param, ctx.mod), IsMutable::NO, param.range);
 				proc.sema->param_vars->items[idx] = param_var;
 			}
 
-			declare_types(*proc.ret_type, proc.sema->scope, nullptr /* TODO decl_parent */, ctx);
+			declare_types(*proc.ret_type, proc.sema->scope, &proc, ctx);
 
 			size_t num_type_params = proc.type_params->count;
 			for(size_t i = 0; i < num_type_params; ++i)
@@ -1801,16 +1997,22 @@ void declare_item(TopLevelItem &item, SemaContext &ctx)
 				proc.sema->scope->declare_type_var(&type_param);
 			}
 
+			if(proc.body)
+			{
+				std::get<BlockStmt>(*proc.body).scope = proc.sema->scope;
+				declare_types_in_stmt(*proc.body, proc.sema->scope, &proc, ctx);
+			}
+
 			ctx.mod->sema->globals->declare_proc(&proc);
 		},
 		[&](StructItem &struct_)
 		{
-			declare_struct_item(&struct_, nullptr, ctx.mod->sema->globals.get(), ctx);
+			declare_struct_item(&struct_, nullopt, ctx.mod->sema->globals.get(), ctx);
 		},
 		[&](AliasItem &alias)
 		{
 			alias.sema = ctx.arena.alloc<Alias>(ctx.mod->sema->globals->new_child(false));
-			declare_types(*alias.aliased_type, alias.sema->scope, nullptr, ctx);
+			declare_types(*alias.aliased_type, alias.sema->scope, nullopt, ctx);
 
 			size_t num_type_params = alias.type_params->count;
 			for(size_t i = 0; i < num_type_params; ++i)
@@ -1835,16 +2037,17 @@ static void declare_items(SemaContext &ctx)
 //==============================================================================
 // Pass 2: Path resolution
 //==============================================================================
-static void resolve_expr(Expr &expr, Scope *scope, SemaContext &ctx);
+static void resolve_expr(Expr &expr, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
 static void resolve_alias(AliasItem &alias, SemaContext &ctx);
 
-static Type resolve_path_to_type(Path const &path, Scope *scope, SemaContext &ctx);
-static Expr resolve_path_to_expr(Path const &path, Scope *scope, SemaContext &ctx);
+static Type resolve_path_to_type(Path const &path, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
+static Expr resolve_path_to_expr(Path const &path, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
 
 static FixedArray<Type>* resolve_type_args(
 	FixedArray<Type> *NULLABLE args,
 	size_t num_type_params,
 	Scope *scope,
+	ResolutionContext res_ctx,
 	SemaContext &ctx
 )
 {
@@ -1858,7 +2061,7 @@ static FixedArray<Type>* resolve_type_args(
 		for(Type const &arg: *args)
 		{
 			resolved_type_args->items[cur_idx] = arg;
-			resolve_type(resolved_type_args->items[cur_idx], scope, ctx);
+			resolve_type(resolved_type_args->items[cur_idx], scope, res_ctx, ctx);
 			++cur_idx;
 		}
 	}
@@ -1870,18 +2073,6 @@ static FixedArray<Type>* resolve_type_args(
 	return resolved_type_args;
 }
 
-
-struct NoParent {};
-using PathParent = variant<NoParent, StructInstance*>;
-
-static StructInstance* try_get_struct(PathParent parent)
-{
-	return parent | match
-	{
-		[&](NoParent) { return (StructInstance*)nullptr; },
-		[&](StructInstance *inst) { return inst; },
-	};
-}
 
 enum class PathSegment
 {
@@ -1919,36 +2110,32 @@ enum class PathSegment
 //       x: X
 //   };
 //
-// Assume we want to resolve the path `X` occuring in the member declaration of `x`.
+// Assume we want to resolve the path `X` occuring in the member declaration of `x`. This consists
+// of a single step:
 //
 // 1. path=X, decl_parent=S, ambient_scope=scope_of(S)
 //    - `X` is looked up in the decl_parent `S`
-//
 static variant<Expr, Type> resolve_path(
 	Path const &path,
-	PathParent parent,
+	optional<DeclContainerInst> path_parent,
 	Scope *ambient_scope,
+	ResolutionContext res_ctx,
 	SemaContext &ctx
 )
 {
-	ScopeItem *resolved_item = parent | match
+	ScopeItem *resolved_item = nullptr;
+	if(path_parent)
+		resolved_item = &path_parent->scope()->lookup(name_of(path, ctx.mod), path.range.first, false);
+	else
 	{
-		[&](NoParent)
-		{
-			string_view name = name_of(path, ctx.mod);
-			if(name == "?")
-				name = "Option";
-			else if(name == "!")
-				name = "Result";
+		string_view name = name_of(path, ctx.mod);
+		if(name == "?")
+			name = "Option";
+		else if(name == "!")
+			name = "Result";
 
-			return &ambient_scope->lookup(name, path.range.first);
-		},
-		[&](StructInstance *parent_inst)
-		{
-			Scope *parent_scope = parent_inst->struct_()->sema->type_scope;
-			return &parent_scope->lookup(name_of(path, ctx.mod), path.range.first, false);
-		},
-	};
+		resolved_item = &ambient_scope->lookup(name, path.range.first);
+	}
 
 	return *resolved_item | match
 	{
@@ -1958,36 +2145,32 @@ static variant<Expr, Type> resolve_path(
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
-			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, ctx);
+			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, res_ctx, ctx);
 
-			StructInstance *parent_inst = try_get_struct(parent);
+			optional<DeclContainerInst> parent_inst = path_parent;
 			if(not parent_inst and struct_->sema->decl_parent)
-				parent_inst = ctx.mod->sema->insts.get_struct_self_instance(struct_->sema->decl_parent);
+				parent_inst = ctx.mod->sema->insts.get_self_instance(*struct_->sema->decl_parent);
 
 			StructInstance *inst = ctx.mod->sema->insts.get_struct_instance(struct_, resolved_type_args, parent_inst);
-
-			if(path.child)
-				return resolve_path(*path.child, inst, ambient_scope, ctx);
-
-			return StructType(path.range, inst);
+			return path.child ?
+				resolve_path(*path.child, inst, ambient_scope, res_ctx, ctx) :
+				StructType(path.range, inst);
 		},
 		[&](ProcItem *proc) -> variant<Expr, Type>
 		{
-			if(path.child)
-				throw_sem_error("Procedures cannot have any members", path.range.first, ctx.mod);
-
 			size_t num_type_params = proc->type_params->count;
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
-			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, ctx);
-
+			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, res_ctx, ctx);
 			ProcInstance *inst = ctx.mod->sema->insts.get_proc_instance(proc, resolved_type_args);;
-			return ProcExpr(path.range, inst);
+			return path.child ?
+				resolve_path(*path.child, inst, ambient_scope, res_ctx, ctx) :
+				ProcExpr(path.range, inst);
 		},
 		[&](AliasItem *alias) -> variant<Expr, Type>
 		{
-			assert(is<NoParent>(parent));
+			assert(not path_parent.has_value());
 
 			resolve_alias(*alias, ctx);
 
@@ -1995,7 +2178,7 @@ static variant<Expr, Type> resolve_path(
 			if(path.type_args->count > num_type_params)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
-			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, ctx);
+			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, res_ctx, ctx);
 			TypeEnv env = create_type_env(alias->type_params, resolved_type_args, ctx.mod->sema->insts);
 
 			Type type = clone(*alias->aliased_type, ctx.arena);
@@ -2007,7 +2190,7 @@ static variant<Expr, Type> resolve_path(
 				if(not struct_type)
 					throw_sem_error("Type has no members", path.range.first, ctx.mod);
 
-				return resolve_path(*path.child, struct_type->inst, ambient_scope, ctx);
+				return resolve_path(*path.child, struct_type->inst, ambient_scope, res_ctx, ctx);
 			}
 
 			return type;
@@ -2024,10 +2207,27 @@ static variant<Expr, Type> resolve_path(
 		},
 		[&](Var const &var) -> variant<Expr, Type>
 		{
-			assert(is<NoParent>(parent));
+			if(path_parent.has_value())
+				throw_sem_error("Cannot access local variables from the outside", path.range.first, ctx.mod);
 
 			if(path.type_args->count)
 				throw_sem_error("Cannot apply type arguments to variable", path.range.first, ctx.mod);
+
+			// Accessing local variables in a default value expression is forbidden:
+			//
+			//   proc foo()
+			//   {
+			//       let a = 3;
+			//       struct S
+			//       {
+			//           value: i32 = a, // Causes the error below
+			//       };
+			//   }
+			//
+			// The reason is that the struct can be accessed from the outside using `foo.S` where
+			// the value of the local variable is not available.
+			if(res_ctx == ResolutionContext::DEFAULT_VALUE)
+				throw_sem_error("Cannot access local variables in default value expression", path.range.first, ctx.mod);
 
 			Expr result = VarExpr(path.range, &var);
 			Path const *child = path.child;
@@ -2050,9 +2250,9 @@ static variant<Expr, Type> resolve_path(
 	};
 }
 
-static Type resolve_path_to_type(Path const &path, Scope *scope, SemaContext &ctx)
+static Type resolve_path_to_type(Path const &path, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
 {
-	variant<Expr, Type> resolved_path = resolve_path(path, NoParent(), scope, ctx);
+	variant<Expr, Type> resolved_path = resolve_path(path, nullopt, scope, res_ctx, ctx);
 	return resolved_path | match
 	{
 		[&](Type const &type)
@@ -2066,9 +2266,9 @@ static Type resolve_path_to_type(Path const &path, Scope *scope, SemaContext &ct
 	};
 }
 
-static Expr resolve_path_to_expr(Path const &path, Scope *scope, SemaContext &ctx)
+static Expr resolve_path_to_expr(Path const &path, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
 {
-	variant<Expr, Type> resolved_path = resolve_path(path, NoParent(), scope, ctx);
+	variant<Expr, Type> resolved_path = resolve_path(path, nullopt, scope, res_ctx, ctx);
 	return resolved_path | match
 	{
 		[&](Type const &type) -> Expr
@@ -2101,7 +2301,7 @@ static Expr resolve_path_to_expr(Path const &path, Scope *scope, SemaContext &ct
 
 static void resolve_struct(StructItem &struct_, SemaContext &ctx);
 
-void resolve_type(Type &type, Scope *scope, SemaContext &ctx)
+void resolve_type(Type &type, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
 {
 	type | match
 	{
@@ -2109,20 +2309,20 @@ void resolve_type(Type &type, Scope *scope, SemaContext &ctx)
 		[&](KnownIntType&) {},
 		[&](PointerType &t)
 		{
-			resolve_type(*t.pointee, scope, ctx);
+			resolve_type(*t.pointee, scope, res_ctx, ctx);
 		},
 		[&](ProcTypeUnresolved &t)
 		{
 			for(Type &param: *t.params)
-				resolve_type(param, scope, ctx);
+				resolve_type(param, scope, res_ctx, ctx);
 
-			resolve_type(*t.ret, scope, ctx);
+			resolve_type(*t.ret, scope, res_ctx, ctx);
 			assert(!"[TODO] resolve_type: ProcTypeUnresolved");
 		},
 		[&](UnionTypeUnresolved &t)
 		{
 			for(Type &alt: *t.alternatives)
-				resolve_type(alt, scope, ctx);
+				resolve_type(alt, scope, res_ctx, ctx);
 
 			vector<Type const*> canonical_alts = canonicalize_union_alternatives(t.alternatives);
 			type = UnionType{
@@ -2132,7 +2332,7 @@ void resolve_type(Type &type, Scope *scope, SemaContext &ctx)
 		},
 		[&](Path &path)
 		{
-			type = resolve_path_to_type(path, scope, ctx);
+			type = resolve_path_to_type(path, scope, res_ctx, ctx);
 		},
 		[&](InlineStructType &t)
 		{
@@ -2153,11 +2353,11 @@ void resolve_type(Type &type, Scope *scope, SemaContext &ctx)
 			// automatically generate TypeDeductionVars for its type arguments. After type checking,
 			// the type of `x` will be deduced as `X'(i32)`.
 
-			StructInstance *decl_parent_inst = nullptr;
+			optional<DeclContainerInst> decl_parent_inst;
 			if(t.struct_->sema->decl_parent)
-				decl_parent_inst = ctx.mod->sema->insts.get_struct_self_instance(t.struct_->sema->decl_parent);
+				decl_parent_inst = ctx.mod->sema->insts.get_self_instance(*t.struct_->sema->decl_parent);
 
-			FixedArray<Type> *type_args = resolve_type_args(nullptr, t.struct_->type_params->count, scope, ctx);
+			FixedArray<Type> *type_args = resolve_type_args(nullptr, t.struct_->type_params->count, scope, res_ctx, ctx);
 			StructInstance *inst = ctx.mod->sema->insts.get_struct_instance(t.struct_, type_args, decl_parent_inst);
 
 			type = StructType(t.range, inst);
@@ -2169,7 +2369,7 @@ void resolve_type(Type &type, Scope *scope, SemaContext &ctx)
 	};
 }
 
-static void resolve_expr(Expr &expr, Scope *scope, SemaContext &ctx)
+static void resolve_expr(Expr &expr, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
 {
 	expr | match
 	{
@@ -2178,74 +2378,74 @@ static void resolve_expr(Expr &expr, Scope *scope, SemaContext &ctx)
 		[&](StringLiteralExpr const&) {},
 		[&](UnaryExpr const &e)
 		{
-			resolve_expr(*e.sub, scope, ctx);
+			resolve_expr(*e.sub, scope, res_ctx, ctx);
 		},
 		[&](BinaryExpr const &e)
 		{
-			resolve_expr(*e.left, scope, ctx);
-			resolve_expr(*e.right, scope, ctx);
+			resolve_expr(*e.left, scope, res_ctx, ctx);
+			resolve_expr(*e.right, scope, res_ctx, ctx);
 		},
 		[&](AddressOfExpr const &e)
 		{
-			resolve_expr(*e.object, scope, ctx);
+			resolve_expr(*e.object, scope, res_ctx, ctx);
 		},
 		[&](DerefExpr const &e)
 		{
-			resolve_expr(*e.addr, scope, ctx);
+			resolve_expr(*e.addr, scope, res_ctx, ctx);
 		},
 		[&](IndexExpr const &e)
 		{
-			resolve_expr(*e.addr, scope, ctx);
-			resolve_expr(*e.index, scope, ctx);
+			resolve_expr(*e.addr, scope, res_ctx, ctx);
+			resolve_expr(*e.index, scope, res_ctx, ctx);
 		},
 		[&](MemberAccessExpr const &e)
 		{
-			resolve_expr(*e.object, scope, ctx);
+			resolve_expr(*e.object, scope, res_ctx, ctx);
 		},
 		[&](AssignmentExpr const &e)
 		{
-			resolve_expr(*e.lhs, scope, ctx);
-			resolve_expr(*e.rhs, scope, ctx);
+			resolve_expr(*e.lhs, scope, res_ctx, ctx);
+			resolve_expr(*e.rhs, scope, res_ctx, ctx);
 		},
 		[&](AsExpr const &e)
 		{
-			resolve_expr(*e.src_expr, scope, ctx);
-			resolve_type(*e.target_type, scope, ctx);
+			resolve_expr(*e.src_expr, scope, res_ctx, ctx);
+			resolve_type(*e.target_type, scope, res_ctx, ctx);
 		},
 		[&](ConstructorExpr const &e)
 		{
-			resolve_type(*e.ctor, scope, ctx);
+			resolve_type(*e.ctor, scope, res_ctx, ctx);
 		},
 		[&](ProcExpr const&) {},
 		[&](CallExpr const &e)
 		{
-			resolve_expr(*e.callable, scope, ctx);
+			resolve_expr(*e.callable, scope, res_ctx, ctx);
 
 			for(Argument &arg: *e.args)
-				resolve_expr(arg.expr, scope, ctx);
+				resolve_expr(arg.expr, scope, res_ctx, ctx);
 		},
 		[&](SizeOfExpr const &e)
 		{
-			resolve_type(*e.subject, scope, ctx);
+			resolve_type(*e.subject, scope, res_ctx, ctx);
 		},
 		[&](MakeExpr const &e)
 		{
-			resolve_expr(*e.addr, scope, ctx);
-			resolve_expr(*e.init, scope, ctx);
+			resolve_expr(*e.addr, scope, res_ctx, ctx);
+			resolve_expr(*e.init, scope, res_ctx, ctx);
 		},
 		[&](Path const &p)
 		{
-			expr = resolve_path_to_expr(p, scope, ctx);
+			expr = resolve_path_to_expr(p, scope, res_ctx, ctx);
 		},
 		[&](VarExpr const&) {},
 		[&](UnionInitExpr const &e)
 		{
-			resolve_expr(*e.alt_expr, scope, ctx);
+			resolve_expr(*e.alt_expr, scope, res_ctx, ctx);
 		},
 	};
 }
 
-static void resolve_pattern(Pattern &pattern, Scope *scope, SemaContext &ctx)
+static void resolve_pattern(Pattern &pattern, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
 {
 	pattern | match
 	{
@@ -2257,26 +2457,26 @@ static void resolve_pattern(Pattern &pattern, Scope *scope, SemaContext &ctx)
 		[&](VarPattern const&) {},
 		[&](DerefPattern const &p)
 		{
-			resolve_pattern(*p.sub, scope, ctx);
+			resolve_pattern(*p.sub, scope, res_ctx, ctx);
 		},
 		[&](AddressOfPattern const &p)
 		{
-			resolve_pattern(*p.sub, scope, ctx);
+			resolve_pattern(*p.sub, scope, res_ctx, ctx);
 		},
 		[&](ConstructorPattern const &p)
 		{
-			resolve_type(*p.ctor, scope, ctx);
+			resolve_type(*p.ctor, scope, res_ctx, ctx);
 			for(PatternArgument &arg: *p.args)
-				resolve_pattern(arg.pattern, scope, ctx);
+				resolve_pattern(arg.pattern, scope, res_ctx, ctx);
 		},
 		[&](WildcardPattern const&) {}
 	};
 
 	if(pattern.provided_type)
-		resolve_type(*pattern.provided_type, scope, ctx);
+		resolve_type(*pattern.provided_type, scope, res_ctx, ctx);
 }
 
-static void resolve_stmt(Stmt &stmt, Scope *scope, SemaContext &ctx)
+static void resolve_stmt(Stmt &stmt, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
 {
 	stmt | match
 	{
@@ -2285,44 +2485,46 @@ static void resolve_stmt(Stmt &stmt, Scope *scope, SemaContext &ctx)
 			// Resolve init expr before the lhs pattern so the init expr cannot access the declared
 			// variable
 			if(s.init_expr)
-				resolve_expr(*s.init_expr, scope, ctx);
+				resolve_expr(*s.init_expr, scope, res_ctx, ctx);
 
-			resolve_pattern(*s.lhs, scope, ctx);
+			resolve_pattern(*s.lhs, scope, res_ctx, ctx);
 		},
 		[&](ExprStmt const &s)
 		{
-			resolve_expr(*s.expr, scope, ctx);
+			resolve_expr(*s.expr, scope, res_ctx, ctx);
 		},
 		[&](BlockStmt const &s)
 		{
-			Scope *block_scope = scope->new_child(true);
 			for(Stmt &child_stmt: *s.stmts)
-				resolve_stmt(child_stmt, block_scope, ctx);
+				resolve_stmt(child_stmt, s.scope, res_ctx, ctx);
 		},
 		[&](ReturnStmt const &s)
 		{
-			resolve_expr(*s.ret_expr, scope, ctx);
+			resolve_expr(*s.ret_expr, scope, res_ctx, ctx);
 		},
 		[&](IfStmt const &s)
 		{
-			resolve_expr(*s.condition, scope, ctx);
-			resolve_stmt(*s.then, scope, ctx);
+			resolve_expr(*s.condition, scope, res_ctx, ctx);
+			resolve_stmt(*s.then, scope, res_ctx, ctx);
 			if(s.else_)
-				resolve_stmt(*s.else_, scope, ctx);
+				resolve_stmt(*s.else_, scope, res_ctx, ctx);
 		},
 		[&](WhileStmt const &s)
 		{
-			resolve_expr(*s.condition, scope, ctx);
-			resolve_stmt(*s.body, scope, ctx);
+			resolve_expr(*s.condition, scope, res_ctx, ctx);
+			resolve_stmt(*s.body, scope, res_ctx, ctx);
+		},
+		[&](DeclStmt const &s)
+		{
+			resolve_struct(*s.item, ctx);
 		},
 		[&](MatchStmt const &s)
 		{
-			resolve_expr(*s.expr, scope, ctx);
+			resolve_expr(*s.expr, scope, res_ctx, ctx);
 			for(MatchArm &arm: *s.arms)
 			{
-				Scope *arm_scope = scope->new_child(true);
-				resolve_pattern(arm.capture, arm_scope, ctx);
-				resolve_stmt(arm.stmt, arm_scope, ctx);
+				resolve_pattern(arm.capture, arm.scope, res_ctx, ctx);
+				resolve_stmt(arm.stmt, arm.scope, res_ctx, ctx);
 			}
 		},
 	};
@@ -2331,10 +2533,10 @@ static void resolve_stmt(Stmt &stmt, Scope *scope, SemaContext &ctx)
 static void resolve_param(Parameter &param, Scope *scope, SemaContext &ctx)
 {
 	if(param.type)
-		resolve_type(*param.type, scope, ctx);
+		resolve_type(*param.type, scope, ResolutionContext::DEFAULT_VALUE, ctx);
 
 	if(Expr *default_value = param.default_value.try_get_expr())
-		resolve_expr(*default_value, scope, ctx);
+		resolve_expr(*default_value, scope, ResolutionContext::DEFAULT_VALUE, ctx);
 }
 
 static void resolve_struct(StructItem &struct_, SemaContext &ctx)
@@ -2391,7 +2593,7 @@ static void resolve_alias(AliasItem &alias, SemaContext &ctx)
 		throw_sem_error("Alias is defined recursively", alias.range.first, ctx.mod);
 
 	alias.sema->resolution_state = ResolutionState::IN_PROGRESS;
-	resolve_type(*alias.aliased_type, alias.sema->scope, ctx);
+	resolve_type(*alias.aliased_type, alias.sema->scope, ResolutionContext::DEFAULT_VALUE, ctx);
 	if(not is_deduction_complete(*alias.aliased_type))
 	{
 		// Having an alias alternative like
@@ -2423,12 +2625,12 @@ void resolve_item(TopLevelItem &item, SemaContext &ctx)
 					throw_sem_error("Parameter type is incomplete", token_range_of(*param.type).first, ctx.mod);
 			}
 
-			resolve_type(*proc.ret_type, proc.sema->scope, ctx);
+			resolve_type(*proc.ret_type, proc.sema->scope, ResolutionContext::GENERAL, ctx);
 			if(not is_deduction_complete(*proc.ret_type))
 				throw_sem_error("Return type is incomplete", token_range_of(*proc.ret_type).first, ctx.mod);
 
 			if(proc.body)
-				resolve_stmt(*proc.body, proc.sema->scope, ctx);
+				resolve_stmt(*proc.body, proc.sema->scope, ResolutionContext::GENERAL, ctx);
 		},
 		[&](StructItem &struct_)
 		{
@@ -2513,6 +2715,14 @@ void validate_unsubstituted_vars(
 	}
 }
 
+static ProcInstance* substitute_types_in_proc(
+	ProcInstance *inst,
+	TypeEnv const &env,
+	InstanceRegistry &registry,
+	SubstitutionMode mode,
+	bool *modified = nullptr
+);
+
 // If `inst` is deduction complete, apply `env` to it directly and return `inst`.
 // Otherwise, leave `inst` unchanged and return the StructInstance that corresponds to `inst` where
 // `env` has been applied to the type args of `inst`
@@ -2527,14 +2737,26 @@ static StructInstance* substitute_types_in_struct(
 	LOGGER(registry.mod().logger, on_struct_substitution_start, inst);
 	LOGGER(registry.mod().logger, on_data, env);
 
-	StructInstance *new_parent = nullptr;
+	optional<DeclContainerInst> new_decl_parent = nullopt;
 	bool parent_modified = false;
 	if(inst->decl_parent())
-		new_parent = substitute_types_in_struct(inst->decl_parent(), env, registry, mode, &parent_modified);
+	{
+		*inst->decl_parent() | match
+		{
+			[&](StructInstance *parent_inst)
+			{
+				new_decl_parent = substitute_types_in_struct(parent_inst, env, registry, mode, &parent_modified);
+			},
+			[&](ProcInstance *parent_inst)
+			{
+				new_decl_parent = substitute_types_in_proc(parent_inst, env, registry, mode, &parent_modified);
+			},
+		};
+	}
 
 	if(parent_modified or inst->type_args().needs_subsitution(env))
 	{
-		inst = registry.get_struct_instance(inst->struct_(), inst->type_args(), env, new_parent, mode);
+		inst = registry.get_struct_instance(inst->struct_(), inst->type_args(), env, new_decl_parent, mode);
 
 		LOGGER(registry.mod().logger, on_struct_substitution_replaced, inst);
 		if(modified) *modified = true;
@@ -2560,18 +2782,24 @@ static ProcInstance* substitute_types_in_proc(
 	ProcInstance *inst,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionMode mode,
+	bool *modified
 )
 {
 	if(inst->type_args().needs_subsitution(env))
+	{
 		inst = registry.get_proc_instance(inst->proc(), inst->type_args(), env, mode);
+		if(modified) *modified = true;
+	}
 	else
+	{
 		validate_unsubstituted_vars(
 			inst->type_args().occurring_vars,
 			inst->type_args().has_type_deduction_vars,
 			env, mode, registry.mod()
 		);
-
+		if(modified) *modified = false;
+	}
 
 	return inst;
 }
@@ -2845,6 +3073,7 @@ void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry
 			substitute_types_in_expr(*s.condition, subst, registry, mode);
 			substitute_types_in_stmt(*s.body, subst, registry, mode);
 		},
+		[&](DeclStmt&) {},
 		[&](MatchStmt &s)
 		{
 			substitute_types_in_expr(*s.expr, subst, registry, mode);
@@ -3617,13 +3846,15 @@ static void unify_structs_eq(
 				);
 			}
 
+			optional<DeclContainerInst> left_cont{left};
+			optional<DeclContainerInst> right_cont{right};
 			do
 			{
-				unify_type_args(left->type_args(), right->type_args(), error_msg, subst, ctx);
-				left = left->decl_parent();
-				right = right->decl_parent();
+				unify_type_args(left_cont->type_args(), right_cont->type_args(), error_msg, subst, ctx);
+				left_cont = left_cont->decl_parent();
+				right_cont = right_cont->decl_parent();
 			}
-			while(left);
+			while(left_cont);
 		}
 	}
 }
@@ -5134,7 +5365,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 		[&](StringLiteralExpr &e)
 		{
 			ScopeItem &c_char_item = ctx.mod->sema->globals->lookup("c_char", INVALID_TOKEN_IDX);
-			StructInstance *c_char = ctx.mod->sema->insts.get_struct_instance(std::get<StructItem*>(c_char_item), nullptr, nullptr);
+			StructInstance *c_char = ctx.mod->sema->insts.get_struct_instance(std::get<StructItem*>(c_char_item), nullptr, nullopt);
 
 			return e.type = ctx.arena.alloc<Type>(PointerType{
 				.range = UNKNOWN_TOKEN_RANGE,
@@ -5809,6 +6040,7 @@ static Type const* typecheck_pattern(
 		constraints.add_check(LValueCheck(root_rhs_expr, *requires_lvalue));
 }
 
+void typecheck_struct(StructItem *struct_, SemaContext &ctx);
 
 static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 {
@@ -5904,6 +6136,10 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				throw_sem_error("While-condition must be boolean", s.range.first, ctx.mod);
 
 			typecheck_stmt(*s.body, ctx);
+		},
+		[&](DeclStmt const &s)
+		{
+			typecheck_struct(s.item, ctx);
 		},
 		[&](MatchStmt const &s)
 		{
@@ -6441,6 +6677,10 @@ void EventLogger::on_stmt_start(Stmt const &stmt)
 		{
 			output_html("while");
 		},
+		[&](DeclStmt const&)
+		{
+			output_html("struct");
+		},
 		[&](MatchStmt const&)
 		{
 			output_html("match");
@@ -6481,6 +6721,10 @@ void EventLogger::on_stmt_end()
 			output_html();
 		},
 		[&](WhileStmt const&)
+		{
+			output_html();
+		},
+		[&](DeclStmt const&)
 		{
 			output_html();
 		},

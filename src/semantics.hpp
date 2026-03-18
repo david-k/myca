@@ -28,9 +28,16 @@ using std::span;
 //==============================================================================
 struct Scope;
 
+struct DeclContainer : variant<StructItem*, ProcItem*>
+{
+	using variant::variant;
+
+	StructItem* as_struct() const { return std::get<StructItem*>(*this); }
+};
+
 struct Struct
 {
-	StructItem *decl_parent;
+	optional<DeclContainer> decl_parent;
 	Scope *type_scope;
 	FixedArray<Parameter const*> *NULLABLE ctor_params = nullptr;
 	int num_initial_var_members = 0;
@@ -247,13 +254,41 @@ struct std::hash<::TypeInstance>
 };
 
 
+// Both structs and procs are declaration containers in that they have their own scope that can
+// contain further declarations
+struct DeclContainerInst : variant<StructInstance*, ProcInstance*>
+{
+	using variant::variant;
+
+	StructInstance* try_as_struct() const
+	{
+		if(StructInstance *const *inst = std::get_if<StructInstance*>(this))
+			return *inst;
+
+		return nullptr;
+	}
+	StructInstance* as_struct() const { return std::get<StructInstance*>(*this); }
+
+	ProcInstance* as_proc() const { return std::get<ProcInstance*>(*this); }
+
+	void finalize_typechecking();
+	TypeEnv create_type_env() const;
+	bool is_concrete() const;
+	bool is_deduction_complete() const;
+
+	Scope* scope() const;
+
+	TypeArgList const& type_args() const;
+	optional<DeclContainerInst> decl_parent() const;
+};
+
 // A key that uniquely identifies a StructInstance.
 struct StructInstanceKey
 {
 	StructInstanceKey(
 		StructItem const *struct_,
 		FixedArray<Type> *NULLABLE type_args,
-		StructInstance *NULLABLE decl_parent
+		optional<DeclContainerInst> decl_parent
 	) :
 		struct_(struct_),
 		type_args(type_args and type_args->count == 0 ? nullptr : type_args),
@@ -261,7 +296,7 @@ struct StructInstanceKey
 
 	StructItem const *struct_;
 	FixedArray<Type> *NULLABLE type_args;
-	StructInstance *NULLABLE decl_parent;
+	optional<DeclContainerInst> decl_parent;
 };
 
 enum class LayoutComputationState
@@ -278,7 +313,7 @@ public:
 	StructInstance(
 		StructItem const *struct_,
 		TypeArgList const &type_args,
-		StructInstance *decl_parent,
+		optional<DeclContainerInst> decl_parent,
 		size_t id,
 		InstanceRegistry *registry
 	) :
@@ -292,19 +327,19 @@ public:
 	Module const& mod() const;
 
 	StructItem const* struct_() const { return m_struct; }
-	StructInstance* decl_parent() const { return m_decl_parent; }
+	optional<DeclContainerInst> decl_parent() const { return m_decl_parent; }
 	TypeArgList const& type_args() const { return m_type_args; }
 	bool is_case_member() const { return m_struct->is_case_member; }
 
 	StructInstance *NULLABLE variant_parent() const
 	{
-		return is_case_member() ? m_decl_parent : nullptr;
+		return is_case_member() ? m_decl_parent->as_struct() : nullptr;
 	}
 
 	StructInstance *variant_root()
 	{
 		if(is_case_member() and m_decl_parent)
-			return m_decl_parent->variant_root();
+			return m_decl_parent->as_struct()->variant_root();
 
 		return this;
 	}
@@ -359,7 +394,7 @@ private:
 	InstanceRegistry *m_registry;
 	StructItem const *m_struct;
 	TypeArgList m_type_args;
-	StructInstance *m_decl_parent;
+	optional<DeclContainerInst> m_decl_parent;
 	size_t m_id;
 	bool m_finalized = false;
 
@@ -392,13 +427,21 @@ struct std::hash<::StructInstanceKey>
 {
 	size_t operator () (::StructInstanceKey const &key) const
 	{
-		size_t h = ::compute_hash(key.struct_);
-		::combine_hashes(h, ::compute_hash(key.decl_parent));
+		size_t h = compute_hash(key.struct_);
+		combine_hashes(h, compute_hash(key.decl_parent.has_value()));
+		if(key.decl_parent)
+		{
+			*key.decl_parent | match
+			{
+				[&](StructInstance *inst) { combine_hashes(h, compute_hash(inst)); },
+				[&](ProcInstance *inst) { combine_hashes(h, compute_hash(inst)); },
+			};
+		}
 
 		if(key.type_args)
 		{
 			for(Type const &t: *key.type_args)
-				::combine_hashes(h, ::compute_hash(t));
+				combine_hashes(h, compute_hash(t));
 		}
 
 		return h;
@@ -431,6 +474,7 @@ public:
 	InstanceRegistry* registry() { return m_registry; }
 	ProcItem const* proc() const { return m_proc; }
 	TypeArgList const& type_args() const { return m_type_args; }
+	optional<DeclContainerInst> decl_parent() const { return nullopt; }
 
 	TypeEnv create_type_env() const;
 
@@ -685,13 +729,13 @@ public:
 	StructInstance* get_struct_instance(
 		StructItem const *struct_,
 		FixedArray<Type> *NULLABLE type_args,
-		StructInstance *NULLABLE decl_parent
+		optional<DeclContainerInst> decl_parent
 	);
 
 	StructInstance* get_struct_instance(
 		StructItem const *struct_,
 		TypeArgList const &type_args,
-		StructInstance *NULLABLE decl_parent
+		optional<DeclContainerInst> decl_parent
 	);
 
 	// Apply `subst` to `type_args` before retrieving the StructInstance. Note that `subst` is
@@ -703,11 +747,10 @@ public:
 		StructItem const *struct_,
 		TypeArgList const &type_args,
 		TypeEnv const &subst,
-		StructInstance *NULLABLE decl_parent,
+		optional<DeclContainerInst> decl_parent,
 		SubstitutionMode mode
 	);
 
-	StructInstance* get_struct_self_instance(StructItem const *struct_);
 
 	ProcInstance* get_proc_instance(ProcItem const *proc, FixedArray<Type> *NULLABLE type_args);
 	ProcInstance* get_proc_instance(ProcItem const *proc, TypeArgList const &type_args);
@@ -729,6 +772,10 @@ public:
 	// `alternatives` must be the result of canonicalize_union_alternatives()
 	UnionInstance* get_union_instance(vector<Type const*> &&alternatives);
 
+	StructInstance* get_struct_self_instance(StructItem const *struct_);
+	ProcInstance* get_proc_self_instance(ProcItem const *proc);
+	DeclContainerInst get_self_instance(DeclContainer decl);
+
 	std::generator<StructInstance&> struct_instances();
 	std::generator<UnionInstance&> union_instances();
 	std::generator<ProcInstance&> proc_instances();
@@ -748,7 +795,8 @@ private:
 	unordered_map<ProcTypeInstanceKey, ProcTypeInstance> m_proc_type_instances;
 	unordered_map<UnionInstanceKey, UnionInstance> m_union_instances;
 
-	unordered_map<StructItem const*, StructInstance*> m_self_instances;
+	unordered_map<StructItem const*, StructInstance*> m_struct_self_instances;
+	unordered_map<ProcItem const*, ProcInstance*> m_proc_self_instances;
 
 	size_t next_struct_id() const { return m_struct_instances.size(); }
 	StructInstance* add_struct_instance(StructInstance &&new_inst);
@@ -834,16 +882,15 @@ struct SemaContext
 		mod(&mod),
 		arena(arena) {}
 
-	Module *mod;
-	Arena &arena;
-	ProcItem *NULLABLE proc = nullptr; // The current procedure being analyzed
-
 	TypeDeductionVar new_type_deduction_var()
 	{
 		return TypeDeductionVar(next_deduction_id++);
 	}
 
+	Module *mod;
+	Arena &arena;
 	uint32_t next_deduction_id = 0;
+	ProcItem *NULLABLE proc = nullptr; // The current procedure being analyzed
 };
 
 
@@ -1306,7 +1353,13 @@ void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry
 
 void declare_item(TopLevelItem &item, SemaContext &ctx);
 
-void resolve_type(Type &type, Scope *scope, SemaContext &ctx);
+enum class ResolutionContext
+{
+	GENERAL,
+	DEFAULT_VALUE,
+};
+
+void resolve_type(Type &type, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
 void resolve_item(TopLevelItem &item, SemaContext &ctx);
 
 MemoryLayout compute_layout(Type const &type);

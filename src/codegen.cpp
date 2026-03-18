@@ -207,6 +207,28 @@ static string mangle_union_type_segment(UnionType const &union_)
 	return mangled + "E";
 }
 
+static string mangle_decl_container(DeclContainerInst cont)
+{
+	string segment = cont | match
+	{
+		[&](StructInstance *inst)
+		{
+			return string(inst->struct_()->name);
+		},
+		[&](ProcInstance *inst)
+		{
+			return string(inst->proc()->name);
+		},
+	};
+
+	segment += mangle_type_args(cont.type_args());
+
+	if(cont.decl_parent())
+		segment = mangle_decl_container(*cont.decl_parent()) + segment;
+
+	return segment;
+}
+
 static string mangle_type_segment(Type const &type)
 {
 	return type | match
@@ -239,13 +261,7 @@ static string mangle_type_segment(Type const &type)
 		},
 		[&](StructType const &struct_)
 		{
-			string segment = std::to_string(struct_.inst->struct_()->name.length()) + struct_.inst->struct_()->name;
-			segment += mangle_type_args(struct_.inst->type_args());
-
-			if(struct_.inst->decl_parent())
-				return mangle_type_segment(StructType(UNKNOWN_TOKEN_RANGE, struct_.inst->decl_parent())) + segment;
-
-			return segment;
+			return mangle_decl_container(struct_.inst);
 		},
 		[&](ProcType const&) -> string { assert(!"mangle_type_segment: ProcType: TODO"); },
 		[&](UnionType const &t) -> string
@@ -748,6 +764,7 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 			backend.decrease_indent();
 			backend << "}" << LineEnd;
 		},
+		[&](DeclStmt const&) {},
 		[&](MatchStmt const &s)
 		{
 			if(is_optional_ptr(*type_of(*s.expr)))
@@ -831,7 +848,7 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 void create_c_struct_initial_vars(StructInstance *struct_inst, optional<size_t> child_case_idx, CStruct *result)
 {
 	if(struct_inst->is_case_member())
-		create_c_struct_initial_vars(struct_inst->decl_parent(), struct_inst->case_idx(), result);
+		create_c_struct_initial_vars(struct_inst->decl_parent()->as_struct(), struct_inst->case_idx(), result);
 
 	if(struct_inst->struct_()->num_case_members)
 		result->add(CMember(get_discr_name(struct_inst), child_case_idx, *struct_inst->discriminator_type()));
@@ -861,7 +878,7 @@ void create_c_struct_trailing_vars(StructInstance *struct_inst, CStruct *result)
 				result->add(CMember(BuiltinType(UNKNOWN_TOKEN_RANGE, BuiltinTypeDef::U8)));
 		}
 
-		create_c_struct_trailing_vars(struct_inst->decl_parent(), result);
+		create_c_struct_trailing_vars(struct_inst->decl_parent()->as_struct(), result);
 	}
 }
 
@@ -1007,7 +1024,7 @@ void _sort_types_by_deps(
 				for(TypeInstance dep: inst->own_type_deps())
 					_sort_types_by_deps(dep, result, visited, mod);
 
-				inst = inst->decl_parent();
+				inst = inst->decl_parent() ? inst->decl_parent()->try_as_struct() : nullptr;
 			}
 		},
 		[&](UnionInstance const *inst)

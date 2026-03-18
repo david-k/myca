@@ -1,0 +1,6 @@
+proc main() -> i32
+{
+	let x1 = X(49);
+	let x2: struct X'T { v: T } = X(7);
+	return x1.v - x2.v;
+}

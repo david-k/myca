@@ -110,7 +110,7 @@ static Type parse_incremental_type(
 		*bytes_consumed = parser.bytes_consumed() - initial_byte_pos;
 
 	insert_type_deduction_vars(type, vars, ctx);
-	resolve_type(type, ctx.mod->sema->globals.get(), ctx);
+	resolve_type(type, ctx.mod->sema->globals.get(), ResolutionContext::GENERAL, ctx);
 
 	return type;
 }

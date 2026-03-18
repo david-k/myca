@@ -1,0 +1,9 @@
+proc main() -> i32
+{
+	struct S
+	{
+		value: i32,
+	}
+}
+
+proc inc(s: S) { }

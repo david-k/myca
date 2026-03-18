@@ -1,0 +1,8 @@
+proc main() -> i32
+{
+	if true {
+		let y: struct Y = Y;
+	}
+
+	let a = Y;
+}

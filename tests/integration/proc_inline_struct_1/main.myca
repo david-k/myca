@@ -1,0 +1,13 @@
+proc main() -> i32
+{
+	return foo(foo.A(false)).v;
+}
+
+proc foo(a: struct A { v: bool }) -> struct X { v: i8 }
+{
+	if a.v {
+		return X(7);
+	} else {
+		return X(23);
+	}
+}

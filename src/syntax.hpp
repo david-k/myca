@@ -752,6 +752,8 @@ static_assert(sizeof(Pattern) == 56, "sizeof(Pattern) is getting larger...");
 //--------------------------------------------------------------------
 // Statements
 //--------------------------------------------------------------------
+struct Scope;
+
 using Stmt = variant<
 	struct LetStmt,
 	struct ExprStmt,
@@ -759,7 +761,8 @@ using Stmt = variant<
 	struct ReturnStmt,
 	struct IfStmt,
 	struct WhileStmt,
-	struct MatchStmt
+	struct MatchStmt,
+	struct DeclStmt
 >;
 
 struct LetStmt
@@ -779,6 +782,7 @@ struct BlockStmt
 {
 	TokenRange range;
 	FixedArray<Stmt> *stmts;
+	Scope *scope = nullptr;
 };
 
 struct ReturnStmt
@@ -802,6 +806,12 @@ struct WhileStmt
 	Stmt *body;
 };
 
+struct DeclStmt
+{
+	TokenRange range;
+	StructItem *item; // Only structs for the moment
+};
+
 
 struct MatchStmt
 {
@@ -817,6 +827,7 @@ struct MatchArm
 
 	// Available after semantic analysis
 	int discr = -1;
+	Scope *scope = nullptr;
 };
 
 

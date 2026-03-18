@@ -1,0 +1,6 @@
+proc foo(a: i32) {}
+
+proc main() -> i32
+{
+	let a = foo.a;
+}
