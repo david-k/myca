@@ -1,28 +1,5 @@
-
-proc main() -> i32
-{
-	let x = Foo.X(27);
-	let y = Foo.Y(x);
-	return y.x.value;
-}
-
-struct Foo'T
-{
-	struct Y {
-		x: X,
-	},
-
-	struct X { value: T },
-
-	case Case {},
-
-	value: T,
-}
-
-
-//------------------------------------------------------------------------------
 //struct List:T
-/*struct List'T
+struct List'T
 {
 	value: T,
 	//next: ?'List^T = None,
@@ -59,7 +36,7 @@ proc main() -> i32
 	//}
 
 	return sum;
-}*/
+}
 
 
 //------------------------------------------------------------------------------

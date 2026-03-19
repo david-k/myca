@@ -1384,11 +1384,11 @@ void StructInstance::compute_dependent_properties()
 	{
 		m | match
 		{
-			[&](Parameter const &var_member)
+			[&](VarMember const &var_member)
 			{
 				Parameter inst_var_member{
-					.range = var_member.range,
-					.type = clone_ptr(var_member.type, m_registry->arena()),
+					.range = var_member.var.range,
+					.type = clone_ptr(var_member.var.type, m_registry->arena()),
 					// Why ExprPending?
 					// - First, when typechecking the *usage* of a struct, we only need to know
 					//   whether a member *has* a default value, but it doesn't matter what that
@@ -1398,7 +1398,7 @@ void StructInstance::compute_dependent_properties()
 					//   var_member.default_value has not been type-checked at this point, and in
 					//   order to typecheck var_member.default_value we may have to typecheck the
 					//   default values of other structs, which may well end up in a cycle
-					.default_value = var_member.default_value ?
+					.default_value = var_member.var.default_value ?
 						DefaultValueExpr(ExprPending()) : DefaultValueExpr(NoDefaultValue()),
 				};
 				substitute(*inst_var_member.type, env, *m_registry, BestEffortSubstitution());
@@ -1555,10 +1555,10 @@ void StructInstance::finalize_typechecking()
 	// Substitute type vars in default values
 	for(size_t i = 0; i < m_struct->members->count; ++i)
 	{
-		if(Parameter const *var_member = std::get_if<Parameter>(&m_struct->members->items[i]))
+		if(VarMember const *var_member = std::get_if<VarMember>(&m_struct->members->items[i]))
 		{
 			Parameter &inst_var_member = std::get<Parameter>(m_members->items[i]);
-			if(Expr *default_value = var_member->default_value.try_get_expr())
+			if(Expr *default_value = var_member->var.default_value.try_get_expr())
 			{
 				default_value = clone_ptr(default_value, m_registry->arena());
 				substitute_types_in_expr(*default_value, env, *m_registry, BestEffortSubstitution());
@@ -1853,32 +1853,23 @@ static void declare_types_in_stmt(Stmt &stmt, Scope *scope, optional<DeclContain
 
 static std::generator<Parameter&> initial_var_members(StructItem *struct_)
 {
-	size_t num_vars_to_emit = struct_->sema->num_initial_var_members;
-	for(Member &m: *struct_->members)
+	optional<int> next_idx = struct_->first_initial_var_member_idx;
+	while(next_idx)
 	{
-		if(Parameter *param = std::get_if<Parameter>(&m))
-		{
-			if(num_vars_to_emit-- == 0)
-				break;
-
-			co_yield *param;
-		}
+		VarMember &var_member = std::get<VarMember>(struct_->members->items[*next_idx]);
+		co_yield var_member.var;
+		next_idx = var_member.next_var_member_idx;
 	}
 }
 
 static std::generator<Parameter&> trailing_var_members(StructItem *struct_)
 {
-	size_t num_vars_to_ignore = struct_->sema->num_initial_var_members;
-	for(Member &m: *struct_->members)
+	optional<int> next_idx = struct_->first_trailing_var_member_idx;
+	while(next_idx)
 	{
-		if(Parameter *param = std::get_if<Parameter>(&m))
-		{
-			if(num_vars_to_ignore == 0)
-				co_yield *param;
-			else
-				num_vars_to_ignore -= 1;
-
-		}
+		VarMember &var_member = std::get<VarMember>(struct_->members->items[*next_idx]);
+		co_yield var_member.var;
+		next_idx = var_member.next_var_member_idx;
 	}
 }
 
@@ -1896,10 +1887,12 @@ static std::generator<Parameter&> all_var_members(StructItem *struct_)
 
 std::generator<StructItem*> own_case_members(StructItem *struct_)
 {
-	for(Member const &m: *struct_->members)
+	optional<int> next_idx = struct_->first_case_member_idx;
+	while(next_idx)
 	{
-		if(CaseMember const *case_member = std::get_if<CaseMember>(&m))
-			co_yield case_member->struct_;
+		CaseMember &case_member = std::get<CaseMember>(struct_->members->items[*next_idx]);
+		co_yield case_member.struct_;
+		next_idx = case_member.next_case_member_idx;
 	}
 }
 
@@ -1939,7 +1932,7 @@ static void declare_struct_item(StructItem *struct_, optional<DeclContainer> dec
 	{
 		member | match
 		{
-			[&](Parameter const &var_member)
+			[&](VarMember const &var_member)
 			{
 				if(state == INITIAL_VAR_MEMBERS)
 					struct_->sema->num_initial_var_members += 1;
@@ -1947,10 +1940,10 @@ static void declare_struct_item(StructItem *struct_, optional<DeclContainer> dec
 				if(state == CASE_MEMBERS)
 					state = TRAILING_VAR_MEMBERS;
 
-				declare_types(*var_member.type, struct_->sema->type_scope, struct_, ctx);
-				bool inserted = member_names.insert(name_of(var_member, ctx.mod)).second;
+				declare_types(*var_member.var.type, struct_->sema->type_scope, struct_, ctx);
+				bool inserted = member_names.insert(name_of(var_member.var, ctx.mod)).second;
 				if(not inserted)
-					throw_sem_error("A member with this name has already been declared", var_member.range.first, ctx.mod);
+					throw_sem_error("A member with this name has already been declared", var_member.var.range.first, ctx.mod);
 			},
 			[&](CaseMember case_member)
 			{
@@ -2567,11 +2560,11 @@ static void resolve_struct(StructItem &struct_, SemaContext &ctx)
 	{
 		member | match
 		{
-			[&](Parameter &var_member)
+			[&](VarMember &var_member)
 			{
-				assert(var_member.type);
-				resolve_param(var_member, struct_.sema->type_scope, ctx);
-				if(not is_deduction_complete(*var_member.type))
+				assert(var_member.var.type);
+				resolve_param(var_member.var, struct_.sema->type_scope, ctx);
+				if(not is_deduction_complete(*var_member.var.type))
 				{
 					// I was playing with the idea of allowing type deduction basically everywhere,
 					// including struct members:
@@ -2592,8 +2585,8 @@ static void resolve_struct(StructItem &struct_, SemaContext &ctx)
 					// This is too much trouble for a feature that was the result of asking "Can I?"
 					// instead of "Should I?". Nobody is going to miss this feature.
 					throw_sem_error(
-						"Member type of \""s + name_of(var_member, ctx.mod) + "\" is incomplete",
-						var_member.range.first,
+						"Member type of \""s + name_of(var_member.var, ctx.mod) + "\" is incomplete",
+						var_member.var.range.first,
 						ctx.mod
 					);
 				}
@@ -5263,7 +5256,6 @@ static void expr_default_value_deps(Expr const &expr, std::unordered_map<Default
 						{
 							ProcItem const *item = proc->proc();
 							Parameter const &param = item->params->items[idx];
-							
 							check_default_value_deps(item, name_of(param, &mod), &param.default_value.get_expr(), deps, mod);
 						},
 						[&](StructInstance *struct_)
@@ -5301,7 +5293,6 @@ static void check_default_value_deps(
 	Module const &mod
 )
 {
-
 	auto res = deps.emplace(DefaultValueDep(callable, field), VisitState::IN_PROGRESS);
 	if(res.second) // inserted?
 		expr_default_value_deps(*default_value, deps, mod);
@@ -6323,9 +6314,9 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 	{
 		m | match
 		{
-			[&](Parameter &var_member)
+			[&](VarMember &var_member)
 			{
-				if(Expr *default_value = var_member.default_value.try_get_expr())
+				if(Expr *default_value = var_member.var.default_value.try_get_expr())
 				{
 					LOGGER(ctx.mod->logger, on_expr_start, *default_value);
 
@@ -6341,7 +6332,7 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 
 					ConstraintGatheringSubst constraint_subst(&constraints, &ctx);
 					Unifier(ctx)
-						.left(*var_member.type, TypeConversion::NONE)
+						.left(*var_member.var.type, TypeConversion::NONE)
 						.right(*default_value_type, TypeConversion::IMPLICIT_CTOR, default_value)
 						.set(&constraint_subst)
 						.set(LazyErrorMsg(default_value, error_msg))
@@ -6422,10 +6413,10 @@ void check_default_values_in_struct(
 	{
 		m | match
 		{
-			[&](Parameter const &var_member)
+			[&](VarMember const &var_member)
 			{
-				if(Expr *default_value = var_member.default_value.try_get_expr())
-					check_default_value_deps(struct_, name_of(var_member, ctx.mod), default_value, default_value_deps, *ctx.mod);
+				if(Expr *default_value = var_member.var.default_value.try_get_expr())
+					check_default_value_deps(struct_, name_of(var_member.var, ctx.mod), default_value, default_value_deps, *ctx.mod);
 			},
 			[&](CaseMember case_member)
 			{

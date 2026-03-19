@@ -652,14 +652,14 @@ void print(Member const &member, int indent, Module const &mod, std::ostream &os
 {
 	member | match
 	{
-		[&](Parameter const &var_member)
+		[&](VarMember const &var_member)
 		{
-			os << string(indent*INDENT_WIDTH, ' ') << name_of(var_member, &mod) << ": ";
-			print(*var_member.type, mod, os);
-			if(var_member.default_value)
+			os << string(indent*INDENT_WIDTH, ' ') << name_of(var_member.var, &mod) << ": ";
+			print(*var_member.var.type, mod, os);
+			if(var_member.var.default_value)
 			{
 				os << " = ";
-				if(Expr *default_value = var_member.default_value.try_get_expr())
+				if(Expr *default_value = var_member.var.default_value.try_get_expr())
 					print(*default_value, mod, os);
 				else
 					os << "<EXPR_PENDING>";
@@ -2027,6 +2027,48 @@ static ProcItem parse_proc(Parser &parser, Memory M)
 	return proc;
 }
 
+static void compute_struct_member_indices(StructItem *struct_)
+{
+	optional<int> prev_var_member_idx;
+	optional<int> prev_case_member_idx;
+	for(size_t member_idx = 0; member_idx < struct_->members->count; member_idx++)
+	{
+		Member const &m = struct_->members->items[member_idx];
+		m | match
+		{
+			[&](VarMember const&)
+			{
+				struct_->num_var_members += 1;
+				if(struct_->first_case_member_idx)
+				{
+					if(not struct_->first_trailing_var_member_idx)
+						struct_->first_trailing_var_member_idx = member_idx;
+				}
+				else
+				{
+					if(not struct_->first_initial_var_member_idx)
+						struct_->first_initial_var_member_idx = member_idx;
+				}
+
+				if(prev_var_member_idx)
+					std::get<VarMember>(struct_->members->items[*prev_var_member_idx]).next_var_member_idx = member_idx;
+				prev_var_member_idx = member_idx;
+			},
+			[&](CaseMember const&)
+			{
+				struct_->num_case_members += 1;
+				if(not struct_->first_case_member_idx)
+					struct_->first_case_member_idx = member_idx;
+
+				if(prev_case_member_idx)
+					std::get<CaseMember>(struct_->members->items[*prev_case_member_idx]).next_case_member_idx = member_idx;
+				prev_case_member_idx = member_idx;
+			},
+			[&](StructMember const&) {},
+		};
+	}
+}
+
 static StructItem parse_struct(Parser &parser, StructParseContext struct_context, Memory M)
 {
 	TokenRanger ranger(parser);
@@ -2051,8 +2093,7 @@ static StructItem parse_struct(Parser &parser, StructParseContext struct_context
 					parse_struct(parser, StructParseContext::CASE_MEMBER, M)
 				);
 				case_member->is_implicit = is_implicit;
-				members.append(CaseMember(case_member));
-				struct_.num_case_members += 1;
+				members.append(CaseMember(case_member, nullopt));
 			}
 			else if(try_consume(parser, Lexeme::STRUCT))
 			{
@@ -2069,13 +2110,11 @@ static StructItem parse_struct(Parser &parser, StructParseContext struct_context
 
 				Parameter member;
 				member.type = M.main->alloc<Type>(parse_type(parser, M));
-
 				if(try_consume(parser, Lexeme::EQ))
 					member.default_value = M.main->alloc<Expr>(parse_expr(parser, M));
 
 				member.range = member_ranger.get();
-				members.append(member);
-				struct_.num_var_members += 1;
+				members.append(VarMember(member, nullopt));
 			}
 
 			if(parser.get().kind != Lexeme::RIGHT_BRACE)
@@ -2095,6 +2134,8 @@ static StructItem parse_struct(Parser &parser, StructParseContext struct_context
 
 	struct_.members = members.to_array(*M.main);
 	struct_.range = ranger.get();
+	compute_struct_member_indices(&struct_);
+
 	return struct_;
 }
 

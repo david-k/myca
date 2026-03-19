@@ -872,8 +872,18 @@ struct ProcItem
 };
 
 struct StructMember { struct StructItem *struct_; };
-struct CaseMember { struct StructItem *struct_; };
-using Member = variant<Parameter, StructMember, CaseMember>;
+struct CaseMember
+{
+	struct StructItem *struct_;
+	optional<int> next_case_member_idx;
+};
+struct VarMember
+{
+	Parameter var;
+	optional<int> next_var_member_idx;
+};
+
+using Member = variant<VarMember, StructMember, CaseMember>;
 
 struct StructItem
 {
@@ -886,9 +896,13 @@ struct StructItem
 	bool is_implicit = false;
 	bool ctor_without_parens = false;
 	bool is_extern = false;
-	int num_case_members = 0;
-	int num_var_members = 0;
 	bool is_case_member = false;
+
+	optional<int> first_initial_var_member_idx = nullopt;
+	optional<int> first_trailing_var_member_idx = nullopt;
+	optional<int> first_case_member_idx = nullopt;
+	int num_var_members = 0;
+	int num_case_members = 0;
 
 	Struct *NULLABLE sema = nullptr; // Available after semantic analysis
 };
