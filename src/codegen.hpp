@@ -63,8 +63,4 @@ private:
 	ProcInstance *m_cur_proc = nullptr;
 };
 
-
-//==============================================================================
-// C code generation
-//==============================================================================
 void generate_c(Module &mod, CBackend &backend);

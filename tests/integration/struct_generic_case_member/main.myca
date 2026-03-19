@@ -1,0 +1,4 @@
+struct Foo
+{
+	case Bar'T {}
+}

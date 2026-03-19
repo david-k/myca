@@ -873,11 +873,12 @@ struct ProcItem
 
 struct StructMember { struct StructItem *struct_; };
 struct CaseMember { struct StructItem *struct_; };
-// using Member = variant<Parameter, StructMember, CaseMember>; TODO Use this
-using Member = variant<Parameter, StructItem*>;
+using Member = variant<Parameter, StructMember, CaseMember>;
 
 struct StructItem
 {
+	bool has_constructor() const { return num_case_members == 0; }
+
 	TokenRange range;
 	string_view name;
 	FixedArray<TypeParameter> *type_params = nullptr;
@@ -886,10 +887,8 @@ struct StructItem
 	bool ctor_without_parens = false;
 	bool is_extern = false;
 	int num_case_members = 0;
+	int num_var_members = 0;
 	bool is_case_member = false;
-
-	int num_var_members() const { return members->count - num_case_members; }
-	bool has_constructor() const { return num_case_members == 0; }
 
 	Struct *NULLABLE sema = nullptr; // Available after semantic analysis
 };

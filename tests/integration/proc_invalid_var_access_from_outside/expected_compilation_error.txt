@@ -1,1 +1,1 @@
-|5:14| error: Cannot access local variables from outside
+|5:14| error: Cannot access local variables from the outside

@@ -1,17 +1,22 @@
 
 proc main() -> i32
 {
-	return 0;
+	let x = Foo.X(27);
+	let y = Foo.Y(x);
+	return y.x.value;
 }
 
 struct Foo'T
 {
-	// TODO Make this work
-	struct X {}
-
 	struct Y {
-		x: X, // Foo'(T).X
-	}
+		x: X,
+	},
+
+	struct X { value: T },
+
+	case Case {},
+
+	value: T,
 }
 
 

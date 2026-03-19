@@ -1,0 +1,19 @@
+proc main() -> i32
+{
+	let x = Foo.X(27);
+	let y = Foo.Y(x);
+	return y.x.value;
+}
+
+struct Foo'T
+{
+	struct Y {
+		x: X,
+	},
+
+	struct X { value: T },
+
+	case Case {},
+
+	value: T,
+}

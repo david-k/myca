@@ -665,9 +665,13 @@ void print(Member const &member, int indent, Module const &mod, std::ostream &os
 					os << "<EXPR_PENDING>";
 			}
 		},
-		[&](StructItem const *case_member)
+		[&](CaseMember case_member)
 		{
-			print(*case_member, false, indent, mod, os);
+			print(*case_member.struct_, false, indent, mod, os);
+		},
+		[&](StructMember struct_member)
+		{
+			print(*struct_member.struct_, true, indent, mod, os);
 		},
 	};
 
@@ -2047,8 +2051,15 @@ static StructItem parse_struct(Parser &parser, StructParseContext struct_context
 					parse_struct(parser, StructParseContext::CASE_MEMBER, M)
 				);
 				case_member->is_implicit = is_implicit;
-				members.append(case_member);
+				members.append(CaseMember(case_member));
 				struct_.num_case_members += 1;
+			}
+			else if(try_consume(parser, Lexeme::STRUCT))
+			{
+				StructItem *struct_member = M.main->alloc<StructItem>(
+					parse_struct(parser, StructParseContext::INLINE, M)
+				);
+				members.append(StructMember(struct_member));
 			}
 			else
 			{
@@ -2064,6 +2075,7 @@ static StructItem parse_struct(Parser &parser, StructParseContext struct_context
 
 				member.range = member_ranger.get();
 				members.append(member);
+				struct_.num_var_members += 1;
 			}
 
 			if(parser.get().kind != Lexeme::RIGHT_BRACE)

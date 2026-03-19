@@ -1356,16 +1356,7 @@ std::generator<Parameter&> StructInstance::trailing_var_members()
 
 	size_t first_idx = m_struct->sema->num_initial_var_members + m_struct->num_case_members;
 	for(size_t i = first_idx; i < m_members->count; ++i)
-	{
-		try{
-			co_yield std::get<Parameter>(m_members->items[i]);
-		}
-		catch(...) {
-			std::cout << "Struct: " << m_struct->name << std::endl;
-			std::cout << "member idx: " << i << "/" << m_members->count << std::endl;
-			throw;
-		}
-	}
+		co_yield std::get<Parameter>(m_members->items[i]);
 }
 
 std::generator<Parameter const&> StructInstance::all_var_members()
@@ -1385,11 +1376,13 @@ void StructInstance::compute_dependent_properties()
 	TypeEnv env = create_type_env();
 
 	// Initialize the struct's own members (m_members)
-	m_members = alloc_fixed_array<InstanceMember>(m_struct->members->count, m_registry->arena());
+	size_t num_instance_members = m_struct->num_var_members + m_struct->num_case_members;
+	m_members = alloc_fixed_array<InstanceMember>(num_instance_members, m_registry->arena());
+	int member_idx = 0;
 	int case_idx = 0;
-	for(size_t i = 0; i < m_struct->members->count; ++i)
+	for(Member const &m: *m_struct->members)
 	{
-		m_struct->members->items[i] | match
+		m | match
 		{
 			[&](Parameter const &var_member)
 			{
@@ -1410,19 +1403,22 @@ void StructInstance::compute_dependent_properties()
 				};
 				substitute(*inst_var_member.type, env, *m_registry, BestEffortSubstitution());
 
-				new (m_members->items+i) InstanceMember(inst_var_member);
+				new (m_members->items+member_idx) InstanceMember(inst_var_member);
+				member_idx += 1;
 			},
-			[&](StructItem *case_member)
+			[&](CaseMember case_member)
 			{
-				assert(case_member->type_params->count == 0);
-				StructInstance *case_member_inst = m_registry->get_struct_instance(case_member, nullptr, this);
+				assert(case_member.struct_->type_params->count == 0);
+				StructInstance *case_member_inst = m_registry->get_struct_instance(case_member.struct_, nullptr, this);
 				case_member_inst->m_case_idx = case_idx;
-				m_members->items[i] = InstanceMember(case_member_inst);
-				if(case_member->is_implicit)
+				new (m_members->items+member_idx) InstanceMember(case_member_inst);
+				if(case_member.struct_->is_implicit)
 					m_implicit_case = case_member_inst;
 
 				case_idx += 1;
+				member_idx += 1;
 			},
+			[&](StructMember) {}
 		};
 	}
 
@@ -1857,15 +1853,33 @@ static void declare_types_in_stmt(Stmt &stmt, Scope *scope, optional<DeclContain
 
 static std::generator<Parameter&> initial_var_members(StructItem *struct_)
 {
-	for(int i = 0; i < struct_->sema->num_initial_var_members; ++i)
-		co_yield std::get<Parameter>(struct_->members->items[i]);
+	size_t num_vars_to_emit = struct_->sema->num_initial_var_members;
+	for(Member &m: *struct_->members)
+	{
+		if(Parameter *param = std::get_if<Parameter>(&m))
+		{
+			if(num_vars_to_emit-- == 0)
+				break;
+
+			co_yield *param;
+		}
+	}
 }
 
 static std::generator<Parameter&> trailing_var_members(StructItem *struct_)
 {
-	size_t first_idx = struct_->sema->num_initial_var_members + struct_->num_case_members;
-	for(size_t i = first_idx; i < struct_->members->count; ++i)
-		co_yield std::get<Parameter>(struct_->members->items[i]);
+	size_t num_vars_to_ignore = struct_->sema->num_initial_var_members;
+	for(Member &m: *struct_->members)
+	{
+		if(Parameter *param = std::get_if<Parameter>(&m))
+		{
+			if(num_vars_to_ignore == 0)
+				co_yield *param;
+			else
+				num_vars_to_ignore -= 1;
+
+		}
+	}
 }
 
 static std::generator<Parameter&> all_var_members(StructItem *struct_)
@@ -1882,10 +1896,11 @@ static std::generator<Parameter&> all_var_members(StructItem *struct_)
 
 std::generator<StructItem*> own_case_members(StructItem *struct_)
 {
-	int first_idx = struct_->sema->num_initial_var_members;
-	int end_idx = first_idx + struct_->num_case_members;
-	for(int i = first_idx; i < end_idx; ++i)
-		co_yield std::get<StructItem*>(struct_->members->items[i]);
+	for(Member const &m: *struct_->members)
+	{
+		if(CaseMember const *case_member = std::get_if<CaseMember>(&m))
+			co_yield case_member->struct_;
+	}
 }
 
 static void declare_struct_item(StructItem *struct_, optional<DeclContainer> decl_parent, Scope *scope, SemaContext &ctx)
@@ -1937,21 +1952,28 @@ static void declare_struct_item(StructItem *struct_, optional<DeclContainer> dec
 				if(not inserted)
 					throw_sem_error("A member with this name has already been declared", var_member.range.first, ctx.mod);
 			},
-			[&](StructItem *case_member)
+			[&](CaseMember case_member)
 			{
 				if(state == INITIAL_VAR_MEMBERS)
 					state = CASE_MEMBERS;
 				else if(state != CASE_MEMBERS)
-					throw_sem_error("Variable members must come before or after all case members", case_member->range.first, ctx.mod);
+					throw_sem_error("Variable members must come before or after all case members", case_member.struct_->range.first, ctx.mod);
 
-				bool inserted = member_names.insert(case_member->name).second;
+				bool inserted = member_names.insert(case_member.struct_->name).second;
 				if(not inserted)
-					throw_sem_error("A member with this name has already been declared", case_member->range.first, ctx.mod);
+					throw_sem_error("A member with this name has already been declared", case_member.struct_->range.first, ctx.mod);
 
-				declare_struct_item(case_member, struct_, struct_->sema->type_scope, ctx);
+				if(case_member.struct_->type_params->count)
+					throw_sem_error("Case members cannot be generic", case_member.struct_->range.first, ctx.mod);
 
-				if(case_member->ctor_without_parens and struct_->num_var_members())
-					throw_sem_error("Struct must have braces because it inherits members from parent", case_member->range.first, ctx.mod);
+				declare_struct_item(case_member.struct_, struct_, struct_->sema->type_scope, ctx);
+
+				if(case_member.struct_->ctor_without_parens and struct_->num_var_members)
+					throw_sem_error("Struct must have braces because it inherits members from parent", case_member.struct_->range.first, ctx.mod);
+			},
+			[&](StructMember struct_member)
+			{
+				declare_struct_item(struct_member.struct_, struct_, struct_->sema->type_scope, ctx);
 			},
 		};
 	}
@@ -1963,7 +1985,7 @@ static void declare_struct_item(StructItem *struct_, optional<DeclContainer> dec
 		size_t param_count = 0;
 		for(StructItem *cur_item = struct_; cur_item;)
 		{
-			param_count += cur_item->num_var_members();
+			param_count += cur_item->num_var_members;
 			cur_item = cur_item->is_case_member ? cur_item->sema->decl_parent->as_struct() : nullptr;
 		}
 
@@ -2576,9 +2598,13 @@ static void resolve_struct(StructItem &struct_, SemaContext &ctx)
 					);
 				}
 			},
-			[&](StructItem *case_member)
+			[&](CaseMember case_member)
 			{
-				resolve_struct(*case_member, ctx);
+				resolve_struct(*case_member.struct_, ctx);
+			},
+			[&](StructMember struct_member)
+			{
+				resolve_struct(*struct_member.struct_, ctx);
 			},
 		};
 	}
@@ -6328,9 +6354,13 @@ void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 					LOGGER(ctx.mod->logger, on_expr_end);
 				}
 			},
-			[&](StructItem *case_member)
+			[&](CaseMember case_member)
 			{
-				typecheck_struct(case_member, ctx);
+				typecheck_struct(case_member.struct_, ctx);
+			},
+			[&](StructMember struct_member)
+			{
+				typecheck_struct(struct_member.struct_, ctx);
 			},
 		};
 	}
@@ -6397,9 +6427,13 @@ void check_default_values_in_struct(
 				if(Expr *default_value = var_member.default_value.try_get_expr())
 					check_default_value_deps(struct_, name_of(var_member, ctx.mod), default_value, default_value_deps, *ctx.mod);
 			},
-			[&](StructItem const *case_member)
+			[&](CaseMember case_member)
 			{
-				check_default_values_in_struct(case_member, default_value_deps, ctx);
+				check_default_values_in_struct(case_member.struct_, default_value_deps, ctx);
+			},
+			[&](StructMember struct_member)
+			{
+				check_default_values_in_struct(struct_member.struct_, default_value_deps, ctx);
 			},
 		};
 	}

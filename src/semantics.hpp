@@ -24,7 +24,7 @@ using std::span;
 
 
 //==============================================================================
-// (Top-level) items
+// Scope items
 //==============================================================================
 struct Scope;
 
@@ -70,6 +70,8 @@ struct Var
 	IsMutable mutability;
 	Type *NULLABLE type = nullptr;
 };
+
+using ScopeItem = variant<Var, TypeParameter*, ProcItem*, StructItem*, AliasItem*>;
 
 
 //==============================================================================
@@ -402,7 +404,7 @@ private:
 	// Lazily computed by compute_dependent_properties().
 	//
 	// The reason we compute these fields lazily and not in InstanceRegistry::register_struct() is
-	// because if two structs refer to each other, then we could end up in a loop, because computing
+	// because if two structs refer to each other, then we could end up in a loop, as computing
 	// these fields may require further resolution.
 	bool m_dependent_properties_computed = false;
 	FixedArray<InstanceMember> *m_members = nullptr;
@@ -1289,8 +1291,6 @@ TypeEnv create_subst_from_constraints(ConstraintSystem &constraints, SemaContext
 // Scope
 //==============================================================================
 struct Module;
-
-using ScopeItem = variant<Var, TypeParameter*, ProcItem*, StructItem*, AliasItem*>;
 
 struct Scope
 {
