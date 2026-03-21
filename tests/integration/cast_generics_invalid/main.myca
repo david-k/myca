@@ -1,0 +1,4 @@
+proc foo'(S,T)(s: S) -> T
+{
+	return s as T;
+}

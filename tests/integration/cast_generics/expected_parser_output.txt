@@ -1,0 +1,9 @@
+proc foo'(S)(s: S) -> S
+{
+    return (s as S);
+}
+
+proc main() -> i32
+{
+    return foo'(i32)(3);
+}

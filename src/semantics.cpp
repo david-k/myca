@@ -4463,7 +4463,10 @@ static bool is_cast_ok(Type const &target_type, Expr &src_expr, TypeEnv const &e
 		},
 		[&](VarType const &src_t) -> bool
 		{
-			return is_cast_ok(env.lookup(src_t), src_expr, env, ctx);
+			if(Type const *t = env.try_lookup(src_t))
+				return is_cast_ok(*t, src_expr, env, ctx);
+
+			return false;
 		},
 		[&](PointerType const &src_t) -> bool
 		{
