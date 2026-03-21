@@ -1,7 +1,7 @@
 // Lib C
 //--------------------------------------------------------------------
 struct c_char { _: i8 }
-extern proc fatal(msg: [^]c_char);
+extern proc fatal(msg: [bare]c_char);
 
 
 // Main

@@ -92,6 +92,7 @@ enum class Lexeme
 
 	AS,
 	MUT,
+	BARE,
 
 	TYPEALIAS,
 	EXTERN,

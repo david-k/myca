@@ -5,8 +5,8 @@ struct c_char { _: i8 }
 
 extern proc malloc(size: usize) -> ^mut c_void;
 extern proc free(ptr: ^mut c_void);
-extern proc puts(str: [^]c_char) -> i32;
-extern proc fatal(msg: [^]c_char);
+extern proc puts(str: [bare]c_char) -> i32;
+extern proc fatal(msg: [bare]c_char);
 
 
 // Main
@@ -44,7 +44,7 @@ proc sum(arr: ^Array'i32) -> i32
 //--------------------------------------------------------------------
 struct Array'T
 {
-	items: ?[^]mut T = None,
+	items: ?[bare]mut T = None,
 	length: usize = 0,
 	capacity: usize = 0,
 }
@@ -68,7 +68,7 @@ proc push'T (arr: ^mut Array'T, val: T)
 
 proc grow_capacity'T (arr: ^mut Array'T, target_cap: usize)
 {
-	let new_items = malloc(target_cap * size_of(T)) as [^]mut T;
+	let new_items = malloc(target_cap * size_of(T)) as [bare]mut T;
 	let mut i: usize = 0;
 	while i < arr^.length {
 		new_items[i] := unwrap(arr^.items)[i];

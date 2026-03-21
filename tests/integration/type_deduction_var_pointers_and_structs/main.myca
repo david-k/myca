@@ -14,7 +14,7 @@ proc id'T(v: T) -> T
 
 proc test_indexing() -> i32
 {
-	let arr = malloc(size_of(i32) * 1) as [^]mut i32;
+	let arr = malloc(size_of(i32) * 1) as [bare]mut i32;
 	id(arr)[0] := 54;
 
 	// Here we apply the index operator on `id(arr)` whose type is not yet deduced when the index

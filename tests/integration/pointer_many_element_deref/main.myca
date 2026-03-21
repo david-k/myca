@@ -1,4 +1,4 @@
-proc foo(p: [^]i32) -> i32
+proc foo(p: [bare]i32) -> i32
 {
 	return p^;
 }

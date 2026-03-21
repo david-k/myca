@@ -87,6 +87,7 @@ string_view str(Lexeme tok)
 
 		case Lexeme::AS: return "AS";
 		case Lexeme::MUT: return "MUT";
+		case Lexeme::BARE: return "BARE";
 
 		case Lexeme::TYPEALIAS: return "TYPEALIAS";
 		case Lexeme::EXTERN: return "EXTERN";
@@ -229,7 +230,7 @@ void print(Type const &type, Module const &mod, std::ostream &os)
 			if(t.kind == PointerType::SINGLE)
 				os << "^";
 			else
-				os << "[^]";
+				os << "[bare]";
 
 			if(t.mutability == IsMutable::YES)
 				os << "mut ";
@@ -1044,6 +1045,7 @@ unordered_map<string_view, Lexeme> const KEYWORDS = {
 	{"not", Lexeme::NOT},
 	{"as", Lexeme::AS},
 	{"mut", Lexeme::MUT},
+	{"bare", Lexeme::BARE},
 	{"typealias", Lexeme::TYPEALIAS},
 	{"extern", Lexeme::EXTERN},
 	{"size_of", Lexeme::SIZE_OF},
@@ -1284,7 +1286,7 @@ static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 
 		case Lexeme::LEFT_BRACKET:
 		{
-			consume(parser, Lexeme::CIRCUMFLEX);
+			consume(parser, Lexeme::BARE);
 			consume(parser, Lexeme::RIGHT_BRACKET);
 			IsMutable mutability = try_consume(parser, Lexeme::MUT) ? IsMutable::YES : IsMutable::NO;
 			Type pointee = parse_prefix_type(parser, M);

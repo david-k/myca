@@ -3,7 +3,7 @@ struct c_char
     _: i8,
 }
 
-extern proc fatal(msg: [^]c_char) -> Unit;
+extern proc fatal(msg: [bare]c_char) -> Unit;
 
 proc main() -> i32
 {
