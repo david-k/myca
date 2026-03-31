@@ -44,7 +44,6 @@ public:
 	}
 
 	CBackend& operator << (LineEnd_Tag);
-	CBackend& operator << (Type const &type);
 
 	void increase_indent() { indent_level += 1; }
 	void decrease_indent() { indent_level -= 1; }

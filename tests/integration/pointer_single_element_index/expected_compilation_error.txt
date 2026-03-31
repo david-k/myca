@@ -1,1 +1,1 @@
-|6:9| error: Expected multi-element pointer type, got ^i32
+|6:9| error: Expected indexable type, got ^i32

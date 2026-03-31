@@ -1,3 +1,8 @@
+- **Misc:**
+  - Create a context-free grammar and check for ambiguity using a LL or LR
+    parser generator.
+    https://www.chiark.greenend.org.uk/~sgtatham/quasiblog/parsing/
+
 - **Language:**
   - If `foo` is a proc, then `proc.PARAMS` should refer to a struct representing
     the procs parameters. If we also support struct splatting, the following

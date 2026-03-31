@@ -102,6 +102,12 @@ inline std::string operator + (std::string str, std::string_view view)
 	return str;
 }
 
+inline std::string operator + (std::string_view view, std::string str)
+{
+	str.insert(str.begin(), view.begin(), view.end());
+	return str;
+}
+
 template<typename RangeT, typename FuncT = std::identity>
 struct RangeFmt
 {

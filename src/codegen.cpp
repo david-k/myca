@@ -2,11 +2,18 @@
 
 #include "semantics.hpp"
 #include <ranges>
+#include <sstream>
 #include <string>
 
 
 //==============================================================================
-static void generate_c(Type const &type, CBackend &backend);
+enum class TypeUsage
+{
+	NORMAL,
+	RETURN_TYPE,
+};
+
+static string generate_c_type(Type const &type, TypeUsage usage = TypeUsage::NORMAL);
 
 CBackend::CBackend(std::ostream &os) :
 	os(os)
@@ -79,11 +86,6 @@ CBackend& CBackend::operator << (LineEnd_Tag)
 	return *this;
 }
 
-CBackend& CBackend::operator << (Type const &type)
-{
-	generate_c(type, *this);
-	return *this;
-}
 
 
 //==============================================================================
@@ -147,14 +149,13 @@ void generate_c_struct_def(CStruct const &cstruct, CBackend &backend)
 
 	for(CMember const &member: cstruct.members)
 	{
-		backend << member.type << " ";
-		member.kind | match
+		string member_name = member.kind | match
 		{
-			[&](CMemberNormal const &m) { backend << m.name; },
-			[&](CMemberConst const &m) { backend << m.name; },
-			[&](CMemberPadding) { backend << backend.new_tmp_var(); },
+			[&](CMemberNormal const &m) { return m.name; },
+			[&](CMemberConst const &m) { return m.name; },
+			[&](CMemberPadding) { return backend.new_tmp_var(); },
 		};
-		backend << ";" << LineEnd;
+		backend << generate_c_type(member.type) << " " << member_name << ";" << LineEnd;
 	}
 
 	if(cstruct.members.empty())
@@ -171,29 +172,61 @@ void generate_c_struct_def(CStruct const &cstruct, CBackend &backend)
 
 // All mangled Myca symbols start with '_Y'.
 //
-// <symbol> ::= '_Y' <kind> <path-segment>+
+// <symbol> ::= '_Y' <kind> <path>
 //
 // <kind> ::= 'T'  // type
 //          | 'F'  // Procedure
 //          | 'C'  // constructor
 //
+// <path> ::= <path-segment>+
 // <path-segment> ::= <id-segment> | <type-segment>
 //
 // <id-segment> ::= <num>                   // length of the following identifier
 //                  <identifier>
-//                  ('G' <path-segment>+ 'E')*  // Generic type arguments start with 'G' and ends with 'E'
+//                  ('G' <generic-arg>+ 'E')*  // Generic type arguments start with 'G' and ends with 'E'
 //
-// <type-segment> ::= 'P' 'm'? <path-segment>  // Pointer
-//                  | 'M' 'm'? <path-segment>  // Many pointer
-//                  | 'U' <path-segment>+ 'E'  // Union type
+// <generic-arg> ::= <type-segment> | <generic-val>
+//
+// <generic-val> ::= 'V' <num> // Integer value
+//
+// <type-segment> ::= 'P' ('c' | 'm') <path-segment>  // Pointer
+//                  | 'M' ('c' | 'm') <path-segment>  // Many pointer
+//                  | 'A' <num> <path-segment>  // Array
+//                  | 'U' <path> 'E'  // Union type
 
 static string mangle_type_segment(Type const &type);
+
+static string mangle_generic_expr_arg(Expr const &expr)
+{
+	return expr | match
+	{
+		[&](IntLiteralExpr const &e)
+		{
+			std::stringstream ss;
+			ss << e.value;
+			return "V" + ss.str();
+		},
+		[](auto const&) -> string
+		{
+			assert(!"mangle_generic_arg: Invalid value arg");
+		},
+	};
+}
+
+static string mangle_generic_arg(GenericArg const &arg)
+{
+	return arg | match
+	{
+		[&](Type const &t) { return mangle_type_segment(t); },
+		[&](Expr const &e) { return mangle_generic_expr_arg(e); },
+	};
+}
 
 static string mangle_type_args(TypeArgList const &types)
 {
 	string mangled;
-	for(Type const &arg: *types.args)
-		mangled += 'G' + mangle_type_segment(arg) + 'E';
+	for(GenericArg const &arg: *types.args)
+		mangled += 'G' + mangle_generic_arg(arg) + 'E';
 
 	return mangled;
 }
@@ -254,10 +287,14 @@ static string mangle_type_segment(Type const &type)
 		[&](PointerType const &t)
 		{
 			string mangled = t.kind == PointerType::SINGLE ? "P" : "M";
-			if(t.mutability == IsMutable::YES)
-				mangled += "m";
+			if(t.mutability == IsMutable::YES) mangled += "m";
+			else mangled += "c";
 
 			return mangled + mangle_type_segment(*t.pointee);
+		},
+		[&](ArrayType const &t)
+		{
+			return "A" + std::to_string(t.count()) + mangle_type_segment(*t.element);
 		},
 		[&](StructType const &struct_)
 		{
@@ -303,12 +340,12 @@ static string mangle_procedure(ProcInstance const *proc)
 //==============================================================================
 // Types
 //==============================================================================
-static string generate_c_to_str(BuiltinTypeDef const &type)
+static string_view generate_c_to_str(BuiltinTypeDef const &type)
 {
 	switch(type)
 	{
 		case BuiltinTypeDef::NEVER: return "Never";
-		case BuiltinTypeDef::UNIT: return "Unit";
+		case BuiltinTypeDef::UNIT: return "char";
 		case BuiltinTypeDef::BOOL: return "bool";
 		case BuiltinTypeDef::I8: return "int8_t";
 		case BuiltinTypeDef::U8: return "uint8_t";
@@ -321,38 +358,48 @@ static string generate_c_to_str(BuiltinTypeDef const &type)
 	UNREACHABLE;
 }
 
-static string generate_c_to_str(Type const &type)
+static string generate_c_type(Type const &type, TypeUsage usage)
 {
 	return type | match
 	{
-		[&](BuiltinType const &t) { return generate_c_to_str(t.builtin); },
+		[&](BuiltinType const &t)
+		{
+			if(usage == TypeUsage::RETURN_TYPE and t.builtin == BuiltinTypeDef::UNIT)
+				return string("void");
+			else
+				return string(generate_c_to_str(t.builtin));
+		},
 		[&](VarType const&) -> string { assert(!"generate_c_to_str: VarType"); },
 		[&](PointerType const &t)
 		{
-			string type_str = generate_c_to_str(*t.pointee);
+			string result = generate_c_type(*t.pointee, usage);
 			if(t.mutability == IsMutable::NO)
-				type_str += " const";
+				result += " const";
 
-			return type_str + "*";
+			return result + "*";
+		},
+		[&](ArrayType const&)
+		{
+			return "struct " + mangle_type(type);
 		},
 		[&](StructType const &t)
 		{
 			if(t.inst->struct_()->name == "c_void")
 				return "void"s;
-
-			if(t.inst->struct_()->name == "c_char")
+			else if(t.inst->struct_()->name == "c_char")
 				return "char"s;
-
-			if(Type const *pointee = is_optional_ptr(t.inst))
-				return generate_c_to_str(*pointee);
-
-			if(t.inst->struct_()->is_extern)
+			else if(Type const *pointee = is_optional_ptr(t.inst))
+				return generate_c_type(*pointee, usage);
+			else if(t.inst->struct_()->is_extern)
 				return string(t.inst->struct_()->name);
-
-			return "struct " + mangle_type(type);
+			else
+				return "struct " + mangle_type(type);
 		},
 		[&](ProcType const&) -> string { assert(!"generate_c_to_str: ProcType: TODO"); },
-		[&](UnionType const&) -> string { return "struct " + mangle_type(type); },
+		[&](UnionType const&)
+		{
+			return "struct " + mangle_type(type);
+		},
 
 		[&](KnownIntType const&) -> string { assert(!"generate_c_to_str: KnownIntType"); },
 		[&](ProcTypeUnresolved const&) -> string { assert(!"generate_c_to_str: ProcTypeUnresolved"); },
@@ -362,16 +409,16 @@ static string generate_c_to_str(Type const &type)
 	};
 }
 
-static void generate_c(Type const &type, CBackend &backend)
-{
-	backend << generate_c_to_str(type);
-}
-
 
 //==============================================================================
 // Expressions
 //==============================================================================
-string generate_c(Expr const &expr, CBackend &backend, bool need_result = true);
+enum class IsExprUsed
+{
+	YES,
+	NO,
+};
+string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage = IsExprUsed::YES);
 void generate_c(Stmt const &stmt, CBackend &backend);
 void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type const &rhs_type, CBackend &backend);
 
@@ -406,22 +453,21 @@ string generate_c_cast(Type const &target_type, string const &expr, Type const &
 	if(equiv(target_type, expr_type) || expr == "NULL")
 		return expr;
 
-	string type_val = generate_c_to_str(target_type);
-
+	string type_val = generate_c_type(target_type);
 	if(is<StructType>(target_type) and not is_optional_ptr(target_type))
 		return "(*(" + type_val + "*)&(" + expr + "))";
 	else
 		return "((" + type_val + ")(" + expr + "))";
 }
 
-string generate_c_cast(Type const &target_type, Expr const &expr, CBackend &backend)
+string generate_c_cast(Type const &target_type, Expr const &expr, CBackend &backend, IsExprUsed usage = IsExprUsed::YES)
 {
-	return generate_c_cast(target_type, generate_c(expr, backend), *type_of(expr));
+	return generate_c_cast(target_type, generate_c(expr, backend, usage), *type_of(expr));
 }
 
-string generate_c(Expr const &expr, CBackend &backend, bool need_result)
+string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
 {
-	return expr | match
+	string result = expr | match
 	{
 		[&](IntLiteralExpr const &e)
 		{
@@ -440,7 +486,7 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 					// However, in Myca, we define `c_char` to be equal to either `i8` (aka `signed
 					// char`) or `u8` (aka `unsigned char`).
 					// Thus, we need to insert a cast to keep the C compiler happy.
-					return "(" + generate_c_to_str(*e.type) + ")\""s + e.value + '"';
+					return "(" + generate_c_type(*e.type) + ")\""s + e.value + '"';
 			}
 
 			UNREACHABLE;
@@ -504,9 +550,12 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](IndexExpr const &e)
 		{
-			string ptr_val = generate_c(*e.addr, backend);
+			string indexable_val = generate_c(*e.addr, backend);
 			string idx_val = generate_c(*e.index, backend);
-			return "(" + ptr_val + ")[" + idx_val + "]";
+			if(is<ArrayType>(*type_of(*e.addr)))
+				return "(" + indexable_val + ").elements[" + idx_val + "]";
+			else
+				return "(" + indexable_val + ")[" + idx_val + "]";
 		},
 		[&](MemberAccessExpr const &e)
 		{
@@ -569,10 +618,13 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 			// Create a variable to store the procedure's return value
 			Type const &ret_type = *e.type;
 			string result_var;
-			if(!equiv(ret_type, BuiltinType(UNKNOWN_TOKEN_RANGE, BuiltinTypeDef::UNIT)) && need_result)
+			if(usage == IsExprUsed::YES)
 			{
 				result_var = backend.new_tmp_var();
-				backend << ret_type << " " << result_var << " = ";
+				if(is_builtin_type(ret_type, BuiltinTypeDef::UNIT))
+					backend << generate_c_type(ret_type) << " " << result_var << " = 0;" << LineEnd;
+				else
+					backend << generate_c_type(ret_type) << " " << result_var << " = ";
 			}
 
 			// Make the call
@@ -585,14 +637,14 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 		},
 		[&](SizeOfExpr const &e)
 		{
-			return "sizeof(" + generate_c_to_str(*e.subject) + ")";
+			return "sizeof(" + generate_c_type(*e.subject) + ")";
 		},
 		[&](MakeExpr const &e)
 		{
 			string addr_val = generate_c(*e.addr, backend);
 
 			string result_var = backend.new_tmp_var();
-			backend << *e.type << " " << result_var << " = " << generate_c_cast(*e.type, addr_val, *type_of(*e.addr)) << ";" << LineEnd;
+			backend << generate_c_type(*e.type) << " " << result_var << " = " << generate_c_cast(*e.type, addr_val, *type_of(*e.addr)) << ";" << LineEnd;
 
 			string init_val = generate_c(*e.init, backend);
 			backend << "*" << result_var << " = " << init_val << ";" << LineEnd;
@@ -612,9 +664,12 @@ string generate_c(Expr const &expr, CBackend &backend, bool need_result)
 
 			return union_var;
 		},
+		[&](GenericVarExpr const&) -> string { assert(!"generate_c: GenericVarExpr"); },
 		[&](Path const&) -> string { assert(!"generate_c: Path"); },
 		[&](InlineStructType const&) -> string { assert(!"generate_c: InlineStructType"); },
 	};
+
+	return result;
 }
 
 
@@ -628,7 +683,7 @@ void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type
 		[&](VarPattern const &p)
 		{
 			string expr_str = generate_c_cast(*p.type, rhs_expr, rhs_type);
-			backend << *p.type << " " << p.var->name << " = " << expr_str << ";" << LineEnd;
+			backend << generate_c_type(*p.type) << " " << p.var->name << " = " << expr_str << ";" << LineEnd;
 		},
 		[&](DerefPattern const &p)
 		{
@@ -710,12 +765,12 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 			else
 			{
 				Var *var = std::get<VarPattern>(*s.lhs).var;
-				backend << *var->type << " " << var->name << ";" << LineEnd;
+				backend << generate_c_type(*var->type) << " " << var->name << ";" << LineEnd;
 			}
 		},
 		[&](ExprStmt const &s)
 		{
-			string expr_str = generate_c(*s.expr, backend, false);
+			string expr_str = generate_c(*s.expr, backend, IsExprUsed::NO);
 			if(expr_str.length())
 				backend << expr_str << ";" << LineEnd;
 		},
@@ -735,8 +790,16 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 			if(s.ret_expr)
 			{
 				Type const *ret_type = backend.proc()->get_proc_type().inst->ret;
-				string ret_val = generate_c_cast(*ret_type, *s.ret_expr, backend);
-				backend << "return " << ret_val << ";" << LineEnd;
+				if(is_builtin_type(*ret_type, BuiltinTypeDef::UNIT))
+				{
+					generate_c(*s.ret_expr, backend, IsExprUsed::NO);
+					backend << "return;" << LineEnd;
+				}
+				else
+				{
+					string ret_val = generate_c_cast(*ret_type, *s.ret_expr, backend);
+					backend << "return " << ret_val << ";" << LineEnd;
+				}
 			}
 			else
 				backend << "return;" << LineEnd;
@@ -922,7 +985,7 @@ void generate_c_struct_methods(CStruct const &cstruct, CBackend &backend)
 					if(first) first = false;
 					else backend << ", ";
 
-					backend << member.type << " " << m.name;
+					backend << generate_c_type(member.type) << " " << m.name;
 				},
 				[&](CMemberConst const&) {},
 				[&](CMemberPadding) {},
@@ -968,9 +1031,26 @@ void generate_c_union_type(UnionInstance *union_, CBackend &backend)
 		backend << "{" << LineEnd;
 		backend.increase_indent();
 			for(auto const &[idx, alt]: union_->alternatives() | std::views::enumerate)
-				backend << *alt << " " << "__myca_alt" << idx << ";" << LineEnd;
+			{
+				string alt_name = "__myca_alt" + std::to_string(idx);
+				backend << generate_c_type(*alt) << " " << alt_name << ";" << LineEnd;
+			}
 		backend.decrease_indent();
 		backend << "};" << LineEnd;
+	backend.decrease_indent();
+	backend << "};" << LineEnd;
+}
+
+
+//==============================================================================
+// Arrays
+//==============================================================================
+void generate_c_array_type(ArrayType const &array, CBackend &backend)
+{
+	backend << "struct " << mangle_type(array) << LineEnd;
+	backend << "{" << LineEnd;
+	backend.increase_indent();
+		backend << generate_c_type(*array.element) << " elements[" << array.count() << "];" << LineEnd;
 	backend.decrease_indent();
 	backend << "};" << LineEnd;
 }
@@ -982,66 +1062,213 @@ void generate_c_union_type(UnionInstance *union_, CBackend &backend)
 void generate_c_proc_sig(ProcInstance *proc, CBackend &backend)
 {
 	ProcTypeInstance const *proc_type = proc->get_proc_type().inst;
-	Type const *ret_type = proc_type->ret;
-	if(is_builtin_type(*ret_type, BuiltinTypeDef::UNIT))
-		backend << "void";
-	else
-		backend << *ret_type;
-
-	backend << " " << mangle_procedure(proc) << "(";
+	backend << generate_c_type(*proc_type->ret, TypeUsage::RETURN_TYPE) << " ";
+	backend << mangle_procedure(proc) << "(";
 	for(size_t i = 0; i < proc_type->params->count; ++i)
 	{
 		if(i != 0) backend << ", ";
 
 		string_view param_name = proc->get_proc_type().param_name_at(i);
-		backend << proc_type->params->items[i] << " " << param_name;
+		backend << generate_c_type(proc_type->params->items[i]) << " " << param_name;
 	}
 	backend << ")";
 }
 
 
 //==============================================================================
+// Gathering array types
+//==============================================================================
+using TypeDependency = variant<StructInstance*, UnionInstance*, ArrayType>;
+
+bool operator == (TypeDependency const &a, TypeDependency const &b)
+{
+	if(a.index() != b.index())
+		return false;
+
+	return a | match
+	{
+		[&](StructInstance *inst) { return inst == std::get<StructInstance*>(b); },
+		[&](UnionInstance *inst) { return inst == std::get<UnionInstance*>(b); },
+		[&](ArrayType const &array) { return equiv(Type(array), std::get<ArrayType>(b)); },
+	};
+}
+
+template<>
+struct std::hash<TypeDependency>
+{
+	bool operator () (TypeDependency const &d) const
+	{
+		size_t h = compute_hash(d.index());
+		d | match
+		{
+			[&](StructInstance *inst) { combine_hashes(h, compute_hash(inst)); },
+			[&](UnionInstance *inst) { combine_hashes(h, compute_hash(inst)); },
+			[&](ArrayType const &array) { combine_hashes(h, compute_hash(Type(array))); },
+		};
+
+		return h;
+	}
+};
+
+
+void gather_array_types(Type const &type, unordered_set<TypeDependency> &result)
+{
+	type | match
+	{
+		[&](this auto &self, ArrayType const &t)
+		{
+			result.insert(t);
+			visit_child_types(t, self);
+		},
+		[](this auto &self, auto const &t) { visit_child_types(t, self); },
+	};
+}
+
+void gather_array_types(Expr const &expr, unordered_set<TypeDependency> &result)
+{
+	traverse(expr, match
+	{
+		[&](auto const &e)
+		{
+			gather_array_types(*e.type, result);
+		},
+		[&](Path const&) {}, // Has no type
+	});
+}
+
+void gather_array_types(Pattern const &pattern, unordered_set<TypeDependency> &result)
+{
+	traverse(pattern, match
+	{
+		[&](auto const &p, Type const *NULLABLE provided_type)
+		{
+			gather_array_types(*p.type, result);
+			if(provided_type)
+				gather_array_types(*provided_type, result);
+		},
+		[&](VarPatternUnresolved const&, Type const *NULLABLE) {}, // Has no type
+	});
+}
+
+void gather_array_types(Stmt const &stmt, unordered_set<TypeDependency> &result)
+{
+	traverse(stmt, match
+	{
+		[&](LetStmt const &s)
+		{
+			gather_array_types(*s.lhs, result);
+			if(s.init_expr)
+				gather_array_types(*s.init_expr, result);
+		},
+		[&](ExprStmt const &s)
+		{
+			gather_array_types(*s.expr, result);
+		},
+		[&](BlockStmt const&) {},
+		[&](ReturnStmt const &s)
+		{
+			if(s.ret_expr)
+				gather_array_types(*s.ret_expr, result);
+		},
+		[&](IfStmt const &s)
+		{
+			gather_array_types(*s.condition, result);
+		},
+		[&](WhileStmt const &s)
+		{
+			gather_array_types(*s.condition, result);
+		},
+		[&](DeclStmt const&) {},
+		[&](MatchStmt const &s)
+		{
+			gather_array_types(*s.expr, result);
+			for(MatchArm const &arm: *s.arms)
+				gather_array_types(arm.capture, result);
+		},
+	});
+}
+
+
+//==============================================================================
 // Whole module
 //==============================================================================
+static TypeDependency to_type_dependency(TypeInstance inst)
+{
+	return inst | match
+	{
+		[](StructInstance *s) { return TypeDependency(s); },
+		[](UnionInstance *s) { return TypeDependency(s); },
+	};
+}
+
 void _sort_types_by_deps(
-	TypeInstance type,
-	vector<TypeInstance> &result,
-	unordered_set<TypeInstance> &visited,
+	TypeDependency const &type,
+	vector<TypeDependency> &result,
+	unordered_set<TypeDependency> &visited,
 	Module &mod
 )
 {
-	// We assume the semantic analysis would already have detected any dependency cycles
+	// Semantic analysis would have detected any dependency cycles
 	auto res = visited.insert(type);
 	if(!res.second)
 		return;
 
 	type | match
 	{
-		[&](StructInstance const *inst)
+		[&](StructInstance *inst)
 		{
 			while(inst)
 			{
 				for(TypeInstance dep: inst->own_type_deps())
-					_sort_types_by_deps(dep, result, visited, mod);
+					_sort_types_by_deps(to_type_dependency(dep), result, visited, mod);
 
 				inst = inst->decl_parent() ? inst->decl_parent()->try_as_struct() : nullptr;
 			}
 		},
-		[&](UnionInstance const *inst)
+		[&](UnionInstance *inst)
 		{
 			for(TypeInstance dep: inst->type_deps())
-				_sort_types_by_deps(dep, result, visited, mod);
+				_sort_types_by_deps(to_type_dependency(dep), result, visited, mod);
 		},
+		[&](ArrayType const &array)
+		{
+			Type(array) | match
+			{
+				[&](this auto &self, StructType const &t)
+				{
+					_sort_types_by_deps(t.inst, result, visited, mod);
+					visit_child_types(t, self);
+				},
+				[&](this auto &self, UnionType const &t)
+				{
+					_sort_types_by_deps(t.inst, result, visited, mod);
+					visit_child_types(t, self);
+				},
+				[&](this auto &self, ArrayType const &t)
+				{
+					_sort_types_by_deps(t, result, visited, mod);
+					visit_child_types(t, self);
+				},
+				[&](PointerType const&)
+				{
+					// Do not traverse into pointer types
+				},
+				[&](this auto &self, auto const &t)
+				{
+					visit_child_types(t, self);
+				},
+			};
+		}
 	};
 
 	result.push_back(type);
 }
 
-vector<TypeInstance> sort_types_by_deps(vector<TypeInstance> const &types, Module &mod)
+vector<TypeDependency> sort_types_by_deps(unordered_set<TypeDependency> const &types, Module &mod)
 {
-	vector<TypeInstance> result;
-	unordered_set<TypeInstance> visited;
-	for(TypeInstance type: types)
+	vector<TypeDependency> result;
+	unordered_set<TypeDependency> visited;
+	for(TypeDependency const &type: types)
 		_sort_types_by_deps(type, result, visited, mod);
 
 	return result;
@@ -1066,49 +1293,62 @@ struct ConcreteProcInstance
 
 void generate_c(Module &mod, CBackend &backend)
 {
+	// ProcInstances are only created for procedures that are actually referenced in the code. But
+	// we want to generate code for all non-generic procedures (especially for main()), so we
+	// explicitly create ProcInstances if they are missing.
 	for(TopLevelItem &item: to_range(mod.items.list()))
 	{
-		item | match
+		if(ProcItem *proc = std::get_if<ProcItem>(&item))
 		{
-			[&](ProcItem &proc)
-			{
-				// ProcInstances are only created for procedures that are actually referenced in the
-				// code. But we want to generate code for all procedures (especially for main()), so
-				// we explicitly create ProcInstances if they are missing.
-				if(proc.body and proc.type_params->count == 0)
-					mod.sema->insts.get_proc_instance(&proc, nullptr);
-			},
-			[&](StructItem&) {},
-			[&](AliasItem&) {},
-		};
+			if(proc->body and proc->type_params->count == 0)
+				mod.sema->insts.get_proc_instance(proc, nullptr);
+		}
 	}
 
-	// Gather all StructInstances and ProcInstances
-	vector<TypeInstance> types;
+	// Gather all StructInstances, UnionInstances, ProcInstances, and ArrayTypes that are used in
+	// the program
+	unordered_set<TypeDependency> types;
 	vector<ConcreteProcInstance> procs;
 	for_each_instance(mod.sema->insts, match
 	{
 		[&](StructInstance *struct_)
 		{
 			if(struct_->is_concrete())
-				types.push_back(struct_);
+			{
+				types.insert(struct_);
+				for(Parameter const &m: struct_->own_var_members())
+					gather_array_types(*m.type, types);
+			}
 		},
 		[&](UnionInstance *union_)
 		{
+			union_->compute_properties();
 			if(union_->is_concrete())
-				types.push_back(union_);
+			{
+				types.insert(union_);
+				for(Type const *alt: union_->alternatives())
+					gather_array_types(*alt, types);
+			}
 		},
 		[&](ProcInstance *proc)
 		{
 			if(proc->is_concrete())
-				procs.push_back(ConcreteProcInstance(proc));
+			{
+				ConcreteProcInstance inst(proc);
+				gather_array_types(proc->get_proc_type(), types);
+				if(inst.body)
+					gather_array_types(*inst.body, types);
+
+				procs.push_back(std::move(inst));
+			}
 		},
+		[&](ProcTypeInstance*) {}
 	});
 
 	// Generate type definitions
-	vector<TypeInstance> sorted_types = sort_types_by_deps(types, mod);
+	vector<TypeDependency> sorted_types = sort_types_by_deps(types, mod);
 	unordered_map<StructInstance*, CStruct> cstructs;
-	for(TypeInstance type: sorted_types)
+	for(TypeDependency const &type: sorted_types)
 	{
 		type | match
 		{
@@ -1124,12 +1364,16 @@ void generate_c(Module &mod, CBackend &backend)
 			{
 				generate_c_union_type(inst, backend);
 			},
+			[&](ArrayType const &array)
+			{
+				generate_c_array_type(array, backend);
+			},
 		};
 	}
 
 	// Generate internal functions that are associated with a type (at the moment, this only
 	// consists of constructors for structs)
-	for(TypeInstance type: sorted_types)
+	for(TypeDependency const &type: sorted_types)
 	{
 		type | match
 		{
@@ -1139,6 +1383,7 @@ void generate_c(Module &mod, CBackend &backend)
 				backend << LineEnd;
 			},
 			[&](UnionInstance const*) {},
+			[&](ArrayType const&) {},
 		};
 	}
 

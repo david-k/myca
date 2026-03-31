@@ -1,0 +1,1 @@
+|6:2| error: Inferred type does not match specified type in let statement: Incompatible types 4 and 5

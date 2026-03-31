@@ -1,0 +1,12 @@
+proc uninitialized'(T)() -> T
+{
+}
+
+proc main() -> i32
+{
+    let mut a: [5]i8 = uninitialized'([5]i8)();
+    ((a)^ = 23);
+    let mut b: [5]i8 = a;
+    ((b)^ = 99);
+    return ((a)^ + (b)^);
+}

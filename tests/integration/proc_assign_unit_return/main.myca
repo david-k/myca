@@ -1,0 +1,12 @@
+proc foo() {}
+
+proc bar()
+{
+	return foo();
+}
+
+proc main() -> i32
+{
+	let a = bar();
+	return 0;
+}

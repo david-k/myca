@@ -1,0 +1,30 @@
+proc uninitialized'(T)() -> T
+{
+}
+
+proc array_sum'(let N: usize)(arr: ^[N]i32) -> i32
+{
+    let mut sum: i32 = 0;
+    let mut i: usize = 0;
+    while (i < N)
+    {
+        (sum = (sum + ((arr)^)^));
+        (i = (i + 1));
+    }
+    return sum;
+}
+
+proc main() -> i32
+{
+    let mut a: [5]i32 = uninitialized'([5]i32)();
+    ((a)^ = 1);
+    ((a)^ = 2);
+    ((a)^ = 3);
+    ((a)^ = 4);
+    ((a)^ = 5);
+    let mut b: [3]i32 = uninitialized'([3]i32)();
+    ((b)^ = 23);
+    ((b)^ = 42);
+    ((b)^ = 9);
+    return (array_sum'(5)(&(a)) + array_sum'(3)(&(b)));
+}

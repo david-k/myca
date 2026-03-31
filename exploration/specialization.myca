@@ -1,0 +1,69 @@
+// In contrast to C++, where a template specialization is completely unrelated to the
+// non-specialized version, specializations in Myca must comply with the public interface of the
+// base case. This ensures that we can still typecheck generic functions without instantiating them.
+// However, the internal memory representation of a specialization may be completely different from
+// the base case. allowing for example Option'(^T) to use nullptr for None.
+//
+// Procedures may be specialized as well, as long as their signature is a specialization of the base
+// case.
+
+struct Vec'(N:usize) {
+	el: [N]f32
+}
+
+// Specialization for 3-dimensial vectors
+// A specialization must satisfy the public interface of the base case. Thus, Vec'3 must
+// define a member `el: [3]f32`.
+struct Vec'3 {
+	// Not sure how to best create aliases `x`, `y` and `z` for `el[0]`, `el[1]` and `el[2]`
+	// Via a union?
+	union {
+		el: [3]f32,
+		struct { x: f32, y: f32, z: f32 },
+	}
+
+	// Some special syntax? (Looks neat, but I can't come up with any other usecase, and adding it
+	// just for vectors seems excessive)
+	alias x = el[0],
+	alias y = el[1],
+	alias z = el[2],
+
+	swizzles x, y, z => el[0], el[1], el[2] {
+		Vec'2(_,_),
+		Vec'3(_,_,_),
+		Vec'4(_,_,_,_),
+	}
+
+	swizzles {
+		x => el[0],
+		y => el[1],
+		z => el[2],
+		$0, $1 => Vec'2($0, $1),
+		$0, $1, $2 => Vec'3($0, $1, $2),
+		$0, $1, $2, $3 => Vec'4($0, $1, $2, $3),
+	}
+
+	swizzles {
+		x => el[0],
+		y => el[1],
+		z => el[2],
+		$elements[N] => Vec'N($elements...),
+	}
+}
+
+
+// Define Vec'N as a distinct type such that it can be explicitly converted to [N]f32 and vice versa
+typedef Vec'(N:usize) <:> [N]f32;
+
+// Specialization for 3-dimensial vectors
+specialization Vec'3 {
+	alias x = self[0],
+	alias y = self[1],
+	alias z = self[2],
+
+	swizzles xyz {
+		Vec'2($0, $1),
+		Vec'3($0, $1, $2),
+		Vec'4($0, $1, $2, $3),
+	}
+}

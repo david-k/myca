@@ -119,15 +119,11 @@ struct SourceSpan
 struct Token
 {
 	Lexeme kind;
-
-	union
-	{
-		uint64_t int_val{};
-		string_view str_val;
-	} value{};
-
+	string_view text;
 	SourceSpan span;
 };
+
+static_assert(sizeof(Token) == 56);
 
 string_view str(Lexeme tok);
 inline string str(SourceLocation loc) { return std::to_string(loc.line) + ":" + std::to_string(loc.col); }
@@ -152,33 +148,33 @@ class ProcInstance;
 class UnionInstance;
 struct StructItem;
 struct ProcTypeInstance;
-struct TypeParameter;
+struct GenericParameter;
+struct DeductionVarDef;
 struct Expr;
 
-struct TypeParameterVar
+
+struct GenericParameterVar
 {
-	TokenRange range;
-	TypeParameter const *def;
+	GenericParameter const *def;
 };
 
-struct TypeDeductionVar
+struct GenericDeductionVar
 {
-	uint32_t id;
-
-	friend bool operator == (TypeDeductionVar, TypeDeductionVar) = default;
+	DeductionVarDef const *def;
 };
 
-using VarType = variant<TypeParameterVar, TypeDeductionVar>;
+using GenericVar = variant<GenericParameterVar, GenericDeductionVar>;
 
 using Type = variant
 <
 	struct BuiltinType,
 	struct KnownIntType,
 	struct PointerType,
+	struct ArrayType,
 	struct ProcType,
 	struct StructType,
 	struct UnionType,
-	VarType,
+	struct VarType,
 
 	// Unresolved types
 	struct Path,
@@ -212,10 +208,12 @@ struct KnownIntType
 	Int128 high;
 };
 
+struct GenericArg;
+
 struct Path
 {
 	TokenRange range;
-	FixedArray<Type> *type_args = nullptr;
+	FixedArray<GenericArg> *type_args = nullptr;
 	Path *NULLABLE child = nullptr;
 };
 
@@ -237,6 +235,15 @@ struct PointerType
 	Type *pointee;
 	Kind kind;
 	IsMutable mutability;
+};
+
+struct ArrayType
+{
+	size_t count() const;
+
+	TokenRange range;
+	Type *element;
+	Expr *NULLABLE count_arg = nullptr; // If null, the count should be deduced
 };
 
 struct UnionTypeUnresolved
@@ -307,7 +314,6 @@ struct ProcType
 	DefaultValueExpr param_default_value_at(size_t idx) const;
 };
 
-
 struct StructType
 {
 	TokenRange range;
@@ -320,107 +326,32 @@ struct InlineStructType
 	StructItem *struct_;
 };
 
+struct VarType
+{
+	TokenRange range;
+	GenericVar var;
+};
+
+struct GenericTypeParameter {};
+struct GenericValueParameter { Type *type; };
+struct GenericParameter
+{
+	TokenRange range;
+	string_view name;
+	variant<GenericTypeParameter, GenericValueParameter> kind;
+};
+
 static_assert(sizeof(Type) == 48, "sizeof(Type) is getting larger...");
 
 string_view name_of(Path const &path, Module const *mod);
+void print(GenericArg const &g, Module const &mod, std::ostream &os);
 void print(Path const &path, Module const &mod, std::ostream &os);
-void print(VarType const &var, std::ostream &os);
+void print(GenericVar const &var, std::ostream &os);
 void print(Type const &type, Module const &mod, std::ostream &os);
 string str(Type const &type, Module const &mod);
+string str(GenericArg const &a, Module const &mod);
 TokenRange token_range_of(Type const &type);
-
-
-template<>
-struct std::hash<TypeDeductionVar>
-{
-	size_t operator () (TypeDeductionVar var) const
-	{
-		return compute_hash(var.id);
-	}
-};
-
-template<>
-struct std::hash<::VarType>
-{
-	size_t operator () (::VarType var) const
-	{
-		size_t h = ::compute_hash(var.index());
-		var | ::match
-		{
-			[&](TypeParameterVar v)
-			{
-				::combine_hashes(h, ::compute_hash(v.def));
-			},
-			[&](TypeDeductionVar v)
-			{
-				::combine_hashes(h, ::compute_hash(v));
-			},
-		};
-
-		return h;
-	}
-};
-
-inline bool operator == (VarType const &a, VarType const &b)
-{
-	if(a.index() != b.index())
-		return false;
-
-	return a | match
-	{
-		[&](TypeParameterVar const &p) { return p.def == std::get<TypeParameterVar>(b).def; },
-		[&](TypeDeductionVar const &d) { return d.id == std::get<TypeDeductionVar>(b).id; },
-	};
-}
-
-template<>
-struct std::hash<Type>
-{
-	size_t operator () (Type const &type) const
-	{
-		size_t h = compute_hash(type.index());
-		type | match
-		{
-			[&](BuiltinType const &t)
-			{
-				::combine_hashes(h, compute_hash((int)t.builtin));
-			},
-			[&](KnownIntType const &t)
-			{
-				::combine_hashes(h, compute_hash(t.low));
-				::combine_hashes(h, compute_hash(t.high));
-			},
-			[&](VarType const &t)
-			{
-				::combine_hashes(h, compute_hash(t));
-			},
-			[&](PointerType const &t)
-			{
-				::combine_hashes(h, compute_hash((int)t.kind));
-				::combine_hashes(h, compute_hash((int)t.mutability));
-				::combine_hashes(h, compute_hash(*t.pointee));
-			},
-			[&](StructType const &t)
-			{
-				::combine_hashes(h, compute_hash(t.inst));
-			},
-			[&](ProcType const &t)
-			{
-				::combine_hashes(h, compute_hash(t.inst));
-			},
-			[&](UnionType const &t)
-			{
-				::combine_hashes(h, compute_hash(t.inst));
-			},
-			[&](ProcTypeUnresolved const&) { assert(!"hash<Type>: ProcTypeUnresolved"); },
-			[&](UnionTypeUnresolved const&) { assert(!"hash<Type>: UnionTypeUnresolved"); },
-			[&](Path const&) { assert(!"hash<Type>: Path"); },
-			[&](InlineStructType const&) { assert(!"hash<Type>: InlineStructType"); },
-		};
-
-		return h;
-	}
-};
+TokenRange token_range_of(GenericArg const &arg);
 
 
 //--------------------------------------------------------------------
@@ -607,6 +538,15 @@ struct VarExpr
 	Type *NULLABLE type = nullptr;
 };
 
+struct GenericVarExpr
+{
+	TokenRange range;
+	GenericVar var;
+
+	Type *NULLABLE type = nullptr;
+};
+
+
 struct UnionInitExpr
 {
 	TokenRange range;
@@ -638,6 +578,7 @@ struct Expr : variant<
 	SizeOfExpr,
 	MakeExpr,
 	VarExpr,
+	GenericVarExpr,
 	UnionInitExpr,
 	Path
 >
@@ -654,12 +595,277 @@ struct Argument
 	int param_idx = 0; // Available after semantic analysis
 };
 
+struct GenericArg : variant<Type, Expr>
+{
+	using variant::variant;
+
+	Type& as_type() { return std::get<Type>(*this); }
+	Type const& as_type() const { return std::get<Type>(*this); }
+	Expr& as_expr() { return std::get<Expr>(*this); }
+	Expr const& as_expr() const { return std::get<Expr>(*this); }
+};
+
 void print(Expr const &expr, Module const &mod, std::ostream &os);
 Type* type_of(Expr &expr);
 Type const* type_of(Expr const &expr);
 TokenRange token_range_of(Expr const &expr);
 
 static_assert(sizeof(Expr) == 64, "sizeof(Expr) is getting larger...");
+
+template<typename Visitor>
+void traverse(Expr const &expr, Visitor &&visitor)
+{
+	expr | match
+	{
+		[&](IntLiteralExpr const &e)
+		{
+			visitor(e);
+		},
+		[&](BoolLiteralExpr const &e)
+		{
+			visitor(e);
+		},
+		[&](StringLiteralExpr const &e)
+		{
+			visitor(e);
+		},
+		[&](UnaryExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.sub, visitor);
+		},
+		[&](BinaryExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.left, visitor);
+			traverse(*e.right, visitor);
+		},
+		[&](AddressOfExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.object, visitor);
+		},
+		[&](DerefExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.addr, visitor);
+		},
+		[&](IndexExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.addr, visitor);
+			traverse(*e.index, visitor);
+		},
+		[&](MemberAccessExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.object, visitor);
+		},
+		[&](AssignmentExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.lhs, visitor);
+			traverse(*e.rhs, visitor);
+		},
+		[&](AsExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.src_expr, visitor);
+		},
+		[&](ConstructorExpr const &e)
+		{
+			visitor(e);
+		},
+		[&](ProcExpr const &e)
+		{
+			visitor(e);
+		},
+		[&](CallExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.callable, visitor);
+			for(Argument const &arg: *e.args)
+				traverse(arg.expr, visitor);
+		},
+		[&](SizeOfExpr const &e)
+		{
+			visitor(e);
+		},
+		[&](MakeExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.addr, visitor);
+			traverse(*e.init, visitor);
+		},
+		[&](Path const &e)
+		{
+			visitor(e);
+		},
+		[&](VarExpr const &e)
+		{
+			visitor(e);
+		},
+		[&](GenericVarExpr const &e)
+		{
+			visitor(e);
+		},
+		[&](UnionInitExpr const &e)
+		{
+			visitor(e);
+			traverse(*e.alt_expr, visitor);
+		},
+	};
+}
+
+inline size_t ArrayType::count() const {
+	assert(count_arg);
+	return std::get<IntLiteralExpr>(*count_arg).value;
+}
+
+
+template<>
+struct std::hash<GenericDeductionVar>
+{
+	size_t operator () (GenericDeductionVar var) const
+	{
+		return compute_hash(var.def);
+	}
+};
+
+template<>
+struct std::hash<GenericVar>
+{
+	size_t operator () (GenericVar var) const
+	{
+		size_t h = compute_hash(var.index());
+		var | match
+		{
+			[&](GenericParameterVar v)
+			{
+				combine_hashes(h, compute_hash(v.def));
+			},
+			[&](GenericDeductionVar v)
+			{
+				combine_hashes(h, compute_hash(v));
+			},
+		};
+
+		return h;
+	}
+};
+
+inline bool operator == (GenericVar const &a, GenericVar const &b)
+{
+	if(a.index() != b.index())
+		return false;
+
+	return a | match
+	{
+		[&](GenericParameterVar const &p) { return p.def == std::get<GenericParameterVar>(b).def; },
+		[&](GenericDeductionVar const &d) { return d.def == std::get<GenericDeductionVar>(b).def; },
+	};
+}
+
+template<>
+struct std::hash<Type>
+{
+	size_t operator () (Type const &type) const
+	{
+		size_t h = compute_hash(type.index());
+		type | match
+		{
+			[&](BuiltinType const &t)
+			{
+				combine_hashes(h, compute_hash((int)t.builtin));
+			},
+			[&](KnownIntType const &t)
+			{
+				combine_hashes(h, compute_hash(t.low));
+				combine_hashes(h, compute_hash(t.high));
+			},
+			[&](VarType const &t)
+			{
+				combine_hashes(h, compute_hash(t.var));
+			},
+			[&](PointerType const &t)
+			{
+				combine_hashes(h, compute_hash((int)t.kind));
+				combine_hashes(h, compute_hash((int)t.mutability));
+				combine_hashes(h, compute_hash(*t.pointee));
+			},
+			[&](ArrayType const &t)
+			{
+				combine_hashes(h, compute_hash(*t.element));
+				combine_hashes(h, compute_hash(bool(t.count_arg)));
+				if(t.count_arg)
+				{
+					combine_hashes(h, compute_hash(t.count_arg->index()));
+					*t.count_arg | match
+					{
+						[&](IntLiteralExpr const &e)
+						{
+							combine_hashes(h, compute_hash(e.value));
+						},
+						[&](auto const&)
+						{
+							assert("[TODO] hash(Type): ArrayType: count: Expr");
+						},
+					};
+				}
+			},
+			[&](StructType const &t)
+			{
+				combine_hashes(h, compute_hash(t.inst));
+			},
+			[&](ProcType const &t)
+			{
+				combine_hashes(h, compute_hash(t.inst));
+			},
+			[&](UnionType const &t)
+			{
+				combine_hashes(h, compute_hash(t.inst));
+			},
+			[&](ProcTypeUnresolved const&) { assert(!"hash<Type>: ProcTypeUnresolved"); },
+			[&](UnionTypeUnresolved const&) { assert(!"hash<Type>: UnionTypeUnresolved"); },
+			[&](Path const&) { assert(!"hash<Type>: Path"); },
+			[&](InlineStructType const&) { assert(!"hash<Type>: InlineStructType"); },
+		};
+
+		return h;
+	}
+};
+
+template<>
+struct std::hash<Expr>
+{
+	size_t operator () (Expr const &expr) const
+	{
+		size_t h = compute_hash(expr.index());
+		traverse(expr, match
+		{
+			[&](IntLiteralExpr e)
+			{
+				combine_hashes(h, compute_hash(e.value));
+			},
+			[&](BinaryExpr const &e)
+			{
+				combine_hashes(h, compute_hash((int)e.op));
+				combine_hashes(h, compute_hash(*e.left));
+				combine_hashes(h, compute_hash(*e.right));
+			},
+			[&](GenericVarExpr const &e)
+			{
+				combine_hashes(h, compute_hash(e.var));
+			},
+			[&](const auto&)
+			{
+				assert(!"[TODO] hash<Expr>");
+			},
+		});
+
+		return h;
+	}
+};
 
 
 //--------------------------------------------------------------------
@@ -852,18 +1058,12 @@ struct Parameter
 	DefaultValueExpr default_value;
 };
 
-struct TypeParameter
-{
-	TokenRange range;
-	string_view name;
-};
-
 struct ProcItem
 {
 	TokenRange range;
 	string_view name;
 	string_view receiver_name; // May be empty
-	FixedArray<TypeParameter> *type_params = nullptr;
+	FixedArray<GenericParameter> *type_params = nullptr;
 	FixedArray<Parameter> *params = nullptr;
 	Type *NULLABLE ret_type = nullptr;
 	Stmt *NULLABLE body = nullptr;
@@ -892,7 +1092,7 @@ struct StructItem
 
 	TokenRange range;
 	string_view name;
-	FixedArray<TypeParameter> *type_params = nullptr;
+	FixedArray<GenericParameter> *type_params = nullptr;
 	FixedArray<Member> *members = nullptr;
 	bool is_implicit = false;
 	bool ctor_without_parens = false;
@@ -912,7 +1112,7 @@ struct AliasItem
 {
 	TokenRange range;
 	string_view name;
-	FixedArray<TypeParameter> *type_params = nullptr;
+	FixedArray<GenericParameter> *type_params = nullptr;
 	Type *aliased_type;
 
 	Alias *NULLABLE sema = nullptr; // Available after semantic analysis
@@ -952,8 +1152,8 @@ public:
 		return m_source;
 	}
 
-	size_t local_byte_pos() const {
-		return m_byte_pos;
+	size_t global_byte_pos() const {
+		return m_initial_byte_pos + m_byte_pos;
 	}
 
 	size_t initial_byte_pos() const {
@@ -980,8 +1180,11 @@ public:
 	}
 
 	// Returns the substring from start_pos to the current position
-	string_view substr_from(size_t start_pos) const {
-		return m_source.substr(start_pos, m_byte_pos - start_pos);
+	string_view substr_from(size_t global_start_pos) const {
+		assert(global_start_pos >= m_initial_byte_pos);
+		size_t local_start_pos = global_start_pos - m_initial_byte_pos;
+		assert(local_start_pos <= m_byte_pos);
+		return m_source.substr(local_start_pos, m_byte_pos - local_start_pos);
 	}
 
 	bool has_more(size_t how_many = 1) const {
@@ -1016,8 +1219,9 @@ void skip_whitespace(Lexer &lexer);
 void consume(Lexer &lexer, string_view expected_str);
 bool try_consume(Lexer &lexer, string_view expected_str);
 optional<string_view> try_read_identifier(Lexer &lexer);
-optional<uint64_t> try_read_number(Lexer &lexer);
+optional<string_view> try_read_number(Lexer &lexer);
 optional<Token> next_token(Lexer &lex);
+uint64_t parse_integer(string_view integer_string);
 
 
 //==============================================================================
@@ -1090,7 +1294,8 @@ public:
 		size_t end = span.end.pos;
 		size_t current_offset = 0;
 
-		// Linear search is okay for now...
+		// Linear search is okay for now as this function is only used for
+		// diagnostics and there is usually only one source
 		for (string_view source: m_sources)
 		{
 			if (start < current_offset + source.length())
@@ -1153,6 +1358,7 @@ private:
 	// It's a member so we can return a reference to it
 	Token m_end_token{
 		.kind = Lexeme::END,
+		.text = "END",
 		.span = {
 			.begin = {.pos = 0, .line = 1, .col = 1},
 			.end = {.pos = 0, .line = 1, .col = 1},

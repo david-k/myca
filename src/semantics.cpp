@@ -3,6 +3,8 @@
 #include "utils.hpp"
 #include <algorithm>
 #include <expected>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <ostream>
 #include <ranges>
@@ -20,14 +22,14 @@ Expr clone(Expr const &expr, Arena &arena);
 
 FixedArray<MatchArm>* clone(FixedArray<MatchArm> const *arms, Arena &arena);
 FixedArray<Stmt>* clone(FixedArray<Stmt> const *stmts, Arena &arena);
-Stmt* clone_ptr(Stmt const *stmt, Arena &arena);
 
-Expr* clone_ptr(Expr const *expr, Arena &arena)
+template<typename T>
+T* clone_ptr(T const *ptr, Arena &arena)
 {
-	if(not expr)
+	if(not ptr)
 		return nullptr;
 
-	return arena.alloc<Expr>(clone(*expr, arena));
+	return arena.alloc<T>(clone(*ptr, arena));
 }
 
 DefaultValueExpr clone(DefaultValueExpr const &default_val_expr, Arena &arena)
@@ -52,12 +54,13 @@ FixedArray<Type>* clone(FixedArray<Type> const *types, Arena &arena)
 	return result;
 }
 
-Type* clone_ptr(Type const *type, Arena &arena)
+GenericArg clone(GenericArg const &arg, Arena &arena)
 {
-	if(not type)
-		return nullptr;
-
-	return arena.alloc<Type>(clone(*type, arena));
+	return arg | match
+	{
+		[&](Type const &t) -> GenericArg { return clone(t, arena); },
+		[&](Expr const &e) -> GenericArg { return clone(e, arena); },
+	};
 }
 
 Type clone(Type const &type, Arena &arena)
@@ -79,6 +82,14 @@ Type clone(Type const &type, Arena &arena)
 				.pointee = clone_ptr(t.pointee, arena),
 				.kind = t.kind,
 				.mutability = t.mutability,
+			};
+		},
+		[&](ArrayType const &t) -> Type
+		{
+			return ArrayType{
+				.range = t.range,
+				.element = clone_ptr(t.element, arena),
+				.count_arg = clone_ptr(t.count_arg, arena),
 			};
 		},
 		[&](StructType const &t) -> Type
@@ -293,6 +304,14 @@ Expr clone(Expr const &expr, Arena &arena)
 				.type = clone_ptr(e.type, arena),
 			};
 		},
+		[&](GenericVarExpr const &e) -> Expr
+		{
+			return GenericVarExpr{
+				.range = e.range,
+				.var = e.var,
+				.type = clone_ptr(e.type, arena),
+			};
+		},
 		[&](UnionInitExpr const &e) -> Expr
 		{
 			return UnionInitExpr{
@@ -324,7 +343,6 @@ Parameter clone(Parameter const &param, Arena &arena)
 	};
 }
 
-Pattern* clone_ptr(Pattern const *pattern, Arena &arena);
 FixedArray<PatternArgument>* clone(FixedArray<PatternArgument> const *args, Arena &arena);
 
 Pattern clone(Pattern const &pattern, Arena &arena)
@@ -385,14 +403,6 @@ Pattern clone(Pattern const &pattern, Arena &arena)
 			);
 		}
 	};
-}
-
-Pattern* clone_ptr(Pattern const *pattern, Arena &arena)
-{
-	if(not pattern)
-		return nullptr;
-
-	return arena.alloc<Pattern>(clone(*pattern, arena));
 }
 
 PatternArgument clone(PatternArgument const &pat_arg, Arena &arena)
@@ -468,14 +478,6 @@ Stmt clone(Stmt const &stmt, Arena &arena)
 			);
 		},
 	};
-}
-
-Stmt* clone_ptr(Stmt const *stmt, Arena &arena)
-{
-	if(not stmt)
-		return nullptr;
-
-	return arena.alloc<Stmt>(clone(*stmt, arena));
 }
 
 FixedArray<Stmt>* clone(FixedArray<Stmt> const *stmts, Arena &arena)
@@ -581,7 +583,7 @@ Var* Scope::declare_var(string_view name, IsMutable mutability, TokenRange sloc)
 	return &std::get<Var>(item);
 }
 
-void Scope::declare_type_var(TypeParameter *def)
+void Scope::declare_type_var(GenericParameter *def)
 {
 	declare(def->name, def, def->range);
 }
@@ -612,14 +614,22 @@ void Scope::declare_alias(AliasItem *alias)
 
 ScopeItem& Scope::lookup(string_view const &name, TokenIdx sloc, bool traverse_upwards)
 {
-	auto it = items_by_name.find(name);
-	if(it != items_by_name.end())
-		return it->second;
-
-	if(parent && traverse_upwards)
-		return parent->lookup(name, sloc);
+	if(ScopeItem *item = try_lookup(name, sloc, traverse_upwards))
+		return *item;
 
 	throw_sem_error("Name has not been declared: "s + name, sloc, mod);
+}
+
+ScopeItem* Scope::try_lookup(string_view const &name, TokenIdx sloc, bool traverse_upwards)
+{
+	auto it = items_by_name.find(name);
+	if(it != items_by_name.end())
+		return &it->second;
+
+	if(parent && traverse_upwards)
+		return &parent->lookup(name, sloc);
+
+	return nullptr;
 }
 
 
@@ -628,6 +638,13 @@ ScopeItem& Scope::lookup(string_view const &name, TokenIdx sloc, bool traverse_u
 //==============================================================================
 static void substitute(
 	Type &type,
+	TypeEnv const &env,
+	InstanceRegistry &registry,
+	SubstitutionMode mode
+);
+
+static void substitute(
+	GenericArg &arg,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
 	SubstitutionMode mode
@@ -704,8 +721,47 @@ Scope* DeclContainerInst::scope() const
 
 void TypeEnv::materialize(class InstanceRegistry &registry)
 {
-	for(auto &[_, type]: m_env)
-		substitute(type, *this, registry, FullDeductionSubstitution());
+	for(auto &[_, gen_arg]: m_env)
+	{
+		if(Type *t = std::get_if<Type>(&gen_arg))
+			substitute(*t, *this, registry, FullDeductionSubstitution());
+	}
+}
+
+void TypeEnv::print(std::ostream &os, Module const &mod) const
+{
+	vector<std::pair<GenericVar, GenericArg const*>> sorted;
+	for(auto const &[var, type]: m_env)
+		sorted.push_back({var, &type});
+
+	std::ranges::sort(sorted, [](auto const &a, auto const &b)
+	{
+		GenericVar va = a.first;
+		GenericVar vb = b.first;
+
+		if(va.index() < vb.index())
+			return true;
+
+		return va | match
+		{
+			[&](GenericParameterVar p)
+			{
+				return p.def->name < std::get<GenericParameterVar>(vb).def->name;
+			},
+			[&](GenericDeductionVar d)
+			{
+				return d.def->id < std::get<GenericDeductionVar>(vb).def->id;
+			}
+		};
+	});
+
+	for(auto const &[var, type]: sorted)
+	{
+		::print(var, os);
+		os << " ==> ";
+		::print(*type, mod, os);
+		os << std::endl;
+	}
 }
 
 bool operator == (ProcInstanceKey const &a, ProcInstanceKey const &b)
@@ -766,9 +822,9 @@ struct TypeStatInfo
 	bool has_known_ints = false;
 };
 
-static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &type_vars, bool deduction_vars_only = false);
+static TypeStatInfo gather_type_vars(Type const &type, unordered_set<GenericVar> &type_vars, bool deduction_vars_only = false);
 
-static TypeStatInfo gather_type_vars(DeclContainerInst cont, unordered_set<VarType> &type_vars, bool deduction_vars_only = false)
+static TypeStatInfo gather_type_vars(DeclContainerInst cont, unordered_set<GenericVar> &type_vars, bool deduction_vars_only = false)
 {
 	TypeStatInfo info;
 	if(cont.decl_parent())
@@ -786,8 +842,8 @@ static TypeStatInfo gather_type_vars(DeclContainerInst cont, unordered_set<VarTy
 		},
 	};
 
-	for(VarType v: type_args.occurring_vars)
-		gather_type_vars(v, type_vars, deduction_vars_only);
+	for(GenericVar v: type_args.occurring_vars)
+		gather_type_vars(VarType(UNKNOWN_TOKEN_RANGE, v), type_vars, deduction_vars_only);
 
 	info.has_type_deduction_vars |= type_args.has_type_deduction_vars;
 	info.has_known_ints |= type_args.has_known_ints;
@@ -795,7 +851,31 @@ static TypeStatInfo gather_type_vars(DeclContainerInst cont, unordered_set<VarTy
 	return info;
 }
 
-static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &type_vars, bool deduction_vars_only)
+static TypeStatInfo gather_type_vars(Expr const &expr, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
+{
+	TypeStatInfo info;
+	traverse(expr, match
+	{
+		[&](GenericVarExpr const &e)
+		{
+			info.merge(gather_type_vars(VarType(e.range, e.var), type_vars, deduction_vars_only));
+		},
+		[](auto const&) {}
+	});
+
+	return info;
+}
+
+static TypeStatInfo gather_type_vars(GenericArg const &arg, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
+{
+	return arg | match
+	{
+		[&](Type const &t) { return gather_type_vars(t, type_vars, deduction_vars_only); },
+		[&](Expr const &e) { return gather_type_vars(e, type_vars, deduction_vars_only); },
+	};
+}
+
+static TypeStatInfo gather_type_vars(Type const &type, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
 {
 	return type | match
 	{
@@ -804,6 +884,15 @@ static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &t
 		[&](PointerType const &t)
 		{
 			return gather_type_vars(*t.pointee, type_vars, deduction_vars_only);
+		},
+		[&](ArrayType const &t)
+		{
+			assert(t.count_arg);
+
+			TypeStatInfo info;
+			info.merge(gather_type_vars(*t.count_arg, type_vars, deduction_vars_only));
+			info.merge(gather_type_vars(*t.element, type_vars, deduction_vars_only));
+			return info;
 		},
 		[&](ProcType const&) -> TypeStatInfo
 		{
@@ -817,8 +906,8 @@ static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &t
 		{
 			if(not deduction_vars_only or t.inst->has_type_deduction_vars())
 			{
-				for(VarType v: t.inst->occurring_vars())
-					gather_type_vars(v, type_vars, deduction_vars_only);
+				for(GenericVar v: t.inst->occurring_vars())
+					gather_type_vars(Type(VarType(UNKNOWN_TOKEN_RANGE, v)), type_vars, deduction_vars_only);
 			}
 
 			return TypeStatInfo{
@@ -828,10 +917,10 @@ static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &t
 		},
 		[&](VarType const &t)
 		{
-			if(std::holds_alternative<TypeDeductionVar>(t) or not deduction_vars_only)
-				type_vars.insert(t);
+			if(std::holds_alternative<GenericDeductionVar>(t.var) or not deduction_vars_only)
+				type_vars.insert(t.var);
 
-			return TypeStatInfo{.has_type_deduction_vars = std::holds_alternative<TypeDeductionVar>(t)};
+			return TypeStatInfo{.has_type_deduction_vars = std::holds_alternative<GenericDeductionVar>(t.var)};
 		},
 		[&](ProcTypeUnresolved const&) -> TypeStatInfo { assert(!"gather_type_vars: ProcTypeUnresolved"); },
 		[&](UnionTypeUnresolved const&) -> TypeStatInfo { assert(!"gather_type_vars: UnionTypeUnresolved"); },
@@ -840,28 +929,28 @@ static TypeStatInfo gather_type_vars(Type const &type, unordered_set<VarType> &t
 	};
 }
 
-static TypeStatInfo get_type_stats(Type const &type)
+static TypeStatInfo get_type_stats(GenericArg const &arg)
 {
 	// TODO Change gather_type_vars() so that we don't need to pass type_vars when we don't need it
-	unordered_set<VarType> type_vars;
-	return gather_type_vars(type, type_vars);
+	unordered_set<GenericVar> type_vars;
+	return gather_type_vars(arg, type_vars, false);
 }
 
-static bool is_deduction_complete(Type const &type)
+static bool is_deduction_complete(GenericArg const &arg)
 {
-	TypeStatInfo info = get_type_stats(type);
+	TypeStatInfo info = get_type_stats(arg);
 	return not info.has_type_deduction_vars and not info.has_known_ints;
 }
 
-static TypeArgList create_type_arg_list(FixedArray<Type> *NULLABLE type_args, Arena &arena)
+static TypeArgList create_type_arg_list(FixedArray<GenericArg> *NULLABLE type_args, Arena &arena)
 {
 	if(not type_args)
-		type_args = alloc_fixed_array<Type>(0, arena);
+		type_args = alloc_fixed_array<GenericArg>(0, arena);
 
 	TypeArgList arg_list{.args = type_args};
-	for(Type const &type: *type_args)
+	for(GenericArg const &arg: *type_args)
 	{
-		TypeStatInfo info = gather_type_vars(type, arg_list.occurring_vars);
+		TypeStatInfo info = gather_type_vars(arg, arg_list.occurring_vars, false);
 		arg_list.has_type_deduction_vars |= info.has_type_deduction_vars;
 		arg_list.has_known_ints |= info.has_known_ints;
 	}
@@ -893,7 +982,7 @@ static void check_struct_parents(StructItem const *struct_, optional<DeclContain
 // `type_args` must already be resolved
 StructInstance* InstanceRegistry::get_struct_instance(
 	StructItem const *struct_,
-	FixedArray<Type> *NULLABLE type_args,
+	FixedArray<GenericArg> *NULLABLE type_args,
 	optional<DeclContainerInst> decl_parent
 )
 {
@@ -959,21 +1048,48 @@ StructInstance* InstanceRegistry::add_struct_instance(StructInstance &&new_inst)
 	return inst;
 }
 
+static GenericArg mk_generic_arg(GenericParameter const *param, TokenRange range)
+{
+	return param->kind | match
+	{
+		[&](GenericTypeParameter const&) -> GenericArg
+		{
+			return VarType(range, GenericParameterVar(param));
+		},
+		[&](GenericValueParameter const&) -> GenericArg
+		{
+			return GenericVarExpr(range, GenericParameterVar(param));
+		},
+	};
+}
+
+static GenericArg mk_generic_arg(GenericDeductionVar var)
+{
+	return var.def->kind | match
+	{
+		[&](TypeDeductionVar const&) -> GenericArg
+		{
+			return VarType(UNKNOWN_TOKEN_RANGE, var);
+		},
+		[&](ValueDeductionVar const&) -> GenericArg
+		{
+			return GenericVarExpr(UNKNOWN_TOKEN_RANGE, var);
+		},
+	};
+}
+
 StructInstance* InstanceRegistry::get_struct_self_instance(StructItem const *struct_)
 {
 	auto it = m_struct_self_instances.find(struct_);
 	if(it != m_struct_self_instances.end())
 		return it->second;
 
-	FixedArray<Type> *type_args = nullptr;
+	FixedArray<GenericArg> *type_args = nullptr;
 	if(struct_->type_params->count)
 	{
-		type_args = alloc_fixed_array<Type>(struct_->type_params->count, m_arena);
+		type_args = alloc_fixed_array<GenericArg>(struct_->type_params->count, m_arena);
 		for(auto const &[idx, type_param]: *struct_->type_params | std::views::enumerate)
-		{
-			TypeParameterVar var(type_param.range, &type_param);
-			new (type_args->items+idx) Type(VarType(var));
-		}
+			new (type_args->items+idx) GenericArg(mk_generic_arg(&type_param, type_param.range));
 	}
 
 	optional<DeclContainerInst> decl_parent_inst = nullopt;
@@ -992,15 +1108,12 @@ ProcInstance* InstanceRegistry::get_proc_self_instance(ProcItem const *proc)
 	if(it != m_proc_self_instances.end())
 		return it->second;
 
-	FixedArray<Type> *type_args = nullptr;
+	FixedArray<GenericArg> *type_args = nullptr;
 	if(proc->type_params->count)
 	{
-		type_args = alloc_fixed_array<Type>(proc->type_params->count, m_arena);
+		type_args = alloc_fixed_array<GenericArg>(proc->type_params->count, m_arena);
 		for(auto const &[idx, type_param]: *proc->type_params | std::views::enumerate)
-		{
-			TypeParameterVar var(type_param.range, &type_param);
-			new (type_args->items+idx) Type(VarType(var));
-		}
+			new (type_args->items+idx) GenericArg(mk_generic_arg(&type_param, type_param.range));
 	}
 
 	ProcInstance *self_inst = get_proc_instance(proc, type_args);
@@ -1042,9 +1155,15 @@ std::generator<ProcInstance&> InstanceRegistry::proc_instances()
 		co_yield proc;
 }
 
+std::generator<ProcTypeInstance&> InstanceRegistry::proc_type_instances()
+{
+	for(auto &[_, proc_type]: m_proc_type_instances)
+		co_yield proc_type;
+}
+
 
 // `type_args` must already be resolved and must not contain KnownIntTypes
-ProcInstance* InstanceRegistry::get_proc_instance(ProcItem const *proc, FixedArray<Type> *NULLABLE type_args)
+ProcInstance* InstanceRegistry::get_proc_instance(ProcItem const *proc, FixedArray<GenericArg> *NULLABLE type_args)
 {
 	auto it = m_proc_instances.find(ProcInstanceKey(proc, type_args));
 	if(it != m_proc_instances.end())
@@ -1140,7 +1259,7 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
 
 ProcTypeInstance* InstanceRegistry::add_proc_type_instance(FixedArray<Type> *params, Type *ret)
 {
-	unordered_set<VarType> occurring_vars;
+	unordered_set<GenericVar> occurring_vars;
 	TypeStatInfo info = gather_type_vars(*ret, occurring_vars);
 	for(Type const &type: *params)
 		info.merge(gather_type_vars(type, occurring_vars));
@@ -1156,10 +1275,13 @@ ProcTypeInstance* InstanceRegistry::add_proc_type_instance(FixedArray<Type> *par
 		}
 	).first->second;
 
+	for(InstanceRegistryListener *l: m_listeners)
+		l->on_new_proc_type_instance(inst);
+
 	return inst;
 }
 
-UnionInstance* InstanceRegistry::get_union_instance(vector<Type const*> &&alternatives)
+UnionInstance* InstanceRegistry::get_union_instance(vector<Type*> &&alternatives)
 {
 	UnionInstanceKey key{alternatives};
 	auto it = m_union_instances.find(key);
@@ -1171,9 +1293,9 @@ UnionInstance* InstanceRegistry::get_union_instance(vector<Type const*> &&altern
 
 bool operator < (Type const &a, Type const &b);
 
-UnionInstance* InstanceRegistry::add_union_instance(vector<Type const*> &&alternatives)
+UnionInstance* InstanceRegistry::add_union_instance(vector<Type*> &&alternatives)
 {
-	unordered_set<VarType> occurring_vars;
+	unordered_set<GenericVar> occurring_vars;
 	TypeStatInfo info;
 	for(Type const *alt: alternatives)
 		info.merge(gather_type_vars(*alt, occurring_vars));
@@ -1206,36 +1328,36 @@ void InstanceRegistry::remove_listener(InstanceRegistryListener *l)
 
 
 static void create_type_env(
-	FixedArray<TypeParameter> const *type_params,
-	FixedArray<Type> const *type_args,
+	FixedArray<GenericParameter> const *type_params,
+	FixedArray<GenericArg> const *type_args,
 	TypeEnv &result,
 	InstanceRegistry &registry)
 {
 	for(size_t i = 0; i < type_params->count; ++i)
 	{
-		TypeParameterVar type_param(UNKNOWN_TOKEN_RANGE, &type_params->items[i]);
-		Type cloned = type_args->items[i];
+		GenericParameterVar type_param(&type_params->items[i]);
+		GenericArg type_arg = type_args->items[i];
 
 		// See tests struct_recursive_type_param_<N> for why we call substitute() and perform the
 		// type_var_occurs_in() check
-		substitute(cloned, result, registry, BestEffortSubstitution());
-		if(not equiv(type_param, cloned))
+		substitute(type_arg, result, registry, BestEffortSubstitution());
+		if(not equiv(mk_generic_arg(type_param.def, UNKNOWN_TOKEN_RANGE), type_arg))
 		{
-			if(type_var_occurs_in(type_param, cloned))
+			if(type_var_occurs_in(type_param, type_arg))
 				throw_sem_error(
 					"The type argument " + str(type_args->items[i], registry.mod()) + " causes the type term to grow indefinitely",
 					token_range_of(type_args->items[i]).first,
 					&registry.mod()
 				);
 
-			result.add(type_param, cloned);
+			result.add(type_param, type_arg);
 		}
 	}
 }
 
 static TypeEnv create_type_env(
-	FixedArray<TypeParameter> const *type_params,
-	FixedArray<Type> const *type_args,
+	FixedArray<GenericParameter> const *type_params,
+	FixedArray<GenericArg> const *type_args,
 	InstanceRegistry &registry)
 {
 	TypeEnv env;
@@ -1609,7 +1731,7 @@ bool operator == (StructInstanceKey const &a, StructInstanceKey const &b)
 //--------------------------------------------------------------------
 // UnionInstance
 //--------------------------------------------------------------------
-void flatten_union_alternatives(vector<Type const*> &alternatives)
+void flatten_union_alternatives(vector<Type*> &alternatives, Arena &arena)
 {
 	auto it = alternatives.begin();
 	while(it != alternatives.end())
@@ -1617,25 +1739,21 @@ void flatten_union_alternatives(vector<Type const*> &alternatives)
 		if(UnionType const *sub_union = std::get_if<UnionType>(*it))
 		{
 			it = alternatives.erase(it);
-			it = alternatives.insert(
-				it,
-				sub_union->inst->alternatives().begin(),
-				sub_union->inst->alternatives().end()
-			);
-			it += sub_union->inst->alternatives().size();
+			for(Type const *sub_alt: sub_union->inst->alternatives())
+				it = alternatives.insert(it, clone_ptr(sub_alt, arena));
 		}
 		else
 			++it;
 	}
 }
 
-void canonicalize_union_alternatives(vector<Type const*> &alternatives)
+void canonicalize_union_alternatives(vector<Type*> &alternatives, Arena &arena)
 {
 	// 1. Flatten
 	// 2. Sort
 	// 3. Remove duplicates
 
-	flatten_union_alternatives(alternatives);
+	flatten_union_alternatives(alternatives, arena);
 
 	std::ranges::sort(alternatives, [](Type const *a, Type const *b)
 	{
@@ -1649,14 +1767,14 @@ void canonicalize_union_alternatives(vector<Type const*> &alternatives)
 	alternatives.erase(new_end, alternatives.end());
 }
 
-vector<Type const*> canonicalize_union_alternatives(FixedArray<Type> *alternatives)
+vector<Type*> canonicalize_union_alternatives(FixedArray<Type> *alternatives, Arena &arena)
 {
-	vector<Type const*> result;
+	vector<Type*> result;
 	result.reserve(alternatives->count);
-	for(Type const &alt: *alternatives)
+	for(Type &alt: *alternatives)
 		result.push_back(&alt);
 
-	canonicalize_union_alternatives(result);
+	canonicalize_union_alternatives(result, arena);
 
 	return result;
 }
@@ -1737,6 +1855,7 @@ DefaultValueExpr ProcInstance::get_param_default_value(size_t idx)
 	return m_proc->params->items[idx].default_value;
 }
 
+static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext &ctx);
 
 static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRegistry &instances)
 {
@@ -1775,7 +1894,14 @@ static void declare_types(Type const &type, Scope *scope, optional<DeclContainer
 	{
 		[&](BuiltinType const&) {},
 		[&](KnownIntType const&) {},
-		[&](PointerType const&) {},
+		[&](PointerType const &t)
+		{
+			declare_types(*t.pointee, scope, decl_parent, ctx);
+		},
+		[&](ArrayType const &t)
+		{
+			declare_types(*t.element, scope, decl_parent, ctx);
+		},
 		[&](ProcTypeUnresolved const &t)
 		{
 			for(Type const &param: *t.params)
@@ -1909,7 +2035,7 @@ static void declare_struct_item(StructItem *struct_, optional<DeclContainer> dec
 	size_t num_type_params = struct_->type_params->count;
 	for(size_t i = 0; i < num_type_params; ++i)
 	{
-		TypeParameter &type_param = struct_->type_params->items[i];
+		GenericParameter &type_param = struct_->type_params->items[i];
 		// TODO Produce error if the type parameter has the same name as the struct
 		struct_->sema->type_scope->declare_type_var(&type_param);
 	}
@@ -2008,7 +2134,7 @@ void declare_item(TopLevelItem &item, SemaContext &ctx)
 			size_t num_type_params = proc.type_params->count;
 			for(size_t i = 0; i < num_type_params; ++i)
 			{
-				TypeParameter &type_param = proc.type_params->items[i];
+				GenericParameter &type_param = proc.type_params->items[i];
 				proc.sema->scope->declare_type_var(&type_param);
 			}
 
@@ -2032,7 +2158,7 @@ void declare_item(TopLevelItem &item, SemaContext &ctx)
 			size_t num_type_params = alias.type_params->count;
 			for(size_t i = 0; i < num_type_params; ++i)
 			{
-				TypeParameter &type_param = alias.type_params->items[i];
+				GenericParameter &type_param = alias.type_params->items[i];
 				alias.sema->scope->declare_type_var(&type_param);
 			}
 
@@ -2053,37 +2179,52 @@ static void declare_items(SemaContext &ctx)
 // Pass 2: Path resolution
 //==============================================================================
 static void resolve_expr(Expr &expr, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
+static void resolve_generic_arg(GenericArg &arg, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
 static void resolve_alias(AliasItem &alias, SemaContext &ctx);
 
 static Type resolve_path_to_type(Path const &path, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
 static Expr resolve_path_to_expr(Path const &path, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
 
-static FixedArray<Type>* resolve_type_args(
-	FixedArray<Type> *NULLABLE args,
-	size_t num_type_params,
+static FixedArray<GenericArg>* resolve_type_args(
+	FixedArray<GenericArg> *NULLABLE args,
+	FixedArray<GenericParameter> *NULLABLE params,
 	Scope *scope,
 	ResolutionContext res_ctx,
 	SemaContext &ctx
 )
 {
 	size_t num_args = args ? args->count : 0;
-	assert(num_args <= num_type_params);
-	FixedArray<Type> *resolved_type_args = alloc_fixed_array<Type>(num_type_params, ctx.arena);
+	assert(num_args <= params->count);
+	FixedArray<GenericArg> *resolved_type_args = alloc_fixed_array<GenericArg>(params->count, ctx.arena);
 
 	size_t cur_idx = 0;
 	if(num_args)
 	{
-		for(Type const &arg: *args)
+		for(GenericArg const &arg: *args)
 		{
 			resolved_type_args->items[cur_idx] = arg;
-			resolve_type(resolved_type_args->items[cur_idx], scope, res_ctx, ctx);
+			resolve_generic_arg(resolved_type_args->items[cur_idx], scope, res_ctx, ctx);
 			++cur_idx;
 		}
 	}
 
-	size_t num_missing_args = num_type_params - num_args;
-	while(num_missing_args--)
-		new (&resolved_type_args->items[cur_idx++]) Type(VarType(ctx.new_type_deduction_var()));
+	for(size_t param_idx = num_args; param_idx < params->count; ++param_idx)
+	{
+		GenericParameter const &param = params->items[param_idx];
+		param.kind | match
+		{
+			[&](GenericTypeParameter const&)
+			{
+				GenericDeductionVar var = ctx.new_deduction_var(TypeDeductionVar());
+				new (&resolved_type_args->items[cur_idx++]) GenericArg(VarType(UNKNOWN_TOKEN_RANGE, var));
+			},
+			[&](GenericValueParameter const &p)
+			{
+				GenericDeductionVar var = ctx.new_deduction_var(ValueDeductionVar(p.type));
+				new (&resolved_type_args->items[cur_idx++]) GenericArg(GenericVarExpr(UNKNOWN_TOKEN_RANGE, var));
+			},
+		};
+	}
 
 	return resolved_type_args;
 }
@@ -2156,11 +2297,10 @@ static variant<Expr, Type> resolve_path(
 	{
 		[&](StructItem *struct_) -> variant<Expr, Type>
 		{
-			size_t num_type_params = struct_->type_params->count;
-			if(path.type_args->count > num_type_params)
+			if(path.type_args->count > struct_->type_params->count)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
-			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, res_ctx, ctx);
+			FixedArray<GenericArg> *resolved_type_args = resolve_type_args(path.type_args, struct_->type_params, ambient_scope, res_ctx, ctx);
 
 			optional<DeclContainerInst> parent_inst = path_parent;
 			if(not parent_inst and struct_->sema->decl_parent)
@@ -2173,11 +2313,10 @@ static variant<Expr, Type> resolve_path(
 		},
 		[&](ProcItem *proc) -> variant<Expr, Type>
 		{
-			size_t num_type_params = proc->type_params->count;
-			if(path.type_args->count > num_type_params)
+			if(path.type_args->count > proc->type_params->count)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
-			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, res_ctx, ctx);
+			FixedArray<GenericArg> *resolved_type_args = resolve_type_args(path.type_args, proc->type_params, ambient_scope, res_ctx, ctx);
 			ProcInstance *inst = ctx.mod->sema->insts.get_proc_instance(proc, resolved_type_args);;
 			return path.child ?
 				resolve_path(*path.child, inst, ambient_scope, res_ctx, ctx) :
@@ -2189,11 +2328,10 @@ static variant<Expr, Type> resolve_path(
 
 			resolve_alias(*alias, ctx);
 
-			size_t num_type_params = alias->type_params->count;
-			if(path.type_args->count > num_type_params)
+			if(path.type_args->count > alias->type_params->count)
 				throw_sem_error("Too many type arguments", path.range.first, ctx.mod);
 
-			FixedArray<Type> *resolved_type_args = resolve_type_args(path.type_args, num_type_params, ambient_scope, res_ctx, ctx);
+			FixedArray<GenericArg> *resolved_type_args = resolve_type_args(path.type_args, alias->type_params, ambient_scope, res_ctx, ctx);
 			TypeEnv env = create_type_env(alias->type_params, resolved_type_args, ctx.mod->sema->insts);
 
 			Type type = clone(*alias->aliased_type, ctx.arena);
@@ -2210,7 +2348,7 @@ static variant<Expr, Type> resolve_path(
 
 			return type;
 		},
-		[&](TypeParameter *type_var) -> variant<Expr, Type>
+		[&](GenericParameter *type_param) -> variant<Expr, Type>
 		{
 			if(path.type_args->count)
 				throw_sem_error("Cannot apply type arguments to type variable", path.range.first, ctx.mod);
@@ -2218,7 +2356,17 @@ static variant<Expr, Type> resolve_path(
 			if(path.child)
 				throw_sem_error("Member selection of type parameters not supported", path.child->range.first, ctx.mod);
 
-			return VarType(TypeParameterVar(path.range, type_var));
+			return type_param->kind | match
+			{
+				[&](GenericTypeParameter) -> variant<Expr, Type>
+				{
+					return VarType(path.range, GenericParameterVar(type_param));
+				},
+				[&](GenericValueParameter const&) -> variant<Expr, Type>
+				{
+					return GenericVarExpr(path.range, GenericParameterVar(type_param));
+				},
+			};
 		},
 		[&](Var const &var) -> variant<Expr, Type>
 		{
@@ -2314,6 +2462,18 @@ static Expr resolve_path_to_expr(Path const &path, Scope *scope, ResolutionConte
 	};
 }
 
+static void resolve_generic_arg(GenericArg &arg, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
+{
+	arg | match
+	{
+		[&](Type &t)
+		{
+			resolve_type(t, scope, res_ctx, ctx);
+		},
+		[&](Expr &e) { resolve_expr(e, scope, res_ctx, ctx); },
+	};
+}
+
 static void resolve_struct(StructItem &struct_, SemaContext &ctx);
 
 void resolve_type(Type &type, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
@@ -2325,6 +2485,17 @@ void resolve_type(Type &type, Scope *scope, ResolutionContext res_ctx, SemaConte
 		[&](PointerType &t)
 		{
 			resolve_type(*t.pointee, scope, res_ctx, ctx);
+		},
+		[&](ArrayType &t)
+		{
+			resolve_type(*t.element, scope, res_ctx, ctx);
+			if(t.count_arg)
+				resolve_expr(*t.count_arg, scope, res_ctx, ctx);
+			else
+			{
+				assert(!"[TODO] resolve_type: ArrayType: UnknownCount");
+				// TODO Create a GenericDeductionVar for the count
+			}
 		},
 		[&](ProcTypeUnresolved &t)
 		{
@@ -2339,7 +2510,7 @@ void resolve_type(Type &type, Scope *scope, ResolutionContext res_ctx, SemaConte
 			for(Type &alt: *t.alternatives)
 				resolve_type(alt, scope, res_ctx, ctx);
 
-			vector<Type const*> canonical_alts = canonicalize_union_alternatives(t.alternatives);
+			vector<Type*> canonical_alts = canonicalize_union_alternatives(t.alternatives, ctx.arena);
 			type = UnionType{
 				.range = t.range,
 				.inst = ctx.mod->sema->insts.get_union_instance(std::move(canonical_alts)),
@@ -2365,14 +2536,14 @@ void resolve_type(Type &type, Scope *scope, ResolutionContext res_ctx, SemaConte
 			//   let x: X'(?_0) = X'(i32)(3);
 			//
 			// Since `struct X'S { v: S }` is a type constructor and not an actual type I
-			// automatically generate TypeDeductionVars for its type arguments. After type checking,
+			// automatically generate GenericDeductionVars for its type arguments. After type checking,
 			// the type of `x` will be deduced as `X'(i32)`.
 
 			optional<DeclContainerInst> decl_parent_inst;
 			if(t.struct_->sema->decl_parent)
 				decl_parent_inst = ctx.mod->sema->insts.get_self_instance(*t.struct_->sema->decl_parent);
 
-			FixedArray<Type> *type_args = resolve_type_args(nullptr, t.struct_->type_params->count, scope, res_ctx, ctx);
+			FixedArray<GenericArg> *type_args = resolve_type_args(nullptr, t.struct_->type_params, scope, res_ctx, ctx);
 			StructInstance *inst = ctx.mod->sema->insts.get_struct_instance(t.struct_, type_args, decl_parent_inst);
 
 			type = StructType(t.range, inst);
@@ -2453,6 +2624,7 @@ static void resolve_expr(Expr &expr, Scope *scope, ResolutionContext res_ctx, Se
 			expr = resolve_path_to_expr(p, scope, res_ctx, ctx);
 		},
 		[&](VarExpr const&) {},
+		[&](GenericVarExpr const&) {},
 		[&](UnionInitExpr const &e)
 		{
 			resolve_expr(*e.alt_expr, scope, res_ctx, ctx);
@@ -2672,9 +2844,9 @@ static void resolve_names(SemaContext &ctx)
 //--------------------------------------------------------------------
 // Type substitution
 //--------------------------------------------------------------------
-bool have_common_vars(unordered_set<VarType> const &occurring_vars, TypeEnv const &env)
+bool have_common_vars(unordered_set<GenericVar> const &occurring_vars, TypeEnv const &env)
 {
-	for(VarType const &var: occurring_vars)
+	for(GenericVar const &var: occurring_vars)
 	{
 		if(env.try_lookup(var))
 			return true;
@@ -2691,15 +2863,15 @@ static void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &
 	// Update args.occurring_vars and args.has_type_deduction_vars
 	args.occurring_vars.clear();
 	args.has_type_deduction_vars = false;
-	for(Type const &type: *args.args)
+	for(GenericArg const &arg: *args.args)
 	{
-		TypeStatInfo info = gather_type_vars(type, args.occurring_vars);
+		TypeStatInfo info = gather_type_vars(arg, args.occurring_vars, false);
 		args.has_type_deduction_vars |= info.has_type_deduction_vars;
 		args.has_known_ints |= info.has_known_ints;
 	}
 }
 
-void validate_unsubstituted_var(VarType var, SubstitutionMode mode, Module const &mod)
+void validate_unsubstituted_var(GenericVar var, SubstitutionMode mode, Module const &mod)
 {
 	if(is<FullSubstitution>(mode)) {
 		assert(!"VarType has not been substituted");
@@ -2707,14 +2879,14 @@ void validate_unsubstituted_var(VarType var, SubstitutionMode mode, Module const
 
 	if(FullDeductionSubstitution *m = std::get_if<FullDeductionSubstitution>(&mode))
 	{
-		if(is<TypeDeductionVar>(var))
+		if(is<GenericDeductionVar>(var))
 			throw_sem_error("Type parameter could not be deduced", m->region_being_substituted.first, &mod);
 	}
 }
 
 // Make sure that the kinds of variables that must be substituted actually have been substituted
 void validate_unsubstituted_vars(
-	unordered_set<VarType> const &vars,
+	unordered_set<GenericVar> const &vars,
 	bool has_type_deduction_vars,
 	TypeEnv const &env,
 	SubstitutionMode mode,
@@ -2726,7 +2898,7 @@ void validate_unsubstituted_vars(
 		or (is<FullSubstitution>(mode) and vars.size())
 	)
 	{
-		for(VarType var: vars)
+		for(GenericVar var: vars)
 		{
 			if(not env.try_lookup(var))
 				validate_unsubstituted_var(var, mode, mod);
@@ -2853,7 +3025,7 @@ static UnionInstance* substitute_types_in_union(
 {
 	if(inst->needs_subsitution(env))
 	{
-		vector<Type const*> new_alts;
+		vector<Type*> new_alts;
 		new_alts.reserve(inst->alternatives().size());
 		for(Type const *alt: inst->alternatives())
 		{
@@ -2862,8 +3034,7 @@ static UnionInstance* substitute_types_in_union(
 			new_alts.push_back(new_alt);
 		}
 
-		canonicalize_union_alternatives(new_alts);
-
+		canonicalize_union_alternatives(new_alts, registry.arena());
 		inst = registry.get_union_instance(std::move(new_alts));
 	}
 	else
@@ -2878,6 +3049,43 @@ static UnionInstance* substitute_types_in_union(
 	return inst;
 }
 
+static optional<GenericArg> get_substituted(
+	GenericVar var,
+	TypeEnv const &env,
+	InstanceRegistry &registry,
+	SubstitutionMode mode
+)
+{
+	if(GenericArg const *mapped_arg = env.try_lookup(var))
+	{
+		GenericArg result = clone(*mapped_arg, registry.arena());
+
+		// Apply substitution recursively.
+		// This is not how substitution is traditionally defined for e.g. first-order logic,
+		// but is easier to implement. See note for the unify() function.
+		substitute(result, env, registry, mode); // TODO Implement substitute() for GenericArg
+		return result;
+	}
+	else
+	{
+		validate_unsubstituted_var(var, mode, registry.mod());
+		return nullopt;
+	}
+}
+
+static void substitute(
+	GenericArg &arg,
+	TypeEnv const &env,
+	InstanceRegistry &registry,
+	SubstitutionMode mode
+)
+{
+	arg | match
+	{
+		[&](Type &type) { substitute(type, env, registry, mode); },
+		[&](Expr &expr) { substitute_types_in_expr(expr, env, registry, mode); },
+	};
+}
 
 static void substitute(
 	Type &type,
@@ -2897,6 +3105,11 @@ static void substitute(
 		[&](PointerType &t)
 		{
 			substitute(*t.pointee, env, registry, mode);
+		},
+		[&](ArrayType &t)
+		{
+			substitute(*t.element, env, registry, mode);
+			substitute_types_in_expr(*t.count_arg, env, registry, mode);
 		},
 		[&](StructType &t)
 		{
@@ -2923,17 +3136,8 @@ static void substitute(
 		},
 		[&](VarType &t)
 		{
-			if(Type const *mapped_type = env.try_lookup(t))
-			{
-				type = clone(*mapped_type, registry.arena());
-
-				// Apply substitution recursively.
-				// This is not how substitution is traditionally defined for e.g. first-order logic,
-				// but is easier to implement. See note for the unify() function.
-				substitute(type, env, registry, mode);
-			}
-			else
-				validate_unsubstituted_var(t, mode, registry.mod());
+			if(optional<GenericArg> result = get_substituted(t.var, env, registry, mode))
+				type = std::get<Type>(*result);
 		},
 		[&](ProcTypeUnresolved const&) { UNREACHABLE; },
 		[&](UnionTypeUnresolved const&) { UNREACHABLE; },
@@ -3017,6 +3221,11 @@ static void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceReg
 			substitute(*e.alt_type, env, registry, mode);
 		},
 		[&](VarExpr&) {},
+		[&](GenericVarExpr &e)
+		{
+			if(optional<GenericArg> result = get_substituted(e.var, env, registry, mode))
+				expr = std::get<Expr>(*result);
+		},
 		[&](Path&) { assert(!"substitute_types_in_expr: Path"); },
 	};
 }
@@ -3387,12 +3596,18 @@ bool equiv(Type const &a, Type const &b)
 		[&](VarType const &ta)
 		{
 			VarType const &tb = std::get<VarType>(b);
-			return ta == tb;
+			return ta.var == tb.var;
 		},
 		[&](PointerType const &ta)
 		{
 			PointerType const &tb = std::get<PointerType>(b);
 			return ta.kind == tb.kind and ta.mutability == tb.mutability and equiv(*ta.pointee, *tb.pointee);
+		},
+		[&](ArrayType const &ta)
+		{
+			ArrayType const &tb = std::get<ArrayType>(b);
+			assert(ta.count_arg and tb.count_arg);
+			return equiv(*ta.count_arg, *tb.count_arg) and equiv(*ta.element, *tb.element);
 		},
 		[&](StructType const &ta)
 		{
@@ -3416,6 +3631,194 @@ bool equiv(Type const &a, Type const &b)
 	};
 }
 
+static bool equiv(Expr const &a, Expr const &b)
+{
+	if(a.index() != b.index())
+		return false;
+
+	return a | match
+	{
+		[&](IntLiteralExpr const &ea)
+		{
+			IntLiteralExpr const &eb = std::get<IntLiteralExpr>(b);
+			return ea.value == eb.value;
+		},
+		[&](BoolLiteralExpr const &ea)
+		{
+			BoolLiteralExpr const &eb = std::get<BoolLiteralExpr>(b);
+			return ea.value == eb.value;
+		},
+		[&](StringLiteralExpr const &ea)
+		{
+			StringLiteralExpr const &eb = std::get<StringLiteralExpr>(b);
+			return ea.kind == eb.kind and ea.value == eb.value;
+		},
+		[&](UnaryExpr const &ea)
+		{
+			UnaryExpr const &eb = std::get<UnaryExpr>(b);
+			return ea.op == eb.op and equiv(*ea.sub, *eb.sub);
+		},
+		[&](BinaryExpr const &ea)
+		{
+			BinaryExpr const &eb = std::get<BinaryExpr>(b);
+			return ea.op == eb.op and equiv(*ea.left, *eb.left) and equiv(*ea.right, *eb.right);
+		},
+		[&](AddressOfExpr const &ea)
+		{
+			AddressOfExpr const &eb = std::get<AddressOfExpr>(b);
+			return ea.mutability == eb.mutability and equiv(*ea.object, *eb.object);
+		},
+		[&](DerefExpr const &ea)
+		{
+			DerefExpr const &eb = std::get<DerefExpr>(b);
+			return equiv(*ea.addr, *eb.addr);
+		},
+		[&](IndexExpr const &ea)
+		{
+			IndexExpr const &eb = std::get<IndexExpr>(b);
+			return equiv(*ea.addr, *eb.addr) and equiv(*ea.index, *eb.index);
+		},
+		[&](MemberAccessExpr const &ea)
+		{
+			MemberAccessExpr const &eb = std::get<MemberAccessExpr>(b);
+			return ea.member == eb.member and equiv(*ea.object, *eb.object);
+		},
+		[&](AssignmentExpr const &ea)
+		{
+			AssignmentExpr const &eb = std::get<AssignmentExpr>(b);
+			return equiv(*ea.lhs, *eb.lhs) and equiv(*ea.rhs, *eb.rhs);
+		},
+		[&](AsExpr const &ea)
+		{
+			AsExpr const &eb = std::get<AsExpr>(b);
+			return equiv(*ea.src_expr, *eb.src_expr) and equiv(*ea.target_type, *eb.target_type);
+		},
+		[&](ConstructorExpr const &ea)
+		{
+			ConstructorExpr const &eb = std::get<ConstructorExpr>(b);
+			return equiv(*ea.ctor, *eb.ctor);
+		},
+		[&](ProcExpr const &ea)
+		{
+			ProcExpr const &eb = std::get<ProcExpr>(b);
+			return ea.inst == eb.inst;
+		},
+		[&](CallExpr const &ea)
+		{
+			CallExpr const &eb = std::get<CallExpr>(b);
+			if(not equiv(*ea.callable, *eb.callable))
+				return false;
+
+			if(ea.args->count != eb.args->count)
+				return false;
+
+			for(size_t i = 0; i < ea.args->count; ++i)
+			{
+				Argument const &arg_a = ea.args->items[i];
+				Argument const &arg_b = eb.args->items[i];
+				if(arg_a.param_idx != arg_b.param_idx) return false;
+				if(arg_a.name != arg_b.name) return false;
+				if(not equiv(arg_a.expr, arg_b.expr)) return false;
+			}
+
+			return true;
+		},
+		[&](SizeOfExpr const &ea)
+		{
+			SizeOfExpr const &eb = std::get<SizeOfExpr>(b);
+			if(not ea.subject or not eb.subject)
+				return ea.subject == eb.subject;
+
+			return equiv(*ea.subject, *eb.subject);
+		},
+		[&](MakeExpr const&) -> bool
+		{
+			assert(!"[TODO] substitute_types_in_expr: MakeExpr");
+		},
+		[&](UnionInitExpr const &ea)
+		{
+			UnionInitExpr const &eb = std::get<UnionInitExpr>(b);
+			return equiv(*ea.alt_expr, *eb.alt_expr) and equiv(*ea.alt_type, *eb.alt_type);
+		},
+		[&](VarExpr const &ea)
+		{
+			VarExpr const &eb = std::get<VarExpr>(b);
+			return ea.var == eb.var;
+		},
+		[&](GenericVarExpr const &ea)
+		{
+			GenericVarExpr const &eb = std::get<GenericVarExpr>(b);
+			return ea.var == eb.var;
+		},
+		[&](Path const&) ->bool { assert(!"substitute_types_in_expr: Path"); },
+	};
+}
+
+bool equiv(GenericArg const &a, GenericArg const &b)
+{
+	if(a.index() != b.index())
+		return false;
+
+	return a | match
+	{
+		[&](Type const &t) { return equiv(t, std::get<Type>(b)); },
+		[&](Expr const &e) { return equiv(e, std::get<Expr>(b)); },
+	};
+}
+
+static bool operator < (GenericVar const &a, GenericVar const &b)
+{
+	if(a.index() != b.index())
+		return a.index() < b.index();
+
+	return a | match
+	{
+		[&](GenericParameterVar va)
+		{
+			// TODO Use something other than pointers to make comparison deterministic
+			return va.def < std::get<GenericParameterVar>(b).def;
+		},
+		[&](GenericDeductionVar va)
+		{
+			return va.def->id < std::get<GenericDeductionVar>(b).def->id;
+		},
+	};
+}
+
+static bool operator < (Expr const &a, Expr const &b)
+{
+	if(a.index() != b.index())
+		return a.index() < b.index();
+
+	return a | match
+	{
+		[&](IntLiteralExpr const &ea)
+		{
+			return ea.value < std::get<IntLiteralExpr>(b).value;
+		},
+		[&](GenericVarExpr const &ea)
+		{
+			return ea.var < std::get<GenericVarExpr>(b).var;
+		},
+		[&](auto const&) -> bool
+		{
+			assert(!"[TODO] operator <: Expr");
+		}
+	};
+}
+
+static bool operator < (GenericArg const &a, GenericArg const &b)
+{
+	if(a.index() != b.index())
+		return a.index() < b.index();
+
+	return a | match
+	{
+		[&](Type const &t) { return t < std::get<Type>(b); },
+		[&](Expr const &e) { return e < std::get<Expr>(b); },
+	};
+}
+
 bool operator < (Type const &a, Type const &b)
 {
 	if(a.index() != b.index())
@@ -3436,26 +3839,18 @@ bool operator < (Type const &a, Type const &b)
 		[&](VarType const &ta)
 		{
 			VarType const &tb = std::get<VarType>(b);
-			if(ta.index() != tb.index())
-				return ta.index() < tb.index();
-
-			return ta | match
-			{
-				[&](TypeParameterVar va)
-				{
-					// TODO Use something other than pointers to make comparison deterministic
-					return va.def < std::get<TypeParameterVar>(tb).def;
-				},
-				[&](TypeDeductionVar va)
-				{
-					return va.id < std::get<TypeDeductionVar>(tb).id;
-				},
-			};
+			return ta.var < tb.var;
 		},
 		[&](PointerType const &ta)
 		{
 			PointerType const &tb = std::get<PointerType>(b);
 			return std::tie(ta.kind, ta.mutability, *ta.pointee) < std::tie(tb.kind, tb.mutability, *tb.pointee);
+		},
+		[&](ArrayType const &ta)
+		{
+			ArrayType const &tb = std::get<ArrayType>(b);
+			assert(ta.count_arg and tb.count_arg);
+			return std::tie(*ta.count_arg, *ta.element) < std::tie(*tb.count_arg, *tb.element);
 		},
 		[&](StructType const &ta)
 		{
@@ -3532,8 +3927,8 @@ static Type* mk_pointer_type(Type *pointee, IsMutable mutability, Arena &arena)
 // Unification
 //--------------------------------------------------------------------
 [[noreturn]] static void throw_unification_error(
-	Type const &left,
-	Type const &right,
+	GenericArg const &left,
+	GenericArg const &right,
 	optional<LazyErrorMsg> error_msg,
 	Module const *mod
 )
@@ -3641,18 +4036,21 @@ static optional<TypeConversion> try_convert_integer_type(
 
 bool Unifier::try_unify_integer_types()
 {
-	if(not is_integer_type(*m_left) or not is_integer_type(*m_right))
+	Type const &left = std::get<Type>(*m_left);
+	Type const &right = std::get<Type>(*m_right);
+
+	if(not is_integer_type(left) or not is_integer_type(right))
 		return false;
 
-	optional<Type> common_type = common_int_type(*m_left, *m_right);
+	optional<Type> common_type = common_int_type(left, right);
 	if(not common_type)
 		throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 
-	optional<TypeConversion> act_conv_left = try_convert_integer_type(*m_left, *common_type, m_conv_left);
+	optional<TypeConversion> act_conv_left = try_convert_integer_type(left, *common_type, m_conv_left);
 	if(not act_conv_left)
 		throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 
-	optional<TypeConversion> act_conv_right = try_convert_integer_type(*m_right, *common_type, m_conv_right);
+	optional<TypeConversion> act_conv_right = try_convert_integer_type(right, *common_type, m_conv_right);
 	if(not act_conv_right)
 		throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 
@@ -3671,7 +4069,23 @@ bool Unifier::try_unify_integer_types()
 
 // Unification of type deduction variables
 //--------------------------------------------------------------------
-bool type_var_occurs_in(VarType var, Type const &type)
+static bool type_var_occurs_in(GenericVar var, Expr const &expr)
+{
+	bool result = false;
+	traverse(expr, match
+	{
+		[&](GenericVarExpr const &e)
+		{
+			if(e.var == var)
+				result = true;
+		},
+		[&](auto const&) {}
+	});
+
+	return result;
+}
+
+bool type_var_occurs_in(GenericVar var, Type const &type)
 {
 	return type | match
 	{
@@ -3679,11 +4093,16 @@ bool type_var_occurs_in(VarType var, Type const &type)
 		[&](KnownIntType const&) { return false; },
 		[&](VarType const &t)
 		{
-			return t == var;
+			return t.var == var;
 		},
 		[&](PointerType const &t)
 		{
 			return type_var_occurs_in(var, *t.pointee);
+		},
+		[&](ArrayType const &t)
+		{
+			assert(t.count_arg);
+			return type_var_occurs_in(var, *t.count_arg) or type_var_occurs_in(var, *t.element);
 		},
 		[&](ProcType const &t)
 		{
@@ -3705,28 +4124,59 @@ bool type_var_occurs_in(VarType var, Type const &type)
 	};
 }
 
-optional<TypeDeductionVar> get_if_type_deduction_var(Type const &type)
+bool type_var_occurs_in(GenericVar var, GenericArg const &arg)
+{
+	return arg | match
+	{
+		[&](Type const &type) { return type_var_occurs_in(var, type); },
+		[&](Expr const &expr) { return type_var_occurs_in(var, expr); }
+	};
+}
+
+optional<GenericDeductionVar> get_if_type_deduction_var(Type const &type)
 {
 	VarType const *var_type = std::get_if<VarType>(&type);
 	if(not var_type)
 		return nullopt;
 
-	TypeDeductionVar const* type_deduction_var = std::get_if<TypeDeductionVar>(var_type);
+	GenericDeductionVar const* type_deduction_var = std::get_if<GenericDeductionVar>(&var_type->var);
 	if(not type_deduction_var)
 		return nullopt;
 
 	return *type_deduction_var;
 }
 
+optional<GenericDeductionVar> get_if_type_deduction_var(Expr const &expr)
+{
+	GenericVarExpr const *var = std::get_if<GenericVarExpr>(&expr);
+	if(not var)
+		return nullopt;
+
+	GenericDeductionVar const* type_deduction_var = std::get_if<GenericDeductionVar>(&var->var);
+	if(not type_deduction_var)
+		return nullopt;
+
+	return *type_deduction_var;
+}
+
+optional<GenericDeductionVar> get_if_deduction_var(GenericArg const &arg)
+{
+	return arg | match
+	{
+		[](Type const &t) { return get_if_type_deduction_var(t); },
+		[](Expr const &e) { return get_if_type_deduction_var(e); },
+	};
+}
+
 bool Unifier::try_unify_type_deduction_vars()
 {
-	optional<TypeDeductionVar> left_var = get_if_type_deduction_var(*m_left);
-	optional<TypeDeductionVar> right_var = get_if_type_deduction_var(*m_right);
+	optional<GenericDeductionVar> left_var = get_if_deduction_var(*m_left);
+	optional<GenericDeductionVar> right_var = get_if_deduction_var(*m_right);
 
-	if(Type const* t = left_var ? try_lookup(*left_var) : nullptr)
+	if(GenericArg const* arg = left_var ? try_lookup(*left_var) : nullptr)
 	{
 		Unifier(*this)
-			.left(*t, m_conv_left, m_expr_left)
+			.left(*arg, m_conv_left, m_expr_left)
 			.right(*m_right, m_conv_right, m_expr_right)
 			.set(m_subst)
 			.result(m_result)
@@ -3735,11 +4185,11 @@ bool Unifier::try_unify_type_deduction_vars()
 		return true;
 	}
 
-	if(Type const *t = right_var ? try_lookup(*right_var) : nullptr)
+	if(GenericArg const *arg = right_var ? try_lookup(*right_var) : nullptr)
 	{
 		Unifier(*this)
 			.left(*m_left, m_conv_left, m_expr_left)
-			.right(*t, m_conv_right, m_expr_right)
+			.right(*arg, m_conv_right, m_expr_right)
 			.set(m_subst)
 			.result(m_result)
 			.go();
@@ -3770,7 +4220,7 @@ bool Unifier::try_unify_type_deduction_vars()
 		{
 			// It's important here to chose the right side as the result so the constraint solver
 			// can make progress (the left side is pretty boring since it is just a
-			// TypeDeductionVar, while the right side might be an actual type, giving the constraint
+			// GenericDeductionVar, while the right side might be an actual type, giving the constraint
 			// solver additional information)
 			*m_result = *m_right;
 		}
@@ -3952,8 +4402,11 @@ StructInstance* try_get_implicit_ctor_for(
 
 bool Unifier::try_unify_structs()
 {
-	StructInstance *left_struct = get_if_struct(m_left);
-	StructInstance *right_struct = get_if_struct(m_right);
+	Type const &left = std::get<Type>(*m_left);
+	Type const &right = std::get<Type>(*m_right);
+
+	StructInstance *left_struct = get_if_struct(&left);
+	StructInstance *right_struct = get_if_struct(&right);
 	if(not left_struct)
 	{
 		if(not right_struct)
@@ -3991,16 +4444,16 @@ bool Unifier::try_unify_structs()
 		if(right_struct != common_parent_right)
 			emit_conversion(TypeConversion::TRIVIAL, m_expr_right);
 	}
-	else if(UnionInstance *right_union = get_if_union(m_right))
+	else if(UnionInstance *right_union = get_if_union(&right))
 	{
 		StructInstance *implicit_case_left = nullptr;
 		Type const *matching_alt_right = nullptr;
 
 		if(m_conv_right == TypeConversion::IMPLICIT_CTOR)
-			implicit_case_left = try_get_implicit_ctor_for(left_struct, *m_right, m_expr_right, m_err, m_subst, m_ctx);
+			implicit_case_left = try_get_implicit_ctor_for(left_struct, right, m_expr_right, m_err, m_subst, m_ctx);
 
 		if(m_conv_left == TypeConversion::IMPLICIT_CTOR)
-			matching_alt_right = try_find_matching_alt_for(right_union, *m_left, m_expr_left, m_err, m_subst, m_ctx);
+			matching_alt_right = try_find_matching_alt_for(right_union, left, m_expr_left, m_err, m_subst, m_ctx);
 
 		if(not implicit_case_left and not matching_alt_right)
 			throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
@@ -4041,10 +4494,10 @@ bool Unifier::try_unify_structs()
 		StructInstance *implicit_case_left = nullptr;
 
 		if(m_conv_right == TypeConversion::IMPLICIT_CTOR)
-			implicit_case_left = try_get_implicit_ctor_for(left_struct, *m_right, m_expr_right, m_err, m_subst, m_ctx);
+			implicit_case_left = try_get_implicit_ctor_for(left_struct, right, m_expr_right, m_err, m_subst, m_ctx);
 
 		if(m_conv_left == TypeConversion::IMPLICIT_CTOR and right_struct)
-			implicit_case_right = try_get_implicit_ctor_for(right_struct, *m_left, m_expr_left, m_err, m_subst, m_ctx);
+			implicit_case_right = try_get_implicit_ctor_for(right_struct, left, m_expr_left, m_err, m_subst, m_ctx);
 
 		if(implicit_case_left and implicit_case_right)
 		{
@@ -4121,8 +4574,11 @@ static Type const* try_find_matching_alt_for(
 
 bool Unifier::try_unify_unions()
 {
-	UnionInstance *left_union = get_if_union(m_left);
-	UnionInstance *right_union = get_if_union(m_right);
+	Type const &left = std::get<Type>(*m_left);
+	Type const &right = std::get<Type>(*m_right);
+
+	UnionInstance *left_union = get_if_union(&left);
+	UnionInstance *right_union = get_if_union(&right);
 	if(not left_union)
 	{
 		if(not right_union)
@@ -4153,7 +4609,7 @@ bool Unifier::try_unify_unions()
 		if(m_conv_right != TypeConversion::IMPLICIT_CTOR)
 			throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 
-		Type const *matched_alt = try_find_matching_alt_for(left_union, *m_right, m_expr_right, m_err, m_subst, m_ctx);
+		Type const *matched_alt = try_find_matching_alt_for(left_union, right, m_expr_right, m_err, m_subst, m_ctx);
 		if(not matched_alt)
 			throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 
@@ -4195,8 +4651,11 @@ optional<TypeConversion> can_convert_mutability(IsMutable from, IsMutable to, Ty
 
 bool Unifier::try_unify_pointers()
 {
-	PointerType const *left_pointer = std::get_if<PointerType>(m_left);
-	PointerType const *right_pointer = std::get_if<PointerType>(m_right);
+	Type const &left = std::get<Type>(*m_left);
+	Type const &right = std::get<Type>(*m_right);
+
+	PointerType const *left_pointer = std::get_if<PointerType>(&left);
+	PointerType const *right_pointer = std::get_if<PointerType>(&right);
 	if(not left_pointer or not right_pointer)
 		return false;
 
@@ -4209,7 +4668,7 @@ bool Unifier::try_unify_pointers()
 	if(not act_conv_left or not act_conv_right)
 		throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 
-	Type common_pointee;
+	GenericArg common_pointee;
 	Unifier(*this)
 		.left(
 			*left_pointer->pointee,
@@ -4228,7 +4687,7 @@ bool Unifier::try_unify_pointers()
 	{
 		*m_result = PointerType{
 			.range = UNKNOWN_TOKEN_RANGE,
-			.pointee = clone_ptr(&common_pointee, m_ctx.arena),
+			.pointee = clone_ptr(&common_pointee.as_type(), m_ctx.arena),
 			.kind = left_pointer->kind,
 			.mutability = common_mutability,
 		};
@@ -4241,6 +4700,67 @@ bool Unifier::try_unify_pointers()
 		emit_conversion(*act_conv_right, m_expr_right);
 
 	return true;
+}
+
+
+// Unification of array types
+//--------------------------------------------------------------------
+bool Unifier::try_unify_arrays()
+{
+	Type const &left = std::get<Type>(*m_left);
+	Type const &right = std::get<Type>(*m_right);
+
+	ArrayType const *left_array = std::get_if<ArrayType>(&left);
+	ArrayType const *right_array = std::get_if<ArrayType>(&right);
+	if(not left_array or not right_array)
+		return false;
+
+	GenericArg count_result;
+	Unifier(*this)
+		.left(*left_array->count_arg, TypeConversion::NONE)
+		.right(*right_array->count_arg, TypeConversion::NONE)
+		.result(&count_result)
+		.go();
+
+	GenericArg element_type_result;
+	Unifier(*this)
+		.left(*left_array->element, TypeConversion::NONE)
+		.right(*right_array->element, TypeConversion::NONE)
+		.result(&element_type_result)
+		.go();
+
+	if(m_result)
+	{
+		*m_result = ArrayType{
+			.range = UNKNOWN_TOKEN_RANGE,
+			.element = clone_ptr(&element_type_result.as_type(), m_ctx.arena),
+			.count_arg = clone_ptr(&count_result.as_expr(), m_ctx.arena),
+		};
+	}
+
+	return true;
+}
+
+
+// Unification of array types
+//--------------------------------------------------------------------
+void Unifier::unify_generic_values()
+{
+	Expr const &left = std::get<Expr>(*m_left);
+	Expr const &right = std::get<Expr>(*m_right);
+
+	IntLiteralExpr const *left_int = std::get_if<IntLiteralExpr>(&left);
+	IntLiteralExpr const *right_int = std::get_if<IntLiteralExpr>(&right);
+	if(left_int and right_int)
+	{
+		if(left_int->value != right_int->value)
+			throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
+
+		if(m_result)
+			*m_result = *m_left;
+	}
+	else
+		throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 }
 
 
@@ -4283,70 +4803,84 @@ void Unifier::go()
 	// The order in which (1), (3), and (4) are executed is important because their conditions
 	// overlap.
 
-	// (1) Cases covered: is<TypeDeductionVar>(left) OR is<TypeDeductionVar>(right)
+	// (1) Cases covered: is<GenericDeductionVar>(left) OR is<GenericDeductionVar>(right)
 	if(try_unify_type_deduction_vars())
 		return;
 
-	// (2) Cases covered: is_integer_type(left) AND is_integer_type(right)
-	if(try_unify_integer_types())
-		return;
-
-	// (3) Cases covered: is<StructType>(left) OR is<StructType>(right)
-	if(try_unify_structs())
-		return;
-
-	// (4) Cases covered: is<UnionType>(left) OR is<UnionType>(right)
-	if(try_unify_unions())
-		return;
-
-	// (5) Cases covered: is<PointerType>(left) AND is<PointerType>(right)
-	if(try_unify_pointers())
-		return;
-
-	*m_left | match
+	if(is<Type>(*m_left) and is<Type>(*m_right))
 	{
-		[&](BuiltinType const &left_t)
+		// (2) Cases covered: is_integer_type(left) AND is_integer_type(right)
+		if(try_unify_integer_types())
+			return;
+
+		// (3) Cases covered: is<StructType>(left) OR is<StructType>(right)
+		if(try_unify_structs())
+			return;
+
+		// (4) Cases covered: is<UnionType>(left) OR is<UnionType>(right)
+		if(try_unify_unions())
+			return;
+
+		// (5) Cases covered: is<PointerType>(left) AND is<PointerType>(right)
+		if(try_unify_pointers())
+			return;
+
+		// (6) Cases covered: is<ArrayType>(left) AND is<ArrayType>(right)
+		if(try_unify_arrays())
+			return;
+
+		Type const &left = std::get<Type>(*m_left);
+		Type const &right = std::get<Type>(*m_right);
+		left | match
 		{
-			BuiltinType const *right_t = std::get_if<BuiltinType>(m_right);
-			if(not right_t)
-				throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
+			[&](BuiltinType const &left_t)
+			{
+				BuiltinType const *right_t = std::get_if<BuiltinType>(&right);
+				if(not right_t)
+					throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 
-			// The case where both left and right are integer types has already been handled above.
-			// Non-integer builtin types (Never, Unit, Bool) can only be unified if they are equal.
-			if(left_t.builtin != right_t->builtin)
-				throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
+				// The case where both left and right are integer types has already been handled above.
+				// Non-integer builtin types (Never, Unit, Bool) can only be unified if they are equal.
+				if(left_t.builtin != right_t->builtin)
+					throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 
-			if(m_result) *m_result = *m_left;
-		},
-		[&](VarType const&)
-		{
-			// If we get here, we know left and right are TypeParameterVars (because we already
-			// handled TypeDeductionVars above).
-			//
-			// Unification of TypeParameterVars only succeeds if both sides refer to the same
-			// TypeParameterVar as they may be instantiated with any type.
+				if(m_result) *m_result = *m_left;
+			},
+			[&](VarType const&)
+			{
+				// If we get here, we know left and right are GenericParameterVars (because we already
+				// handled GenericDeductionVars above).
+				//
+				// Unification of GenericParameterVars only succeeds if both sides refer to the same
+				// GenericParameterVar as they may be instantiated with any type.
 
-			if(not equiv(*m_left, *m_right))
-				throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
+				if(not equiv(*m_left, *m_right))
+					throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 
-			if(m_result) *m_result = *m_left;
-		},
-		[&](ProcType const&)
-		{
-			assert(!"[TODO] unify: ProcType");
-		},
+				if(m_result) *m_result = *m_left;
+			},
+			[&](ProcType const&)
+			{
+				assert(!"[TODO] unify: ProcType");
+			},
 
-		// Handled above
-		[&](KnownIntType const&) { throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod); },
-		[&](PointerType const&) { throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod); },
-		[&](StructType const&) { throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod); },
-		[&](UnionType const&) { throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod); },
+			// Handled above
+			[&](KnownIntType const&) { throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod); },
+			[&](PointerType const&) { throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod); },
+			[&](ArrayType const&) { throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod); },
+			[&](StructType const&) { throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod); },
+			[&](UnionType const&) { throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod); },
 
-		[&](ProcTypeUnresolved const&) { assert(!"unify: ProcTypeUnresolved"); },
-		[&](UnionTypeUnresolved const&) { assert(!"unify: UnionTypeUnresolved"); },
-		[&](Path const&) { assert(!"unify: Path"); },
-		[&](InlineStructType const&) { assert(!"unify: InlineStructType"); },
-	};
+			[&](ProcTypeUnresolved const&) { assert(!"unify: ProcTypeUnresolved"); },
+			[&](UnionTypeUnresolved const&) { assert(!"unify: UnionTypeUnresolved"); },
+			[&](Path const&) { assert(!"unify: Path"); },
+			[&](InlineStructType const&) { assert(!"unify: InlineStructType"); },
+		};
+	}
+	else if(is<Expr>(*m_left) and is<Expr>(*m_right))
+		unify_generic_values();
+	else
+		throw_unification_error(*m_left, *m_right, m_err, m_ctx.mod);
 }
 
 
@@ -4355,8 +4889,8 @@ void Unifier::go()
 //--------------------------------------------------------------------
 Type const* follow_type_var(Type const *type, TypeEnv const &env)
 {
-	if(optional<TypeDeductionVar> var = get_if_type_deduction_var(*type))
-		return follow_type_var(&env.lookup(*var), env);
+	if(optional<GenericDeductionVar> var = get_if_type_deduction_var(*type))
+		return follow_type_var(&env.lookup(*var).as_type(), env);
 
 	return type;
 }
@@ -4375,10 +4909,20 @@ optional<IsMutable> is_lvalue_expr(Expr const &expr, TypeEnv const &env)
 		},
 		[&](IndexExpr const &e) -> optional<IsMutable>
 		{
-			PointerType const &p = std::get<PointerType>(*follow_type_var(type_of(*e.addr), env));
-			assert(p.kind == PointerType::MANY);
-
-			return p.mutability;
+			Type const *indexed_type = follow_type_var(type_of(*e.addr), env);
+			return *indexed_type | match
+			{
+				[&](ArrayType const&) -> optional<IsMutable>
+				{
+					return is_lvalue_expr(*e.addr, env);
+				},
+				[&](PointerType const &ptr) -> optional<IsMutable>
+				{
+					assert(ptr.kind == PointerType::MANY);
+					return ptr.mutability;
+				},
+				[](auto const&) -> optional<IsMutable> { assert(!"is_lvalue_expr: IndexExpr"); },
+			};
 		},
 		[&](MemberAccessExpr const &e) -> optional<IsMutable>
 		{
@@ -4396,7 +4940,7 @@ public:
 		env(&env),
 		arena(&arena) {}
 
-	virtual Type const* try_get(TypeDeductionVar var) override
+	virtual GenericArg const* try_get(GenericDeductionVar var) override
 	{
 		return env->try_lookup(var);
 	}
@@ -4407,21 +4951,21 @@ public:
 	}
 
 	virtual void set(
-		TypeDeductionVar var,
+		GenericDeductionVar var,
 		TypeConversion var_conv,
 		Expr *NULLABLE var_expr,
-		Type const &type,
-		TypeConversion type_conv,
-		Expr *NULLABLE type_expr,
+		GenericArg const &arg,
+		TypeConversion arg_conv,
+		Expr *NULLABLE arg_expr,
 		optional<LazyErrorMsg> error_msg
 	) override
 	{
 		(void)var;
 		(void)var_conv;
 		(void)var_expr;
-		(void)type;
-		(void)type_conv;
-		(void)type_expr;
+		(void)arg;
+		(void)arg_conv;
+		(void)arg_expr;
 		(void)error_msg;
 
 		assert(!"TypeEnvReadonlySubst::set()");
@@ -4463,8 +5007,8 @@ static bool is_cast_ok(Type const &target_type, Expr &src_expr, TypeEnv const &e
 		},
 		[&](VarType const &src_t) -> bool
 		{
-			if(Type const *t = env.try_lookup(src_t))
-				return is_cast_ok(*t, src_expr, env, ctx);
+			if(GenericArg const *arg = env.try_lookup(src_t.var))
+				return is_cast_ok(arg->as_type(), src_expr, env, ctx);
 
 			return false;
 		},
@@ -4474,6 +5018,10 @@ static bool is_cast_ok(Type const &target_type, Expr &src_expr, TypeEnv const &e
 				return src_t.mutability == IsMutable::YES || target_t->mutability == IsMutable::NO;
 
 			return false;
+		},
+		[&](ArrayType const&) -> bool
+		{
+			assert(!"[TODO] is_cast_ok: ArrayType");
 		},
 		[&](StructType const&) -> bool
 		{
@@ -4540,7 +5088,7 @@ void ConstraintSystem::add_check(TypeCheck const &check)
 }
 
 bool ConstraintSystem::add_relational_constraint(
-	TypeDeductionVar var,
+	GenericDeductionVar var,
 	ConstraintEdge const &edge
 )
 {
@@ -4549,17 +5097,17 @@ bool ConstraintSystem::add_relational_constraint(
 		changed = true;
 
 	if(
-		optional<TypeDeductionVar> other_var = get_if_type_deduction_var(edge.type);
-		other_var and is<NoModifier>(edge.type_modifier)
+		optional<GenericDeductionVar> other_var = get_if_deduction_var(edge.arg);
+		other_var and is<NoModifier>(edge.arg_modifier)
 	)
 	{
 		changed |= get_node(*other_var).add_edge(ConstraintEdge{
-			.var_conv = edge.type_conv,
-			.var_expr = edge.type_expr,
-			.type = VarType(var),
-			.type_conv = edge.var_conv,
-			.type_expr = edge.var_expr,
-			.type_modifier = NoModifier(),
+			.var_conv = edge.arg_conv,
+			.var_expr = edge.arg_expr,
+			.arg = mk_generic_arg(var),
+			.arg_conv = edge.var_conv,
+			.arg_expr = edge.var_expr,
+			.arg_modifier = NoModifier(),
 			.error_msg = edge.error_msg,
 		});
 	}
@@ -4567,14 +5115,14 @@ bool ConstraintSystem::add_relational_constraint(
 	return changed;
 }
 
-std::expected<Type, ErrorMsg> follow_type(Type const &type, ConstraintModifier const &modifier, TypeEnv const *env, SemaContext *ctx);
+std::expected<GenericArg, ErrorMsg> follow_arg(GenericArg const &arg, ConstraintModifier const &modifier, TypeEnv const *env, SemaContext *ctx);
 
 string edge_to_str(ConstraintEdge const &edge, Module const &mod)
 {
 	std::stringstream ss;
-	ss << " " << type_conv_symbol(edge.var_conv) << ":" << type_conv_symbol(edge.type_conv) << " ";
-	::print(edge.type, mod, ss);
-	edge.type_modifier | match
+	ss << " " << type_conv_symbol(edge.var_conv) << ":" << type_conv_symbol(edge.arg_conv) << " ";
+	::print(edge.arg, mod, ss);
+	edge.arg_modifier | match
 	{
 		[&](NoModifier) {},
 		[&](MemberTypeModifier m)
@@ -4597,7 +5145,7 @@ void ConstraintSystem::print(std::ostream &os) const
 {
 	for(auto const &[var, node]: nodes)
 	{
-		::print(VarType(var), mod, os);
+		::print(mk_generic_arg(var), mod, os);
 		os << std::endl;
 
 		TTable table;
@@ -4645,7 +5193,7 @@ void ConstraintSystem::print(std::ostream &os) const
 class NewConstraintGatheringSubst : public Subst
 {
 public:
-	virtual Type const* try_get(TypeDeductionVar var) override
+	virtual GenericArg const* try_get(GenericDeductionVar var) override
 	{
 		// Q: Why not look up the current type from TypeEnv?
 		// A: Because TypeEnv contains in-progress types which may differ from the final type.
@@ -4702,12 +5250,12 @@ public:
 	}
 
 	virtual void set(
-		TypeDeductionVar var,
+		GenericDeductionVar var,
 		TypeConversion var_conv,
 		Expr *NULLABLE var_expr,
-		Type const &type,
-		TypeConversion type_conv,
-		Expr *NULLABLE type_expr,
+		GenericArg const &arg,
+		TypeConversion arg_conv,
+		Expr *NULLABLE arg_expr,
 		optional<LazyErrorMsg> error_msg
 	) override
 	{
@@ -4716,16 +5264,16 @@ public:
 			ConstraintEdge{
 				.var_conv = var_conv,
 				.var_expr = var_expr,
-				.type = type,
-				.type_conv = type_conv,
-				.type_expr = type_expr,
-				.type_modifier = NoModifier(),
+				.arg = arg,
+				.arg_conv = arg_conv,
+				.arg_expr = arg_expr,
+				.arg_modifier = NoModifier(),
 				.error_msg = error_msg,
 			}
 		});
 	}
 
-	vector<pair<TypeDeductionVar, ConstraintEdge>> new_nodes;
+	vector<pair<GenericDeductionVar, ConstraintEdge>> new_nodes;
 	unordered_map<Expr*, vector<TypeConversionEvent>> *conversions = nullptr;
 	Expr *NULLABLE left_expr;
 	Expr *NULLABLE right_expr;
@@ -4733,7 +5281,7 @@ public:
 
 struct ReductionResult
 {
-	Type type;
+	GenericArg arg;
 	TypeConversion conv;
 };
 
@@ -4758,8 +5306,8 @@ enum class ReductionBehavior
 	NO_MERGE,
 };
 
-// "Reduction" refers to the process of calculating a concrete type for a TypeDeductionVar by,
-// essentially, unifying all the types that are connected to the TypeDeductionVar.
+// "Reduction" refers to the process of calculating a concrete type for a GenericDeductionVar by,
+// essentially, unifying all the types that are connected to the GenericDeductionVar.
 //
 // As an example, assume we have constraints C1, C2 and C3 that constrain `var` to the types A, B
 // and C, respectively. In order to compute `result` we essentially do the following:
@@ -4787,20 +5335,20 @@ void reduction_step(
 	SemaContext *ctx
 )
 {
-	std::expected<Type, ErrorMsg> edge_type = follow_type(edge.type, edge.type_modifier, env, ctx);
+	std::expected<GenericArg, ErrorMsg> edge_type = follow_arg(edge.arg, edge.arg_modifier, env, ctx);
 	if(not edge_type)
 		return state->set_error(edge_type.error());
 
-	// If the edge type is a TypeDeductionVar do not merge (i.e. unify) it into `state` as it does
+	// If the edge type is a GenericDeductionVar do not merge (i.e. unify) it into `state` as it does
 	// not contain any useful information.
 	// This may sound like it's merely an optimization but it's also needed for correctness:
 	//
 	//   b ->> a ->> i8
 	//
-	// If we did allow TypeDeductionVar to be merged into `state`, then `b ->> a` would constitute a
+	// If we did allow GenericDeductionVar to be merged into `state`, then `b ->> a` would constitute a
 	// valid push constraint for `a`. This in turn would mean that the pull constraint `a ->> i8`
 	// would not update `a` (push takes precedence over pull), hence `env[a]` would never be set.
-	if(get_if_type_deduction_var(*edge_type))
+	if(get_if_deduction_var(*edge_type))
 	{
 		// If edge_type becomes constrained later on then this error message will be cleared
 		return state->set_error(ErrorMsg(mk_error_msg(
@@ -4808,7 +5356,7 @@ void reduction_step(
 		)));
 	}
 
-	TypeConversion edge_conv = edge.type_conv;
+	TypeConversion edge_conv = edge.arg_conv;
 	if(behavior == ReductionBehavior::MERGE_EQUAL)
 		edge_conv = TypeConversion::NONE;
 
@@ -4825,12 +5373,12 @@ void reduction_step(
 
 		subst->conversions = &state->conversions;
 		subst->left_expr = left_expr;
-		subst->right_expr = edge.type_expr;
+		subst->right_expr = edge.arg_expr;
 
-		Type result;
+		GenericArg result;
 		Unifier u(*ctx);
-		u.left(state->result->type, state->result->conv, left_expr);
-		u.right(*edge_type, edge_conv, edge.type_expr);
+		u.left(state->result->arg, state->result->conv, left_expr);
+		u.right(*edge_type, edge_conv, edge.arg_expr);
 		u.set(subst);
 		u.set(edge.error_msg);
 		u.result(&result);
@@ -4840,11 +5388,11 @@ void reduction_step(
 
 			if(behavior != ReductionBehavior::NO_MERGE)
 			{
-				state->result->type = result;
-				state->result->conv = glb(state->result->conv, edge.type_conv);
+				state->result->arg = result;
+				state->result->conv = glb(state->result->conv, edge.arg_conv);
 
-				if(edge.type_expr)
-					state->conversions.insert({edge.type_expr, {}});
+				if(edge.arg_expr)
+					state->conversions.insert({edge.arg_expr, {}});
 			}
 		}
 		catch(ParseError const &exc) {
@@ -4858,10 +5406,18 @@ void reduction_step(
 		if(behavior != ReductionBehavior::NO_MERGE)
 		{
 			state->result = ReductionResult(*edge_type, edge_conv);
-			if(edge.type_expr)
-				state->conversions.insert({edge.type_expr, {}});
+			if(edge.arg_expr)
+				state->conversions.insert({edge.arg_expr, {}});
 		}
 	}
+}
+
+static bool is_known_int(GenericArg const &arg)
+{
+	if(Type const *t = std::get_if<Type>(&arg))
+		return is<KnownIntType>(*t);
+
+	return false;
 }
 
 void reduce(
@@ -4920,7 +5476,7 @@ void reduce(
 			if(
 				node.push_edges.empty() or
 				not red_state.result or
-				is<KnownIntType>(red_state.result->type)
+				is_known_int(red_state.result->arg)
 			) {
 				pull_reduction_behavior = ReductionBehavior::MERGE_EQUAL;
 			}
@@ -4936,9 +5492,9 @@ void reduce(
 			bool result_is_concrete = false;
 			if(red_state.result)
 			{
-				result_is_concrete = not get_type_stats(red_state.result->type).has_type_deduction_vars;
-				if(env and not type_var_occurs_in(var, red_state.result->type))
-					changed |= env->update(var, red_state.result->type);
+				result_is_concrete = not get_type_stats(red_state.result->arg).has_type_deduction_vars;
+				if(env and not type_var_occurs_in(var, red_state.result->arg))
+					changed |= env->update(var, red_state.result->arg);
 			}
 
 			if(red_state.error)
@@ -4948,9 +5504,9 @@ void reduce(
 				// If edge_type becomes constrained later on then this error message will be cleared
 				if(red_state.result)
 				{
-					Type const *t = &red_state.result->type;
+					GenericArg const *arg = &red_state.result->arg;
 					node.error = ErrorMsg(mk_error_msg(
-						"Insufficiently constrained type "s + str(*t, *ctx->mod), token_range_of(*t).first, ctx->mod
+						"Insufficiently constrained type "s + str(*arg, *ctx->mod), token_range_of(*arg).first, ctx->mod
 					));
 				}
 				else
@@ -5017,6 +5573,15 @@ TypeEnv create_subst_from_constraints(ConstraintSystem &constraints, SemaContext
 }
 
 
+static PointerType const* get_if_pointer_type(Type const *type, PointerType::Kind kind)
+{
+	PointerType const *pointer_type = std::get_if<PointerType>(type);
+	if(pointer_type and pointer_type->kind == kind)
+		return pointer_type;
+
+	return nullptr;
+}
+
 static std::expected<Type, ErrorMsg> get_pointee_type(
 	Type const *type,
 	PointerType::Kind pointer_kind,
@@ -5024,8 +5589,9 @@ static std::expected<Type, ErrorMsg> get_pointee_type(
 	Module const &mod
 )
 {
-	PointerType const *pointer_type = std::get_if<PointerType>(type);
-	if(not pointer_type or pointer_type->kind != pointer_kind)
+	if(PointerType const *pointer_type = get_if_pointer_type(type, pointer_kind))
+		return *pointer_type->pointee;
+	else
 	{
 		char const *pointer_kind_str = nullptr;
 		switch(pointer_kind)
@@ -5038,8 +5604,24 @@ static std::expected<Type, ErrorMsg> get_pointee_type(
 			ErrorMsg(mk_error_msg("Expected "s + pointer_kind_str + " pointer type, got " + str(*type, mod), range.first, &mod))
 		);
 	}
+}
 
-	return *pointer_type->pointee;
+static std::expected<Type, ErrorMsg> get_indexed_type(
+	Type const *type,
+	TokenRange range,
+	Module const &mod
+)
+{
+	if(PointerType const *pointer_type = get_if_pointer_type(type, PointerType::MANY))
+		return *pointer_type->pointee;
+	else if(ArrayType const *array_type = std::get_if<ArrayType>(type))
+		return *array_type->element;
+	else
+	{
+		return std::unexpected(
+			ErrorMsg(mk_error_msg("Expected indexable type, got " + str(*type, mod), range.first, &mod))
+		);
+	}
 }
 
 
@@ -5089,54 +5671,54 @@ static std::expected<Type, ErrorMsg> get_member_type(
 }
 
 
-std::expected<Type, ErrorMsg> follow_type(
-	Type const &type,
+std::expected<GenericArg, ErrorMsg> follow_arg(
+	GenericArg const &arg,
 	ConstraintModifier const &modifier,
 	TypeEnv const *env,
 	SemaContext *ctx
 )
 {
-	std::expected<Type, ErrorMsg> result = modifier | match
+	std::expected<GenericArg, ErrorMsg> result = modifier | match
 	{
-		[&](NoModifier) -> std::expected<Type, ErrorMsg>
+		[&](NoModifier) -> std::expected<GenericArg, ErrorMsg>
 		{
-			return type;
+			return arg;
 		},
-		[&](PointeeTypeModifier m) -> std::expected<Type, ErrorMsg>
+		[&](PointeeTypeModifier m) -> std::expected<GenericArg, ErrorMsg>
 		{
-			Type const *pointer_type = &type;
-			if(optional<TypeDeductionVar> var = get_if_type_deduction_var(type))
+			GenericArg const *pointer_type = &arg;
+			if(optional<GenericDeductionVar> var = get_if_deduction_var(arg))
 				pointer_type = env ? env->try_lookup(*var) : nullptr;
 
 			if(not pointer_type)
 			{
 				return std::unexpected(ErrorMsg(mk_error_msg(
-					"Insufficiently constrained type "s + str(type, *ctx->mod), token_range_of(type).first, ctx->mod
+					"Insufficiently constrained type "s + str(arg, *ctx->mod), token_range_of(arg).first, ctx->mod
 				)));
 			}
 
 			return get_pointee_type(
-				pointer_type,
+				&pointer_type->as_type(),
 				m.pointer_kind,
 				token_range_of(*pointer_type),
 				*ctx->mod
 			);
 		},
-		[&](MemberTypeModifier m) -> std::expected<Type, ErrorMsg>
+		[&](MemberTypeModifier m) -> std::expected<GenericArg, ErrorMsg>
 		{
-			Type const *struct_type = &type;
-			if(optional<TypeDeductionVar> var = get_if_type_deduction_var(type))
+			GenericArg const *struct_type = &arg;
+			if(optional<GenericDeductionVar> var = get_if_deduction_var(arg))
 				struct_type = env ? env->try_lookup(*var) : nullptr;
 
 			if(not struct_type)
 			{
 				return std::unexpected(ErrorMsg(mk_error_msg(
-					"Insufficiently constrained type "s + str(type, *ctx->mod), token_range_of(type).first, ctx->mod
+					"Insufficiently constrained type "s + str(arg, *ctx->mod), token_range_of(arg).first, ctx->mod
 				)));
 			}
 
 			return get_member_type(
-				struct_type,
+				&struct_type->as_type(),
 				m.member,
 				token_range_of(*struct_type),
 				*ctx->mod
@@ -5284,6 +5866,7 @@ static void expr_default_value_deps(Expr const &expr, std::unordered_map<Default
 			expr_default_value_deps(*e.alt_expr, deps, mod);
 		},
 		[&](VarExpr const&) {},
+		[&](GenericVarExpr const&) {},
 		[&](Path const&) { assert(!"expr_default_value_deps: Path"); },
 	};
 }
@@ -5319,7 +5902,7 @@ public:
 		constraints(constraints),
 		ctx(ctx) {}
 
-	virtual Type const * try_get(TypeDeductionVar var) override
+	virtual GenericArg const * try_get(GenericDeductionVar var) override
 	{
 		(void)var;
 		return nullptr;
@@ -5331,12 +5914,12 @@ public:
 	}
 
 	virtual void set(
-		TypeDeductionVar var,
+		GenericDeductionVar var,
 		TypeConversion var_conv,
 		Expr *NULLABLE var_expr,
-		Type const &type,
-		TypeConversion type_conv,
-		Expr *NULLABLE type_expr,
+		GenericArg const &arg,
+		TypeConversion arg_conv,
+		Expr *NULLABLE arg_expr,
 		optional<LazyErrorMsg> error_msg
 	) override
 	{
@@ -5345,10 +5928,10 @@ public:
 			ConstraintEdge{
 				.var_conv = var_conv,
 				.var_expr = var_expr,
-				.type = type,
-				.type_conv = type_conv,
-				.type_expr = type_expr,
-				.type_modifier = NoModifier(),
+				.arg = arg,
+				.arg_conv = arg_conv,
+				.arg_expr = arg_expr,
+				.arg_modifier = NoModifier(),
 				.error_msg = error_msg,
 			}
 		);
@@ -5357,6 +5940,124 @@ public:
 	ConstraintSystem *constraints;
 	SemaContext *ctx;
 };
+
+static void typecheck_type(Type &type, ConstraintGatheringSubst &subst, SemaContext &ctx)
+{
+	type | match
+	{
+		[&](this auto &self, ArrayType &t)
+		{
+			Type *count_type = typecheck_subexpr(*t.count_arg, subst, ctx);
+			auto error_msg = [](Expr const &ret_expr, string const &reason, Module const &mod)
+			{
+				throw_sem_error("Invalid array count: " + reason, token_range_of(ret_expr).first, &mod);
+			};
+			Unifier(ctx)
+				.left(*count_type, TypeConversion::NONE)
+				.right(BuiltinType(UNKNOWN_TOKEN_RANGE, BuiltinTypeDef::USIZE), TypeConversion::NONE)
+				.set(&subst)
+				.set(LazyErrorMsg(t.count_arg, error_msg))
+				.go();
+
+			visit_child_types(t, self);
+		},
+		[&](StructType &t)
+		{
+			t.inst->typecheck_generic_args(subst, ctx);
+		},
+		[&](ProcType &t)
+		{
+			t.inst->typecheck(subst, ctx);
+		},
+		[&](UnionType &t)
+		{
+			t.inst->typecheck(subst, ctx);
+		},
+		[&](this auto &self, auto &t) { visit_child_types(t, self); },
+	};
+}
+
+void typecheck_generic_args(
+	FixedArray<GenericArg> *args,
+	FixedArray<GenericParameter> const *params,
+	ConstraintGatheringSubst &subst,
+	SemaContext &ctx
+)
+{
+	for(auto const &[idx, arg]: *args | std::views::enumerate)
+	{
+		GenericParameter const &generic_param = params->items[idx];
+		arg | match
+		{
+			[&](Type &type)
+			{
+				typecheck_type(type, subst, ctx);
+			},
+			[&](Expr &expr)
+			{
+				GenericValueParameter const *gen_val = std::get_if<GenericValueParameter>(&generic_param.kind);
+				if(not gen_val)
+					throw_sem_error("Expected value, got type", token_range_of(expr).first, ctx.mod);
+
+				Type *type = typecheck_subexpr(expr, subst, ctx);
+
+				auto error_msg = [](Expr const &ret_expr, string const &reason, Module const &mod)
+				{
+					throw_sem_error("Invalid generic value: " + reason, token_range_of(ret_expr).first, &mod);
+				};
+				Unifier(ctx)
+					.left(*type, TypeConversion::NONE)
+					.right(*gen_val->type, TypeConversion::NONE)
+					.set(&subst)
+					.set(LazyErrorMsg(&expr, error_msg))
+					.go();
+			},
+		};
+	}
+}
+
+void StructInstance::typecheck_generic_args(ConstraintGatheringSubst &subst, SemaContext &ctx)
+{
+	if(m_generic_args_typechecked)
+		return;
+
+	::typecheck_generic_args(m_type_args.args, m_struct->type_params, subst, ctx);
+	m_generic_args_typechecked = true;
+}
+
+void ProcInstance::typecheck_generic_args(ConstraintGatheringSubst &subst, SemaContext &ctx)
+{
+	if(m_generic_args_typechecked)
+		return;
+
+	::typecheck_generic_args(m_type_args.args, m_proc->type_params, subst, ctx);
+	m_generic_args_typechecked = true;
+}
+
+
+void ProcTypeInstance::typecheck(ConstraintGatheringSubst &subst, SemaContext &ctx)
+{
+	if(has_been_typechecked)
+		return;
+
+	for(Type &param: *params)
+		typecheck_type(param, subst, ctx);
+
+	typecheck_type(*ret, subst, ctx);
+
+	has_been_typechecked = true;
+}
+
+void UnionInstance::typecheck(ConstraintGatheringSubst &subst, SemaContext &ctx)
+{
+	if(m_has_been_typechecked)
+		return;
+
+	for(Type *alt: m_alternatives)
+		typecheck_type(*alt, subst, ctx);
+
+	m_has_been_typechecked = true;
+}
 
 optional<size_t> find_by_name(ProcType const &proc, string_view name)
 {
@@ -5417,7 +6118,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 
 				case UnaryOp::NEG:
 				{
-					// Example where type_of(e.sub) is a TypeDeductionVar that is not mapped to any
+					// Example where type_of(e.sub) is a GenericDeductionVar that is not mapped to any
 					// concrete type:
 					//
 					//     proc foo'S() -> S {}
@@ -5462,13 +6163,13 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 					{
 						throw_sem_error("Invalid operands for binary operator: " + reason, token_range_of(expr).first, &mod);
 					};
-					Type *result = ctx.arena.alloc<Type>();
+					GenericArg result;
 					Unifier(ctx)
 						.left(*left_type, TypeConversion::IMPLICIT_CTOR, e.left)
 						.right(*right_type, TypeConversion::IMPLICIT_CTOR, e.right)
 						.set(&subst)
 						.set(LazyErrorMsg(&expr, uni_error_msg))
-						.result(result)
+						.result(&result)
 						.go();
 
 					KnownIntType const *left_known_int = std::get_if<KnownIntType>(left_type);
@@ -5494,7 +6195,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 					}
 					else
 					{
-						// Example where type_of(e.left) and type_of(e.right) are TypeDeductionVars
+						// Example where type_of(e.left) and type_of(e.right) are GenericDeductionVars
 						// that are not mapped to any concrete type:
 						//
 						//     proc foo'S() -> S {}
@@ -5517,7 +6218,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 						subst.constraints->add_check(IntegerCheck(LazyErrorMsg(e.left, error_msg), left_type));
 						subst.constraints->add_check(IntegerCheck(LazyErrorMsg(e.right, error_msg), right_type));
 
-						e.type = result;
+						e.type = clone_ptr(&result.as_type(), ctx.arena);
 					}
 				} break;
 
@@ -5585,14 +6286,14 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 		{
 			Type const *addr_type = typecheck_subexpr(*e.addr, subst, ctx);
 
-			if(optional<TypeDeductionVar> pointer_var = get_if_type_deduction_var(*addr_type))
+			if(optional<GenericDeductionVar> pointer_var = get_if_type_deduction_var(*addr_type))
 			{
-				TypeDeductionVar var = ctx.new_type_deduction_var();
+				GenericDeductionVar var = ctx.new_deduction_var(TypeDeductionVar());
 				subst.constraints->add_relational_constraint(var, ConstraintEdge{
-					.type = *pointer_var,
-					.type_modifier = PointeeTypeModifier(PointerType::SINGLE),
+					.arg = mk_generic_arg(*pointer_var),
+					.arg_modifier = PointeeTypeModifier(PointerType::SINGLE),
 				});
-				e.type = ctx.arena.alloc<Type>(VarType(var));
+				e.type = ctx.arena.alloc<Type>(VarType(UNKNOWN_TOKEN_RANGE, var));
 			}
 			else
 			{
@@ -5610,18 +6311,18 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 			Type const *addr_type = typecheck_subexpr(*e.addr, subst, ctx);
 			Type const *index_type = typecheck_subexpr(*e.index, subst, ctx);
 
-			if(optional<TypeDeductionVar> array_var = get_if_type_deduction_var(*addr_type))
+			if(optional<GenericDeductionVar> array_var = get_if_type_deduction_var(*addr_type))
 			{
-				TypeDeductionVar var = ctx.new_type_deduction_var();
+				GenericDeductionVar var = ctx.new_deduction_var(TypeDeductionVar());
 				subst.constraints->add_relational_constraint(var, ConstraintEdge{
-					.type = *array_var,
-					.type_modifier = PointeeTypeModifier(PointerType::MANY),
+					.arg = mk_generic_arg(*array_var),
+					.arg_modifier = PointeeTypeModifier(PointerType::MANY),
 				});
-				e.type = ctx.arena.alloc<Type>(VarType(var));
+				e.type = ctx.arena.alloc<Type>(VarType(UNKNOWN_TOKEN_RANGE, var));
 			}
 			else
 			{
-				std::expected<Type, ErrorMsg> pointee = get_pointee_type(addr_type, PointerType::MANY, e.range, *ctx.mod);
+				std::expected<Type, ErrorMsg> pointee = get_indexed_type(addr_type, e.range, *ctx.mod);
 				if(not pointee)
 					throw ParseError(pointee.error().msg);
 
@@ -5638,7 +6339,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 		},
 		[&](MemberAccessExpr &e) -> Type*
 		{
-			// Example where type_of(e.object) is a TypeDeductionVar:
+			// Example where type_of(e.object) is a GenericDeductionVar:
 			//
 			//     struct Foo { i: i32 }
 			//     proc id'T(v: T) { return v; }
@@ -5647,15 +6348,15 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 
 			Type const *object_type = typecheck_subexpr(*e.object, subst, ctx);
 
-			if(optional<TypeDeductionVar> object_var = get_if_type_deduction_var(*object_type))
+			if(optional<GenericDeductionVar> object_var = get_if_type_deduction_var(*object_type))
 			{
-				TypeDeductionVar var = ctx.new_type_deduction_var();
+				GenericDeductionVar var = ctx.new_deduction_var(TypeDeductionVar());
 				subst.constraints->add_relational_constraint(var, ConstraintEdge{
-					.type = *object_var,
-					.type_modifier = MemberTypeModifier(e.member),
+					.arg = mk_generic_arg(*object_var),
+					.arg_modifier = MemberTypeModifier(e.member),
 				});
 
-				e.type = ctx.arena.alloc<Type>(VarType(var));
+				e.type = ctx.arena.alloc<Type>(VarType(UNKNOWN_TOKEN_RANGE, var));
 			}
 			else
 			{
@@ -5690,6 +6391,7 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 		},
 		[&](AsExpr &e) -> Type*
 		{
+			typecheck_type(*e.target_type, subst, ctx);
 			typecheck_subexpr(*e.src_expr, subst, ctx);
 
 			subst.constraints->add_check(CastCheck{e.src_expr, e.target_type});
@@ -5713,10 +6415,12 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 		},
 		[&](CallExpr &e)
 		{
-			Type const *callable_type = typecheck_subexpr(*e.callable, subst, ctx);
-			ProcType const *callable_proc_type = std::get_if<ProcType>(callable_type);
+			Type *callable_type = typecheck_subexpr(*e.callable, subst, ctx);
+			ProcType *callable_proc_type = std::get_if<ProcType>(callable_type);
 			if(not callable_proc_type)
 				throw_sem_error("Expected callable expression", e.range.first, ctx.mod);
+
+			callable_proc_type->inst->typecheck(subst, ctx);
 
 			FixedArray<Type> const *param_types = callable_proc_type->inst->params;
 			if(e.args->count > param_types->count)
@@ -5795,6 +6499,42 @@ static Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, Sema
 		{
 			assert(e.var->type && "typecheck_subexpr: VarExpr: Var::type is null");
 			return e.type = clone_ptr(e.var->type, ctx.arena);
+		},
+		[&](GenericVarExpr &e) -> Type*
+		{
+			e.type = e.var | match
+			{
+				[&](GenericParameterVar const &v)
+				{
+					return v.def->kind | match
+					{
+						[&](GenericTypeParameter const&) -> Type*
+						{
+							assert(!"typecheck_subexpr: GenericVarExpr: GenericTypeParameter");
+						},
+						[&](GenericValueParameter const &p) -> Type*
+						{
+							return clone_ptr(p.type, ctx.arena);
+						},
+					};
+				},
+				[&](GenericDeductionVar const &v)
+				{
+					return v.def->kind | match
+					{
+						[&](TypeDeductionVar const&) -> Type*
+						{
+							assert(!"typecheck_subexpr: GenericVarExpr: TypeDeductionVar");
+						},
+						[&](ValueDeductionVar const &v) -> Type*
+						{
+							return clone_ptr(v.type, ctx.arena);
+						},
+					};
+				},
+			};
+
+			return e.type;
 		},
 		[&](Path&) -> Type* { assert(!"typecheck_subexpr: Path"); },
 	};
@@ -5901,15 +6641,15 @@ static Type const* unify_pattern(
 			// Make sure the constructor is not a type variable
 			if(VarType const *var = std::get_if<VarType>(p.ctor))
 			{
-				*var | match
+				var->var | match
 				{
-					[&](TypeParameterVar v)
+					[&](GenericParameterVar)
 					{
-						throw_sem_error("Type parameters cannot be used as constructor patterns", v.range.first, ctx.mod);
+						throw_sem_error("Type parameters cannot be used as constructor patterns", var->range.first, ctx.mod);
 					},
-					[&](TypeDeductionVar)
+					[&](GenericDeductionVar)
 					{
-						assert(!"Constructor pattern is TypeDeductionVar");
+						assert(!"Constructor pattern is GenericDeductionVar");
 					},
 				};
 			}
@@ -5973,6 +6713,8 @@ static Type const* typecheck_pattern(
 	Expr *root_rhs_expr
 )
 {
+	ConstraintGatheringSubst subst(&constraints, &ctx);
+
 	optional<IsMutable> requires_lvalue;
 	if(lhs_pattern.provided_type)
 	{
@@ -5983,6 +6725,8 @@ static Type const* typecheck_pattern(
 		//
 		// In both cases:
 		//   2. pattern_type <: provided_type
+
+		typecheck_type(*lhs_pattern.provided_type, subst, ctx);
 
 		auto error_msg = [](Pattern const &pattern, string const &reason, Module const &mod)
 		{
@@ -5995,7 +6739,6 @@ static Type const* typecheck_pattern(
 
 		if(irrefutable_pattern_required)
 		{
-			ConstraintGatheringSubst subst(&constraints, &ctx);
 			Unifier(ctx)
 				.left(*lhs_pattern.provided_type, TypeConversion::NONE)
 				.right(rhs_type, TypeConversion::IMPLICIT_CTOR, root_rhs_expr)
@@ -6005,7 +6748,6 @@ static Type const* typecheck_pattern(
 		}
 		else
 		{
-			ConstraintGatheringSubst subst(&constraints, &ctx);
 			Unifier(ctx)
 				.left(rhs_type, TypeConversion::NONE)
 				.right(*lhs_pattern.provided_type, TypeConversion::IMPLICIT_CTOR)
@@ -6311,51 +7053,48 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 	LOGGER(ctx.mod->logger, on_stmt_end);
 }
 
+void typecheck_param(Parameter &param, SemaContext &ctx)
+{
+	ConstraintSystem constraints(*ctx.mod);
+	ConstraintGatheringSubst subst(&constraints, &ctx);
+	typecheck_type(*param.type, subst, ctx);
+
+	if(Expr *default_value = param.default_value.try_get_expr())
+	{
+		LOGGER(ctx.mod->logger, on_expr_start, *default_value);
+
+		Type const *default_value_type = typecheck_subexpr(*default_value, subst, ctx);
+		LOGGER(ctx.mod->logger, on_data, constraints);
+
+		auto error_msg = [](Expr const &init_expr, string const &reason, Module const &mod)
+		{
+			throw_sem_error("Invalid default value: " + reason, token_range_of(init_expr).first, &mod);
+		};
+
+		Unifier(ctx)
+			.left(*param.type, TypeConversion::NONE)
+			.right(*default_value_type, TypeConversion::IMPLICIT_CTOR, default_value)
+			.set(&subst)
+			.set(LazyErrorMsg(default_value, error_msg))
+			.go();
+
+		TypeEnv subst = create_subst_from_constraints(constraints, ctx);
+		LOGGER(ctx.mod->logger, on_data, subst);
+
+		substitute_types_in_expr(*default_value, subst, ctx.mod->sema->insts, FullDeductionSubstitution(token_range_of(*default_value)));
+		LOGGER(ctx.mod->logger, on_expr_end);
+	}
+}
+
 void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 {
 	for(Member &m: *struct_->members)
 	{
 		m | match
 		{
-			[&](VarMember &var_member)
-			{
-				if(Expr *default_value = var_member.var.default_value.try_get_expr())
-				{
-					LOGGER(ctx.mod->logger, on_expr_start, *default_value);
-
-					ConstraintSystem constraints(*ctx.mod);
-					ConstraintGatheringSubst constraint_gatherer(&constraints, &ctx);
-					Type const *default_value_type = typecheck_subexpr(*default_value, constraint_gatherer, ctx);
-					LOGGER(ctx.mod->logger, on_data, constraints);
-
-					auto error_msg = [](Expr const &init_expr, string const &reason, Module const &mod)
-					{
-						throw_sem_error("Invalid default value: " + reason, token_range_of(init_expr).first, &mod);
-					};
-
-					ConstraintGatheringSubst constraint_subst(&constraints, &ctx);
-					Unifier(ctx)
-						.left(*var_member.var.type, TypeConversion::NONE)
-						.right(*default_value_type, TypeConversion::IMPLICIT_CTOR, default_value)
-						.set(&constraint_subst)
-						.set(LazyErrorMsg(default_value, error_msg))
-						.go();
-
-					TypeEnv subst = create_subst_from_constraints(constraints, ctx);
-					LOGGER(ctx.mod->logger, on_data, subst);
-
-					substitute_types_in_expr(*default_value, subst, ctx.mod->sema->insts, FullDeductionSubstitution(token_range_of(*default_value)));
-					LOGGER(ctx.mod->logger, on_expr_end);
-				}
-			},
-			[&](CaseMember case_member)
-			{
-				typecheck_struct(case_member.struct_, ctx);
-			},
-			[&](StructMember struct_member)
-			{
-				typecheck_struct(struct_member.struct_, ctx);
-			},
+			[&](VarMember &var_member) { typecheck_param(var_member.var, ctx); },
+			[&](CaseMember case_member) { typecheck_struct(case_member.struct_, ctx); },
+			[&](StructMember struct_member) { typecheck_struct(struct_member.struct_, ctx); },
 		};
 	}
 }
@@ -6372,12 +7111,13 @@ static void typecheck(SemaContext &ctx)
 
 				for(auto const &[idx, param]: *proc.params | std::views::enumerate)
 				{
+					typecheck_param(param, ctx);
 					proc.sema->param_vars->items[idx]->type = param.type;
-					if(param.default_value)
-					{
-						assert(!"[TODO] typecheck: ProcItem: param.default_value");
-					}
 				}
+
+				ConstraintSystem constraints(*ctx.mod);
+				ConstraintGatheringSubst subst(&constraints, &ctx);
+				typecheck_type(*proc.ret_type, subst, ctx);
 
 				if(proc.body)
 				{
@@ -6392,7 +7132,12 @@ static void typecheck(SemaContext &ctx)
 			{
 				typecheck_struct(&struct_, ctx);
 			},
-			[&](AliasItem&) {},
+			[&](AliasItem &alias)
+			{
+				ConstraintSystem constraints(*ctx.mod);
+				ConstraintGatheringSubst subst(&constraints, &ctx);
+				typecheck_type(*alias.aliased_type, subst, ctx);
+			},
 		};
 	}
 
@@ -6462,8 +7207,12 @@ Type const* is_optional_ptr(StructInstance const *struct_)
 	while(struct_->is_case_member())
 		struct_ = struct_->variant_parent();
 
-	if(struct_->struct_()->name == "Option" and is<PointerType>(struct_->type_args().args->items[0]))
-		return &struct_->type_args().args->items[0];
+	if(struct_->struct_()->name == "Option")
+	{
+		Type const &first_arg = std::get<Type>(struct_->type_args().args->items[0]);
+		if(is<PointerType>(first_arg))
+			return &first_arg;
+	}
 
 	return nullptr;
 }
@@ -6488,6 +7237,14 @@ MemoryLayout compute_layout(Type const &type, unordered_set<TypeInstance> *paren
 		[&](PointerType const&)
 		{
 			return MemoryLayout{.size = 8, .alignment = 8};
+		},
+		[&](ArrayType const &t)
+		{
+			MemoryLayout element_layout = compute_layout(*t.element, parent_type_deps);
+			return MemoryLayout{
+				.size = element_layout.size * t.count(),
+				.alignment = element_layout.alignment,
+			};
 		},
 		[&](StructType const &t)
 		{
@@ -6779,7 +7536,7 @@ void EventLogger::on_expr_end()
 void EventLogger::on_struct_substitution_start(StructInstance *inst)
 {
 	m_os << "<li class='entry-struct-subst'>Struct substitution: \n";
-		m_os << "<code class='myca-inline'>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
+		m_os << "<code class='myca-inline'>"; print(Type(StructType(UNKNOWN_TOKEN_RANGE, inst)), *m_mod, m_os); m_os << "</code>";
 		m_os << " <span class='side-info'>(" << inst << ")</span>\n";
 		m_os << "<ul>\n";
 }
@@ -6788,7 +7545,7 @@ void EventLogger::on_struct_substitution_replaced(StructInstance *inst)
 {
 	(void)inst;
 			m_os << "<li>Replaced: ";
-			m_os << "<code class='myca-inline'>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
+			m_os << "<code class='myca-inline'>"; print(Type(StructType(UNKNOWN_TOKEN_RANGE, inst)), *m_mod, m_os); m_os << "</code>";
 			m_os << " <span class='side-info'>(" << inst << ")</span>\n";
 			m_os << "</li>\n";
 }
@@ -6812,7 +7569,7 @@ void EventLogger::on_struct_register(StructInstance *inst)
 		deduction_state = "fully deduced";
 
 	m_os << "<li>Register struct: \n";
-		m_os << "<code class='myca-inline'>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
+		m_os << "<code class='myca-inline'>"; print(Type(StructType(UNKNOWN_TOKEN_RANGE, inst)), *m_mod, m_os); m_os << "</code>";
 		m_os << " <span class='side-info'>[" << deduction_state << "]</span>\n";
 		m_os << " <span class='side-info'>[" << inst << "]</span>\n";
 	m_os << "</li>\n";
@@ -6861,7 +7618,7 @@ void EventLogger::on_layout_computation_end()
 void EventLogger::on_struct_layout_computation_start(StructInstance *inst)
 {
 	m_os << "<li>Compute layout: \n";
-		m_os << "<code class='myca-inline'>"; print(StructType(UNKNOWN_TOKEN_RANGE, inst), *m_mod, m_os); m_os << "</code>";
+		m_os << "<code class='myca-inline'>"; print(Type(StructType(UNKNOWN_TOKEN_RANGE, inst)), *m_mod, m_os); m_os << "</code>";
 		m_os << " <span class='side-info'>(" << inst << ")</span>\n";
 
 		m_os << "<ul>\n";

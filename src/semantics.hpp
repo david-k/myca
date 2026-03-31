@@ -4,9 +4,12 @@
 #include <bits/elements_of.h>
 #include <memory>
 #include <ostream>
+#include <ranges>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <variant>
 #include <span>
 #include <vector>
@@ -71,20 +74,23 @@ struct Var
 	Type *NULLABLE type = nullptr;
 };
 
-using ScopeItem = variant<Var, TypeParameter*, ProcItem*, StructItem*, AliasItem*>;
+using ScopeItem = variant<Var, GenericParameter*, ProcItem*, StructItem*, AliasItem*>;
 
 
 //==============================================================================
 // Type environment
 //==============================================================================
 bool equiv(Type const &a, Type const &b);
-bool type_var_occurs_in(VarType var, Type const &type);
+bool equiv(GenericArg const &a, GenericArg const &b);
+bool type_var_occurs_in(GenericVar var, Type const &type);
+bool type_var_occurs_in(GenericVar var, GenericArg const &arg);
 Type materialize_known_int(KnownIntType known_int);
+
 
 class TypeEnv
 {
 public:
-	Type const* try_lookup(VarType var) const
+	GenericArg const* try_lookup(GenericVar var) const
 	{
 		auto it = m_env.find(var);
 		if(it == m_env.end())
@@ -93,7 +99,7 @@ public:
 		return &it->second;
 	}
 
-	Type const& lookup(VarType var) const
+	GenericArg const& lookup(GenericVar var) const
 	{
 		auto it = m_env.find(var);
 		assert(it != m_env.end());
@@ -101,7 +107,7 @@ public:
 		return it->second;
 	}
 
-	Type& lookup(VarType var)
+	GenericArg& lookup(GenericVar var)
 	{
 		auto it = m_env.find(var);
 		assert(it != m_env.end());
@@ -109,7 +115,7 @@ public:
 		return it->second;
 	}
 
-	bool update(VarType var, Type const &new_type)
+	bool update(GenericVar var, GenericArg const &new_type)
 	{
 		assert(not type_var_occurs_in(var, new_type));
 
@@ -125,7 +131,7 @@ public:
 		return updated;
 	}
 
-	void add(VarType var, Type const &type)
+	void add(GenericVar var, GenericArg const &type)
 	{
 		// Required by unification and would lead to infinite recursion in substitute()
 		assert(not type_var_occurs_in(var, type));
@@ -135,48 +141,13 @@ public:
 	}
 
 	bool empty() const { return m_env.empty(); }
-	unordered_map<VarType, Type> const& mapping() const { return m_env; }
+	unordered_map<GenericVar, GenericArg> const& mapping() const { return m_env; }
 
 	void materialize(class InstanceRegistry &registry);
-
-	void print(std::ostream &os, Module const &mod) const
-	{
-		vector<std::pair<VarType, Type const*>> sorted;
-		for(auto const &[var, type]: m_env)
-			sorted.push_back({var, &type});
-
-		std::ranges::sort(sorted, [](auto const &a, auto const &b)
-		{
-			VarType va = a.first;
-			VarType vb = b.first;
-
-			if(va.index() < vb.index())
-				return true;
-
-			return va | match
-			{
-				[&](TypeParameterVar p)
-				{
-					return p.def->name < std::get<TypeParameterVar>(vb).def->name;
-				},
-				[&](TypeDeductionVar d)
-				{
-					return d.id < std::get<TypeDeductionVar>(vb).id;
-				}
-			};
-		});
-
-		for(auto const &[var, type]: sorted)
-		{
-			::print(var, os);
-			os << " ==> ";
-			::print(*type, mod, os);
-			os << std::endl;
-		}
-	}
+	void print(std::ostream &os, Module const &mod) const;
 
 private:
-	unordered_map<VarType, Type> m_env;
+	unordered_map<GenericVar, GenericArg> m_env;
 };
 
 
@@ -185,7 +156,7 @@ private:
 //==============================================================================
 class InstanceRegistry;
 
-bool have_common_vars(unordered_set<VarType> const &occurring_vars, TypeEnv const &env);
+bool have_common_vars(unordered_set<GenericVar> const &occurring_vars, TypeEnv const &env);
 
 struct TypeArgList
 {
@@ -195,9 +166,9 @@ struct TypeArgList
 	}
 
 	// Fully resolved and must not contain KnownIntTypes
-	FixedArray<Type> *args;
+	FixedArray<GenericArg> *args;
 
-	unordered_set<VarType> occurring_vars{};
+	unordered_set<GenericVar> occurring_vars{};
 	bool has_type_deduction_vars = false;
 	bool has_known_ints = false;
 };
@@ -289,7 +260,7 @@ struct StructInstanceKey
 {
 	StructInstanceKey(
 		StructItem const *struct_,
-		FixedArray<Type> *NULLABLE type_args,
+		FixedArray<GenericArg> *NULLABLE type_args,
 		optional<DeclContainerInst> decl_parent
 	) :
 		struct_(struct_),
@@ -297,7 +268,7 @@ struct StructInstanceKey
 		decl_parent(decl_parent) {}
 
 	StructItem const *struct_;
-	FixedArray<Type> *NULLABLE type_args;
+	FixedArray<GenericArg> *NULLABLE type_args;
 	optional<DeclContainerInst> decl_parent;
 };
 
@@ -346,6 +317,8 @@ public:
 		return this;
 	}
 
+	void typecheck_generic_args(class ConstraintGatheringSubst &subst, struct SemaContext &ctx);
+
 	size_t id() const { return m_id; }
 	int variant_depth() const { return m_struct->sema->variant_depth; }
 
@@ -388,7 +361,11 @@ public:
 
 	CaseMemberRegion cases_layout() const { assert(m_cases_layout); return *m_cases_layout; }
 	Type const* discriminator_type() const;
-	unordered_set<TypeInstance> const& own_type_deps() const { return m_type_deps; }
+	unordered_set<TypeInstance> const& own_type_deps() const
+	{
+		assert(m_layout_state == LayoutComputationState::DONE);
+		return m_type_deps;
+	}
 
 private:
 	void compute_dependent_properties();
@@ -412,6 +389,7 @@ private:
 	FixedArray<Parameter const*> *m_ctor_params = nullptr;
 	StructInstance *m_implicit_case = nullptr;
 	int m_case_idx;
+	bool m_generic_args_typechecked = false;
 
 	// Memory layout
 	LayoutComputationState m_layout_state = LayoutComputationState::PENDING;
@@ -442,7 +420,7 @@ struct std::hash<::StructInstanceKey>
 
 		if(key.type_args)
 		{
-			for(Type const &t: *key.type_args)
+			for(GenericArg const &t: *key.type_args)
 				combine_hashes(h, compute_hash(t));
 		}
 
@@ -456,12 +434,12 @@ struct std::hash<::StructInstanceKey>
 //--------------------------------------------------------------------
 struct ProcInstanceKey
 {
-	ProcInstanceKey(ProcItem const *proc, FixedArray<Type> *NULLABLE type_args) :
+	ProcInstanceKey(ProcItem const *proc, FixedArray<GenericArg> *NULLABLE type_args) :
 		proc(proc),
 		type_args(type_args and type_args->count == 0 ? nullptr : type_args) {}
 
 	ProcItem const *proc;
-	FixedArray<Type> *NULLABLE type_args;
+	FixedArray<GenericArg> *NULLABLE type_args;
 };
 
 
@@ -479,6 +457,8 @@ public:
 	optional<DeclContainerInst> decl_parent() const { return nullopt; }
 
 	TypeEnv create_type_env() const;
+
+	void typecheck_generic_args(class ConstraintGatheringSubst &subst, struct SemaContext &ctx);
 
 	bool is_concrete() const { return m_type_args.occurring_vars.empty() and not m_type_args.has_known_ints; }
 	bool is_deduction_complete() const { return not m_type_args.has_type_deduction_vars and not m_type_args.has_known_ints; }
@@ -509,6 +489,8 @@ private:
 	ProcItem const *m_proc;
 	TypeArgList m_type_args;
 
+	bool m_generic_args_typechecked = false;
+
 	// Dependent properties (those that depend on `m_type_args`).
 	// Lazily computed by compute_dependent_properties().
 	Type *m_type = nullptr;
@@ -526,7 +508,7 @@ struct std::hash<::ProcInstanceKey>
 
 		if(key.type_args)
 		{
-			for(Type const &t: *key.type_args)
+			for(GenericArg const &t: *key.type_args)
 				::combine_hashes(h, ::compute_hash(t));
 		}
 
@@ -552,12 +534,14 @@ struct ProcTypeInstance
 	}
 
 	bool is_deduction_complete() const { return not has_type_deduction_vars and not has_known_ints; }
+	void typecheck(class ConstraintGatheringSubst &subst, struct SemaContext &ctx);
 
 	FixedArray<Type> *params;
 	Type *ret;
-	unordered_set<VarType> occurring_vars;
+	unordered_set<GenericVar> occurring_vars;
 	bool has_type_deduction_vars;
 	bool has_known_ints;
+	bool has_been_typechecked = false;
 };
 
 bool operator == (ProcTypeInstanceKey const &a, ProcTypeInstanceKey const &b);
@@ -580,9 +564,14 @@ struct std::hash<ProcTypeInstanceKey>
 //--------------------------------------------------------------------
 // UnionInstance
 //--------------------------------------------------------------------
+// Used as a key for unordered_map
 struct UnionInstanceKey
 {
-	span<Type const*> alternatives;
+	// Refers to UnionInstanceKey::m_alternatives. This means m_alternatives must not be modified in
+	// a way that affects the hash function. Currently, the m_alternatives is only modified by
+	// typecheck_type, which sets the type for neseted Exprs. This is safe, as type_of(expr) is not
+	// used when hashing expressions.
+	span<Type*> alternatives;
 };
 
 struct TypeEquiv
@@ -596,10 +585,9 @@ struct TypeEquiv
 class UnionInstance
 {
 public:
-
 	UnionInstance(
-		vector<Type const*> &&alternatives,
-		unordered_set<VarType> &&occurring_vars,
+		vector<Type*> &&alternatives,
+		unordered_set<GenericVar> &&occurring_vars,
 		bool has_type_deduction_vars,
 		bool has_known_ints
 	) :
@@ -612,14 +600,18 @@ public:
 	bool has_type_deduction_vars() const { return m_has_type_deduction_vars; }
 	bool has_known_ints() const { return m_has_known_ints; }
 	bool is_deduction_complete() const { return not m_has_type_deduction_vars and not m_has_known_ints; }
-	unordered_set<VarType> const& occurring_vars() const { return m_occurring_vars; }
+	unordered_set<GenericVar> const& occurring_vars() const { return m_occurring_vars; }
 
 	bool needs_subsitution(TypeEnv const &env) const
 	{
 		return m_has_known_ints or have_common_vars(m_occurring_vars, env);
 	}
 
-	vector<Type const*> const& alternatives() { return m_alternatives; }
+	using ConstTypeRange = std::ranges::subrange<vector<Type*>::const_iterator>;
+	ConstTypeRange alternatives()
+	{
+		return ConstTypeRange(m_alternatives.cbegin(), m_alternatives.cend());
+	}
 
 	size_t get_alt_idx(Type const &type) { compute_properties(); return m_alt_to_idx.at(type); }
 	optional<size_t> try_get_alt_idx(Type const &type)
@@ -634,15 +626,23 @@ public:
 	}
 
 	MemoryLayout layout();
-	unordered_set<TypeInstance> const& type_deps() const { return m_type_deps; }
+	unordered_set<TypeInstance> const& type_deps()
+	{
+		// Make sure layout has been computed
+		// TODO Do I also need to do this for StructInstance?
+		layout();
+		return m_type_deps;
+	}
+
+	void compute_properties();
+	void typecheck(class ConstraintGatheringSubst &subst, struct SemaContext &ctx);
 
 private:
-	void compute_properties();
-
-	vector<Type const*> m_alternatives;
-	unordered_set<VarType> m_occurring_vars;
+	vector<Type*> m_alternatives;
+	unordered_set<GenericVar> m_occurring_vars;
 	bool m_has_type_deduction_vars;
 	bool m_has_known_ints;
+	bool m_has_been_typechecked = false;
 
 	// Memory layout
 	LayoutComputationState m_layout_state = LayoutComputationState::PENDING;
@@ -681,6 +681,7 @@ public:
 	virtual void on_new_struct_instance(StructInstance*) {}
 	virtual void on_new_union_instance(UnionInstance*) {}
 	virtual void on_new_proc_instance(ProcInstance*) {}
+	virtual void on_new_proc_type_instance(ProcTypeInstance*) {}
 };
 
 struct NewInstanceListener : InstanceRegistryListener
@@ -700,9 +701,15 @@ struct NewInstanceListener : InstanceRegistryListener
 		procs.push_back(inst);
 	}
 
+	virtual void on_new_proc_type_instance(ProcTypeInstance *inst) override
+	{
+		proc_types.push_back(inst);
+	}
+
 	vector<StructInstance*> structs;
 	vector<UnionInstance*> unions;
 	vector<ProcInstance*> procs;
+	vector<ProcTypeInstance*> proc_types;
 };
 
 struct BestEffortSubstitution {};
@@ -730,7 +737,7 @@ public:
 
 	StructInstance* get_struct_instance(
 		StructItem const *struct_,
-		FixedArray<Type> *NULLABLE type_args,
+		FixedArray<GenericArg> *NULLABLE type_args,
 		optional<DeclContainerInst> decl_parent
 	);
 
@@ -754,7 +761,7 @@ public:
 	);
 
 
-	ProcInstance* get_proc_instance(ProcItem const *proc, FixedArray<Type> *NULLABLE type_args);
+	ProcInstance* get_proc_instance(ProcItem const *proc, FixedArray<GenericArg> *NULLABLE type_args);
 	ProcInstance* get_proc_instance(ProcItem const *proc, TypeArgList const &type_args);
 	ProcInstance* get_proc_instance(
 		ProcItem const *proc,
@@ -772,7 +779,7 @@ public:
 	);
 
 	// `alternatives` must be the result of canonicalize_union_alternatives()
-	UnionInstance* get_union_instance(vector<Type const*> &&alternatives);
+	UnionInstance* get_union_instance(vector<Type*> &&alternatives);
 
 	StructInstance* get_struct_self_instance(StructItem const *struct_);
 	ProcInstance* get_proc_self_instance(ProcItem const *proc);
@@ -781,11 +788,18 @@ public:
 	std::generator<StructInstance&> struct_instances();
 	std::generator<UnionInstance&> union_instances();
 	std::generator<ProcInstance&> proc_instances();
+	std::generator<ProcTypeInstance&> proc_type_instances();
 
 	void add_listener(InstanceRegistryListener *l);
 	void remove_listener(InstanceRegistryListener *l);
 
 private:
+	size_t next_struct_id() const { return m_struct_instances.size(); }
+	StructInstance* add_struct_instance(StructInstance &&new_inst);
+	ProcInstance* add_proc_instance(ProcInstance &&new_inst);
+	ProcTypeInstance* add_proc_type_instance(FixedArray<Type> *params, Type *ret);
+	UnionInstance* add_union_instance(vector<Type*> &&alternatives);
+
 	Arena &m_arena;
 	Module &m_mod;
 	vector<InstanceRegistryListener*> m_listeners;
@@ -799,12 +813,6 @@ private:
 
 	unordered_map<StructItem const*, StructInstance*> m_struct_self_instances;
 	unordered_map<ProcItem const*, ProcInstance*> m_proc_self_instances;
-
-	size_t next_struct_id() const { return m_struct_instances.size(); }
-	StructInstance* add_struct_instance(StructInstance &&new_inst);
-	ProcInstance* add_proc_instance(ProcInstance &&new_inst);
-	ProcTypeInstance* add_proc_type_instance(FixedArray<Type> *params, Type *ret);
-	UnionInstance* add_union_instance(vector<Type const*> &&alternatives);
 };
 
 // Visits each registered StructInstance, ensuring that new instances that might be added by the
@@ -840,6 +848,7 @@ void for_each_instance(InstanceRegistry &registry, Func &&func)
 	vector<StructInstance*> structs;
 	vector<UnionInstance*> unions;
 	vector<ProcInstance*> procs;
+	vector<ProcTypeInstance*> proc_types;
 
 	for(StructInstance &struct_: registry.struct_instances())
 		structs.push_back(&struct_);
@@ -849,6 +858,9 @@ void for_each_instance(InstanceRegistry &registry, Func &&func)
 
 	for(ProcInstance &proc: registry.proc_instances())
 		procs.push_back(&proc);
+
+	for(ProcTypeInstance &proc_type: registry.proc_type_instances())
+		proc_types.push_back(&proc_type);
 
 	while(structs.size() or unions.size() or procs.size())
 	{
@@ -861,12 +873,17 @@ void for_each_instance(InstanceRegistry &registry, Func &&func)
 		for(ProcInstance *proc: procs)
 			func(proc);
 
+		for(ProcTypeInstance *proc_type: proc_types)
+			func(proc_type);
+
 		structs = std::move(listener.structs);
 		unions = std::move(listener.unions);
 		procs = std::move(listener.procs);
+		proc_types = std::move(listener.proc_types);
 		listener.structs = {};
 		listener.unions = {};
 		listener.procs = {};
+		listener.proc_types = {};
 	}
 
 	registry.remove_listener(&listener);
@@ -876,6 +893,15 @@ void for_each_instance(InstanceRegistry &registry, Func &&func)
 //==============================================================================
 // Sema context
 //==============================================================================
+struct TypeDeductionVar {};
+struct ValueDeductionVar { Type *type; };
+using DeductionVarKind = variant<TypeDeductionVar, ValueDeductionVar>;
+
+struct DeductionVarDef
+{
+	uint32_t id;
+	DeductionVarKind kind;
+};
 
 // Holds all the state needed during semantic analysis
 struct SemaContext
@@ -884,14 +910,15 @@ struct SemaContext
 		mod(&mod),
 		arena(arena) {}
 
-	TypeDeductionVar new_type_deduction_var()
+	GenericDeductionVar new_deduction_var(DeductionVarKind kind)
 	{
-		return TypeDeductionVar(next_deduction_id++);
+		DeductionVarDef *def = arena.alloc<DeductionVarDef>(next_deduction_var_id++, kind);
+		return GenericDeductionVar(def);
 	}
 
 	Module *mod;
 	Arena &arena;
-	uint32_t next_deduction_id = 0;
+	uint32_t next_deduction_var_id = 0;
 	ProcItem *NULLABLE proc = nullptr; // The current procedure being analyzed
 };
 
@@ -995,17 +1022,17 @@ struct TypeConversionEvent
 class Subst
 {
 public:
-	virtual Type const* try_get(TypeDeductionVar var) = 0;
+	virtual GenericArg const* try_get(GenericDeductionVar var) = 0;
 
 	virtual void apply_conversion(TypeConversionEvent const &event, Expr *expr) = 0;
 
 	virtual void set(
-		TypeDeductionVar var,
+		GenericDeductionVar var,
 		TypeConversion var_conv,
 		Expr *NULLABLE var_expr,
-		Type const &type,
-		TypeConversion type_conv,
-		Expr *NULLABLE type_expr,
+		GenericArg const &arg,
+		TypeConversion arg_conv,
+		Expr *NULLABLE arg_expr,
 		optional<LazyErrorMsg> error_msg
 	) = 0;
 };
@@ -1029,9 +1056,9 @@ public:
 		m_expr_right(rhs.m_expr_right),
 		m_result(rhs.m_result) {}
 
-	Unifier& left(Type const &type, TypeConversion conv, Expr *expr = nullptr)
+	Unifier& left(GenericArg const &arg, TypeConversion conv, Expr *expr = nullptr)
 	{
-		m_left = &type;
+		m_left = &arg;
 		m_conv_left = conv;
 		m_expr_left = expr;
 		m_is_swapped = false;
@@ -1039,9 +1066,9 @@ public:
 		return *this;
 	}
 
-	Unifier& right(Type const &type, TypeConversion conv, Expr *expr = nullptr)
+	Unifier& right(GenericArg const &arg, TypeConversion conv, Expr *expr = nullptr)
 	{
-		m_right = &type;
+		m_right = &arg;
 		m_conv_right = conv;
 		m_expr_right = expr;
 		m_is_swapped = false;
@@ -1051,7 +1078,7 @@ public:
 
 	Unifier& set(Subst *subst) { m_subst = subst; return *this; }
 	Unifier& set(optional<LazyErrorMsg> const &err) { m_err = err; return *this; }
-	Unifier& result(Type *res) { m_result = res; return *this; }
+	Unifier& result(GenericArg *res) { m_result = res; return *this; }
 
 	void go();
 
@@ -1064,6 +1091,8 @@ private:
 	bool try_unify_structs();
 	bool try_unify_unions();
 	bool try_unify_pointers();
+	bool try_unify_arrays();
+	void unify_generic_values();
 
 	Unifier sides_swapped() const
 	{
@@ -1076,16 +1105,16 @@ private:
 		return swapped;
 	}
 
-	Type const* lookup(TypeDeductionVar var) const
+	GenericArg const* lookup(GenericDeductionVar var) const
 	{
 		assert(m_subst);
-		Type const *type = m_subst->try_get(var);
-		assert(type);
+		GenericArg const *arg = m_subst->try_get(var);
+		assert(arg);
 
-		return type;
+		return arg;
 	}
 
-	Type const* try_lookup(TypeDeductionVar var) const
+	GenericArg const* try_lookup(GenericDeductionVar var) const
 	{
 		if(not m_subst)
 			return nullptr;
@@ -1102,8 +1131,8 @@ private:
 	}
 
 	SemaContext const &m_ctx;
-	Type const *m_left;
-	Type const *m_right;
+	GenericArg const *m_left;
+	GenericArg const *m_right;
 	TypeConversion m_conv_left;
 	TypeConversion m_conv_right;
 	optional<LazyErrorMsg> m_err;
@@ -1112,7 +1141,7 @@ private:
 
 	Expr *m_expr_left = nullptr;
 	Expr *m_expr_right = nullptr;
-	Type *m_result = nullptr;
+	GenericArg *m_result = nullptr;
 };
 
 
@@ -1186,10 +1215,10 @@ struct ConstraintEdge
 	TypeConversion var_conv = TypeConversion::NONE;
 	Expr *NULLABLE var_expr = nullptr;
 
-	Type type;
-	TypeConversion type_conv = TypeConversion::NONE;
-	Expr *NULLABLE type_expr = nullptr;
-	ConstraintModifier type_modifier = NoModifier();
+	GenericArg arg;
+	TypeConversion arg_conv = TypeConversion::NONE;
+	Expr *NULLABLE arg_expr = nullptr;
+	ConstraintModifier arg_modifier = NoModifier();
 
 	optional<LazyErrorMsg> error_msg{};
 };
@@ -1199,11 +1228,28 @@ inline bool operator == (ConstraintEdge const &a, ConstraintEdge const &b)
 	return
 		a.var_conv == b.var_conv and
 		a.var_expr == b.var_expr and
-		equiv(a.type, b.type) and
-		a.type_conv == b.type_conv and
-		a.type_expr == b.type_expr and
-		a.type_modifier == b.type_modifier;
+		equiv(a.arg, b.arg) and
+		a.arg_conv == b.arg_conv and
+		a.arg_expr == b.arg_expr and
+		a.arg_modifier == b.arg_modifier;
 }
+
+template<>
+struct std::hash<GenericArg>
+{
+	size_t operator () (GenericArg const &arg) const
+	{
+		size_t h = 0;
+		combine_hashes(h, compute_hash(arg.index()));
+		arg | match
+		{
+			[&](Type const &t) { combine_hashes(h, compute_hash(t)); },
+			[&](Expr const &e) { combine_hashes(h, compute_hash(e)); },
+		};
+
+		return h;
+	}
+};
 
 template<>
 struct std::hash<ConstraintEdge>
@@ -1213,10 +1259,10 @@ struct std::hash<ConstraintEdge>
 		size_t h = 0;
 		combine_hashes(h, compute_hash((int)edge.var_conv));
 		combine_hashes(h, compute_hash(edge.var_expr));
-		combine_hashes(h, compute_hash(edge.type));
-		combine_hashes(h, compute_hash((int)edge.type_conv));
-		combine_hashes(h, compute_hash(edge.type_expr));
-		combine_hashes(h, compute_hash(edge.type_modifier));
+		combine_hashes(h, compute_hash(edge.arg));
+		combine_hashes(h, compute_hash((int)edge.arg_conv));
+		combine_hashes(h, compute_hash(edge.arg_expr));
+		combine_hashes(h, compute_hash(edge.arg_modifier));
 
 		return h;
 	}
@@ -1235,7 +1281,7 @@ struct ConstraintNode
 		return pull_edges.insert(edge).second;
 	}
 
-	TypeDeductionVar var;
+	GenericDeductionVar var;
 	unordered_set<ConstraintEdge> push_edges{};
 	unordered_set<ConstraintEdge> pull_edges{};
 	optional<ErrorMsg> error = nullopt;
@@ -1248,11 +1294,11 @@ struct ConstraintSystem
 
 	void add_check(TypeCheck const &check);
 	bool add_relational_constraint(
-		TypeDeductionVar var,
+		GenericDeductionVar var,
 		ConstraintEdge const &edge
 	);
 
-	ConstraintNode& get_node(TypeDeductionVar var)
+	ConstraintNode& get_node(GenericDeductionVar var)
 	{
 		auto it = nodes.find(var);
 		if(it != nodes.end())
@@ -1270,7 +1316,7 @@ struct ConstraintSystem
 	void print(std::ostream &os) const;
 
 	Module const &mod;
-	unordered_map<TypeDeductionVar, ConstraintNode> nodes;
+	unordered_map<GenericDeductionVar, ConstraintNode> nodes;
 	vector<TypeCheck> checks;
 };
 
@@ -1307,7 +1353,7 @@ struct Scope
 
 	// Declaring items
 	Var* declare_var(string_view name, IsMutable mutability, TokenRange sloc);
-	void declare_type_var(TypeParameter *def);
+	void declare_type_var(GenericParameter *def);
 	void declare_struct(StructItem *struct_);
 	void declare_proc(ProcItem *proc);
 	void declare_alias(AliasItem *alias);
@@ -1315,6 +1361,7 @@ struct Scope
 
 	// Lookup
 	ScopeItem& lookup(string_view const &name, TokenIdx sloc, bool traverse_upwards = true);
+	ScopeItem* try_lookup(string_view const &name, TokenIdx sloc, bool traverse_upwards = true);
 
 	Module *mod;
 	Scope *NULLABLE parent = nullptr;
@@ -1346,7 +1393,7 @@ BuiltinTypeDef smallest_int_type_for(Int128 value);
 
 Type const* is_optional_ptr(StructInstance const *struct_);
 Type const* is_optional_ptr(Type const &type);
-optional<TypeDeductionVar> get_if_type_deduction_var(Type const &type);
+optional<GenericDeductionVar> get_if_type_deduction_var(Type const &type);
 
 Stmt clone(Stmt const &stmt, Arena &arena);
 void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry, SubstitutionMode mode);
@@ -1367,3 +1414,241 @@ void compute_type_layouts(Module &mod);
 
 // Perform semantic analysis
 void sema(Module &mod, Arena &arena);
+
+enum Traversal
+{
+	CONTINUE,
+	SKIP,
+	ABORT,
+};
+
+
+template<typename Type, bool Condition>
+struct add_const_if;
+
+template<typename Type>
+struct add_const_if<Type, false>
+{
+	using type = Type;
+};
+
+template<typename Type>
+struct add_const_if<Type, true>
+{
+	using type = Type const;
+};
+
+template<typename Target, bool Condition>
+using add_const_if_t = add_const_if<Target, Condition>::type;
+
+template<typename T, typename BaseType>
+concept MaybeConst = std::is_same_v<std::remove_cvref_t<T>, BaseType>;
+
+
+#define CONST(T) add_const_if_t<T, is_const>
+
+//
+// Visiting Type
+//
+template<typename Visitor>
+void visit_child_types(BuiltinType const&, Visitor&&) {}
+
+template<typename Visitor>
+void visit_child_types(KnownIntType const&, Visitor&&) {}
+
+template<typename Visitor>
+void visit_child_types(VarType const&, Visitor&&) {}
+
+template<
+	MaybeConst<PointerType> T,
+	typename Visitor
+>
+void visit_child_types(T &&t, Visitor &&visitor)
+{
+	visitor(*t.pointee);
+}
+
+template<
+	MaybeConst<ArrayType> T,
+	typename Visitor
+>
+void visit_child_types(T &&t, Visitor &&visitor)
+{
+	visitor(*t.element);
+}
+
+template<typename Visitor>
+void visit_child_types(ProcType const &t, Visitor &&visitor)
+{
+	for(Type const &p: *t.inst->params)
+		visitor(p);
+
+	visitor(*t.inst->ret);
+}
+
+template<
+	MaybeConst<ProcTypeUnresolved> T,
+	typename Visitor
+>
+void visit_child_types(T &&t, Visitor &&visitor)
+{
+	constexpr bool is_const = std::is_const_v<std::remove_reference_t<T>>;
+
+	for(CONST(Type) &p: *t.params)
+		visitor(p);
+
+	visitor(*t.ret);
+}
+
+template<typename Visitor>
+void visit_child_types(FixedArray<GenericArg> const *type_args, Visitor &&visitor)
+{
+	for(GenericArg const &arg: *type_args)
+	{
+		// TODO Exprs can also contain types, e.g. in as-expressions and when explicitly
+		//      specifying the types for generic functions
+
+		if(Type const *type_arg = std::get_if<Type>(&arg))
+			visitor(*type_arg);
+	}
+}
+
+template<typename Visitor>
+void visit_child_types(StructType const &t, Visitor &&visitor)
+{
+	visit_child_types(t.inst->type_args().args, visitor);
+}
+
+template<typename Visitor>
+void visit_child_types(UnionType const &t, Visitor &&visitor)
+{
+	for(Type const *p: t.inst->alternatives())
+		visitor(*p);
+}
+
+template<
+	MaybeConst<UnionTypeUnresolved> T,
+	typename Visitor
+>
+void visit_child_types(T &&t, Visitor &&visitor)
+{
+	constexpr bool is_const = std::is_const_v<std::remove_reference_t<T>>;
+
+	for(CONST(Type) &p: *t.alternatives)
+		visitor(p);
+}
+
+template<
+	MaybeConst<Path> T,
+	typename Visitor
+>
+void visit_child_types(T &&path, Visitor &&visitor)
+{
+	visit_child_types(path.type_args, visitor);
+	if(path.child)
+		visitor(*path.child);
+}
+
+template<typename Visitor>
+void visit_child_types(InlineStructType const&, Visitor&&) {}
+
+template<
+	MaybeConst<Type> T,
+	typename Visitor
+>
+void visit_child_types(T &&type, Visitor &&visitor)
+{
+	type | match
+	{
+		[&](auto &t) { visit_child_types(t, visitor); },
+	};
+}
+
+
+#undef CONST
+
+
+
+template<typename Visitor>
+void traverse(Pattern const &pattern, Visitor &&visitor)
+{
+	pattern | match
+	{
+		[&](VarPatternUnresolved const &p)
+		{
+			visitor(p, pattern.provided_type);
+		},
+		[&](VarPattern const &p)
+		{
+			visitor(p, pattern.provided_type);
+		},
+		[&](DerefPattern const &p)
+		{
+			visitor(p, pattern.provided_type);
+			traverse(*p.sub, visitor);
+		},
+		[&](AddressOfPattern const &p)
+		{
+			visitor(p, pattern.provided_type);
+			traverse(*p.sub, visitor);
+		},
+		[&](ConstructorPattern const &p)
+		{
+			visitor(p, pattern.provided_type);
+			for(PatternArgument const &arg: *p.args)
+				traverse(arg.pattern, visitor);
+		},
+		[&](WildcardPattern const &p)
+		{
+			visitor(p, pattern.provided_type);
+		}
+	};
+}
+
+template<typename Visitor>
+void traverse(Stmt const &stmt, Visitor &&visitor)
+{
+	stmt | match
+	{
+		[&](LetStmt const &s)
+		{
+			visitor(s);
+		},
+		[&](ExprStmt const &s)
+		{
+			visitor(s);
+		},
+		[&](BlockStmt const &s)
+		{
+			visitor(s);
+			for(Stmt const &child_stmt: *s.stmts)
+				traverse(child_stmt, visitor);
+		},
+		[&](ReturnStmt const &s)
+		{
+			visitor(s);
+		},
+		[&](IfStmt const &s)
+		{
+			visitor(s);
+			traverse(*s.then, visitor);
+			if(s.else_)
+				traverse(*s.else_, visitor);
+		},
+		[&](WhileStmt const &s)
+		{
+			visitor(s);
+			traverse(*s.body, visitor);
+		},
+		[&](DeclStmt const &s)
+		{
+			visitor(s);
+		},
+		[&](MatchStmt const &s)
+		{
+			visitor(s);
+			for(MatchArm const &arm: *s.arms)
+				traverse(arm.stmt, visitor);
+		},
+	};
+}

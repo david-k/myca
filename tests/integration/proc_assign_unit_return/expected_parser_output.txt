@@ -1,0 +1,14 @@
+proc foo() -> Unit
+{
+}
+
+proc bar() -> Unit
+{
+    return foo();
+}
+
+proc main() -> i32
+{
+    let a: Unit = bar();
+    return 0;
+}

@@ -44,8 +44,14 @@ static std::unique_ptr<Module> mk_empty_module(Arena &arena)
 
 // Replace Paths beginning with "_" with TypeDeductionVars
 static void insert_type_deduction_vars(
+	GenericArg &arg,
+	UnorderedStringMap<GenericDeductionVar> &vars,
+	SemaContext &ctx
+);
+
+static void insert_type_deduction_vars(
 	Type &type,
-	UnorderedStringMap<TypeDeductionVar> &vars,
+	UnorderedStringMap<GenericDeductionVar> &vars,
 	SemaContext &ctx
 )
 {
@@ -56,6 +62,10 @@ static void insert_type_deduction_vars(
 		[&](PointerType &t)
 		{
 			insert_type_deduction_vars(*t.pointee, vars, ctx);
+		},
+		[&](ArrayType&)
+		{
+			assert(!"[TODO] insert_type_deduction_vars: ArrayType");
 		},
 		[&](ProcType&) { UNREACHABLE; },
 		[&](ProcTypeUnresolved&)
@@ -71,17 +81,21 @@ static void insert_type_deduction_vars(
 		[&](Path &path)
 		{
 			string_view name = name_of(path, ctx.mod);
-			if (name.starts_with("_"))
+			if(name.starts_with("_"))
 			{
 				auto it = vars.find(name);
 				if (it == vars.end())
-					type = VarType(vars[string(name)] = ctx.new_type_deduction_var());
+				{
+					GenericDeductionVar var = ctx.new_deduction_var(TypeDeductionVar());
+					vars[string(name)] = var;
+					type = VarType(UNKNOWN_TOKEN_RANGE, var);
+				}
 				else
-					type = VarType(it->second);
+					type = VarType(UNKNOWN_TOKEN_RANGE, it->second);
 			}
 			else
 			{
-				for(Type &arg: *path.type_args)
+				for(GenericArg &arg: *path.type_args)
 					insert_type_deduction_vars(arg, vars, ctx);
 			}
 		},
@@ -93,9 +107,40 @@ static void insert_type_deduction_vars(
 	};
 }
 
+static void insert_type_deduction_vars(
+	GenericArg &arg,
+	UnorderedStringMap<GenericDeductionVar> &vars,
+	SemaContext &ctx
+)
+{
+	arg | match
+	{
+		[&](Type &type) { insert_type_deduction_vars(type, vars, ctx); },
+		[&](Expr &expr)
+		{
+			if(Path const *path = std::get_if<Path>(&expr))
+			{
+				string_view name = name_of(*path, ctx.mod);
+				if(name.starts_with("_"))
+				{
+					auto it = vars.find(name);
+					if(it == vars.end())
+					{
+						GenericDeductionVar var = ctx.new_deduction_var(ValueDeductionVar());
+						vars[string(name)] = var;
+						expr = GenericVarExpr(UNKNOWN_TOKEN_RANGE, var);
+					}
+					else
+						expr = GenericVarExpr(UNKNOWN_TOKEN_RANGE, it->second);
+				}
+			}
+		},
+	};
+}
+
 static Type parse_incremental_type(
 	string_view source,
-	UnorderedStringMap<TypeDeductionVar> &vars,
+	UnorderedStringMap<GenericDeductionVar> &vars,
 	SemaContext &ctx,
 	Memory M,
 	size_t *bytes_consumed = nullptr
@@ -138,7 +183,7 @@ struct ConstraintSpec
 
 static ConstraintSpec parse_constraint_spec(
 	string_view line,
-	UnorderedStringMap<TypeDeductionVar> &vars,
+	UnorderedStringMap<GenericDeductionVar> &vars,
 	SemaContext &ctx,
 	Memory M
 )
@@ -189,11 +234,12 @@ static ConstraintSpec parse_constraint_spec(
 	Type type_right;
 	skip_whitespace(lexer);
 	if(try_consume(lexer, "$KnownInt(")) {
-		optional<uint64_t> n = try_read_number(lexer);
-		if(not n)
+		optional<string_view> number_string = try_read_number(lexer);
+		if(not number_string)
 			throw std::runtime_error("Parsing ConstraintSpec failed: expected number");
 		consume(lexer, ")");
-		type_right = KnownIntType(*n, *n);
+		uint64_t n = parse_integer(*number_string);
+		type_right = KnownIntType(n, n);
 	}
 	else
 	{
@@ -229,7 +275,7 @@ static ConstraintSpec parse_constraint_spec(
 
 static void add_constraints(
 	ConstraintSystem &constraints,
-	UnorderedStringMap<TypeDeductionVar> &vars,
+	UnorderedStringMap<GenericDeductionVar> &vars,
 	SemaContext &ctx,
 	Memory M,
 	vector<string_view> specs
@@ -243,10 +289,10 @@ static void add_constraints(
 			ConstraintEdge{
 				.var_conv = spec.left_conv,
 				.var_expr = nullptr,
-				.type = *spec.right,
-				.type_conv = spec.right_conv,
-				.type_expr = nullptr,
-				.type_modifier = spec.right_modifier,
+				.arg = *spec.right,
+				.arg_conv = spec.right_conv,
+				.arg_expr = nullptr,
+				.arg_modifier = spec.right_modifier,
 				.error_msg = nullopt,
 			}
 		);
@@ -261,7 +307,7 @@ struct VarSubst
 
 TypeEnv parse_type_env(
 	std::initializer_list<VarSubst> expected_subst_strings,
-	UnorderedStringMap<TypeDeductionVar> vars,
+	UnorderedStringMap<GenericDeductionVar> vars,
 	SemaContext &ctx,
 	Memory M
 )
@@ -271,7 +317,7 @@ TypeEnv parse_type_env(
 	{
 		auto it = vars.find(s.var_string);
 		assert(it != vars.end() && "The expected substitution has an invalid TypeDeductionVar");
-		TypeDeductionVar var = it->second;
+		GenericDeductionVar var = it->second;
 		Type type = parse_incremental_type(s.type_string, vars, ctx, M);
 
 		env.add(var, type);
@@ -311,7 +357,7 @@ void test_constraints_impl(
 	parse_incremental_top_level_item("typealias AorB = struct A | struct B;", ctx, M);
 
 	// Parse constraints and the expected TypeEnv
-	UnorderedStringMap<TypeDeductionVar> vars;
+	UnorderedStringMap<GenericDeductionVar> vars;
 	ConstraintSystem constraints(*mod);
 	add_constraints(constraints, vars, ctx, M, constraint_strings);
 	ConstraintSystem original_constraints = constraints;
@@ -331,7 +377,7 @@ void test_constraints_impl(
 
 			for(auto const &[var, expected_type]: expected_env.mapping())
 			{
-				Type const *actual_type = actual_env.try_lookup(var);
+				GenericArg const *actual_type = actual_env.try_lookup(var);
 				if(not actual_type or not equiv(expected_type, *actual_type))
 				{
 					error = "Actual TypeEnv does not match expected TypeEnv";

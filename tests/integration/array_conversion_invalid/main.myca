@@ -1,0 +1,8 @@
+proc uninitialized'T() -> T {}
+
+proc main() -> i32
+{
+	let arr: [5]i8 = uninitialized();
+	let parr: [4]i8 = arr;
+	return 0;
+}
