@@ -4,7 +4,11 @@
 #include <memory>
 #include <random>
 #include <stdexcept>
-#include "semantics.hpp"
+
+#include "semantics/module.hpp"
+#include "semantics/context.hpp"
+#include "semantics/constraint_solver.hpp"
+#include "semantics/type_env.hpp"
 
 //==============================================================================
 // Utils
@@ -80,7 +84,7 @@ static void insert_type_deduction_vars(
 		[&](UnionType&) { UNREACHABLE; },
 		[&](Path &path)
 		{
-			string_view name = name_of(path, ctx.mod);
+			string_view name = ctx.mod->name_of(path);
 			if(name.starts_with("_"))
 			{
 				auto it = vars.find(name);
@@ -120,7 +124,7 @@ static void insert_type_deduction_vars(
 		{
 			if(Path const *path = std::get_if<Path>(&expr))
 			{
-				string_view name = name_of(*path, ctx.mod);
+				string_view name = ctx.mod->name_of(*path);
 				if(name.starts_with("_"))
 				{
 					auto it = vars.find(name);
@@ -168,7 +172,7 @@ static void parse_incremental_top_level_item(
 {
 	ctx.mod->parser.append_source(source);
 	TopLevelItem *item = M.main->alloc<TopLevelItem>(parse_top_level_item(ctx.mod->parser, M));
-	declare_item(*item, ctx);
+	register_item(*item, ctx);
 	resolve_item(*item, ctx);
 }
 
@@ -274,7 +278,7 @@ static ConstraintSpec parse_constraint_spec(
 }
 
 static void add_constraints(
-	ConstraintSystem &constraints,
+	ConstraintSolver &constraints,
 	UnorderedStringMap<GenericDeductionVar> &vars,
 	SemaContext &ctx,
 	Memory M,
@@ -285,7 +289,7 @@ static void add_constraints(
 	{
 		ConstraintSpec spec = parse_constraint_spec(spec_str, vars, ctx, M);
 		constraints.add_relational_constraint(
-			get_if_type_deduction_var(*spec.left).value(),
+			spec.left->try_get_deduction_var().value(),
 			ConstraintEdge{
 				.var_conv = spec.left_conv,
 				.var_expr = nullptr,
@@ -358,9 +362,9 @@ void test_constraints_impl(
 
 	// Parse constraints and the expected TypeEnv
 	UnorderedStringMap<GenericDeductionVar> vars;
-	ConstraintSystem constraints(*mod);
+	ConstraintSolver constraints(ctx);
 	add_constraints(constraints, vars, ctx, M, constraint_strings);
-	ConstraintSystem original_constraints = constraints;
+	ConstraintSolver original_constraints = constraints;
 
 	expected_outcome | match
 	{
@@ -369,7 +373,7 @@ void test_constraints_impl(
 			TypeEnv expected_env = parse_type_env(expected.subst_strings, vars, ctx, M);
 
 			TypeEnv actual_env;
-			actual_env = create_subst_from_constraints(constraints, ctx);
+			actual_env = constraints.solve();
 
 			string error;
 			if(actual_env.mapping().size() != expected_env.mapping().size())
@@ -404,7 +408,7 @@ void test_constraints_impl(
 			try
 			{
 				TypeEnv actual_env;
-				actual_env = create_subst_from_constraints(constraints, ctx);
+				actual_env = constraints.solve();
 
 				std::cout << "\nInitial constraints:" << std::endl;
 				original_constraints.print(std::cout);

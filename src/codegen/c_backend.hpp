@@ -3,7 +3,7 @@
 #include <iosfwd>
 #include <type_traits>
 
-#include "syntax.hpp"
+#include "syntax/ast.hpp"
 #include "utils.hpp"
 
 using std::string;

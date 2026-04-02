@@ -14,8 +14,6 @@
 #include <generator>
 #include <vector>
 
-using namespace std::string_literals;
-
 #define NULLABLE
 
 #ifdef __clang__
@@ -30,6 +28,9 @@ using namespace std::string_literals;
 using std::vector;
 using std::string;
 using std::string_view;
+using std::variant;
+using std::unordered_map;
+using namespace std::string_literals;
 
 
 //==============================================================================
@@ -96,13 +97,13 @@ struct Memory
 // Strings and output formatting
 //==============================================================================
 // Why is this not part of the standard library?
-inline std::string operator + (std::string str, std::string_view view)
+inline string operator + (string str, string_view view)
 {
 	str.append(view.begin(), view.end());
 	return str;
 }
 
-inline std::string operator + (std::string_view view, std::string str)
+inline string operator + (string_view view, string str)
 {
 	str.insert(str.begin(), view.begin(), view.end());
 	return str;
@@ -189,7 +190,7 @@ constexpr decltype(auto) operator | (T &v, match<Fs...> const &match)
 }
 
 template<typename T, typename ...Ss>
-bool is(std::variant<Ss...> const &v)
+bool is(variant<Ss...> const &v)
 {
 	return std::holds_alternative<T>(v);
 }
@@ -367,20 +368,20 @@ struct TransparentStringHash
 {
 	using is_transparent = void;
 
-	size_t operator () (std::string const &s) const
+	size_t operator () (string const &s) const
 	{
-		return std::hash<std::string>()(s);
+		return std::hash<string>()(s);
 	}
 
-	size_t operator () (std::string_view const &s) const
+	size_t operator () (string_view const &s) const
 	{
-		return std::hash<std::string_view>()(s);
+		return std::hash<string_view>()(s);
 	}
 };
 
 template<typename TValue>
-using UnorderedStringMap = std::unordered_map<
-	std::string,
+using UnorderedStringMap = unordered_map<
+	string,
 	TValue,
 	TransparentStringHash,
 	// By default, unordered_map would use std::equal_to<string> which isn't transparent.
@@ -416,7 +417,7 @@ inline std::ostream& operator << (std::ostream &os, Int128 value)
 	return os;
 }
 
-inline std::string str(Int128 xint)
+inline string str(Int128 xint)
 {
 	std::stringstream ss;
 	ss << xint;
@@ -490,7 +491,7 @@ enum HFramePosition
 	H_RIGHT,
 };
 
-constexpr std::string_view table_box_chars[][3] = {
+constexpr string_view table_box_chars[][3] = {
 	{"┌", "┬", "┐"},
 	{"├", "┼", "┤"},
 	{"└", "┴", "┘"},
@@ -498,7 +499,7 @@ constexpr std::string_view table_box_chars[][3] = {
 
 inline void print_inner_horizontal_line(
 	std::ostream &os,
-	std::vector<size_t> const &column_widths,
+	vector<size_t> const &column_widths,
 	VFramePosition pos,
 	TTable::Style const &style
 )

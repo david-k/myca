@@ -7,9 +7,9 @@
 #include <string_view>
 #include <sstream>
 
-#include "syntax.hpp"
-#include "semantics.hpp"
-#include "codegen.hpp"
+#include "semantics/module.hpp"
+#include "semantics/passes.hpp"
+#include "codegen/c_backend.hpp"
 
 using std::string;
 using std::string_view;
@@ -99,15 +99,16 @@ int main(int, char *argv[])
 	try
 	{
 		std::ofstream event_sink;
+		optional<EventLogger> logger;
 		Module mod = parse_module(source, Memory{&main_arena, temp_arena});
 
 		if(arg_event_log_filename)
 		{
 			event_sink.open(*arg_event_log_filename);
-			mod.logger.emplace(&mod, event_sink);
+			logger.emplace(&mod, event_sink);
 		}
 
-		sema(mod, main_arena);
+		sema(mod, main_arena, std::move(logger));
 		if(arg_print_types)
 			print(mod, std::cout);
 

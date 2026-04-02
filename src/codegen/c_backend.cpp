@@ -1,6 +1,12 @@
-#include "codegen.hpp"
+#include "codegen/c_backend.hpp"
+#include "semantics/ast_operations.hpp"
+#include "semantics/ast_traversal.hpp"
+#include "semantics/instance_registry.hpp"
+#include "semantics/module.hpp"
+#include "semantics/passes.hpp"
+#include "semantics/type_env.hpp"
+#include "semantics/type_properties.hpp"
 
-#include "semantics.hpp"
 #include <ranges>
 #include <sstream>
 #include <string>
@@ -462,7 +468,7 @@ string generate_c_cast(Type const &target_type, string const &expr, Type const &
 
 string generate_c_cast(Type const &target_type, Expr const &expr, CBackend &backend, IsExprUsed usage = IsExprUsed::YES)
 {
-	return generate_c_cast(target_type, generate_c(expr, backend, usage), *type_of(expr));
+	return generate_c_cast(target_type, generate_c(expr, backend, usage), expr.type());
 }
 
 string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
@@ -552,14 +558,14 @@ string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
 		{
 			string indexable_val = generate_c(*e.addr, backend);
 			string idx_val = generate_c(*e.index, backend);
-			if(is<ArrayType>(*type_of(*e.addr)))
+			if(is<ArrayType>(e.addr->type()))
 				return "(" + indexable_val + ").elements[" + idx_val + "]";
 			else
 				return "(" + indexable_val + ")[" + idx_val + "]";
 		},
 		[&](MemberAccessExpr const &e)
 		{
-			if(is_optional_ptr(*type_of(*e.object)) && e.member == "value")
+			if(is_optional_ptr(e.object->type()) && e.member == "value")
 				return generate_c(*e.object, backend);
 			else
 			{
@@ -569,7 +575,7 @@ string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
 		},
 		[&](AssignmentExpr const &e)
 		{
-			string rhs_val = generate_c_cast(*type_of(*e.lhs), *e.rhs, backend);
+			string rhs_val = generate_c_cast(e.lhs->type(), *e.rhs, backend);
 			string lhs_val = generate_c(*e.lhs, backend);
 			return "(" + lhs_val + " = " + rhs_val + ")";
 		},
@@ -592,8 +598,8 @@ string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
 				}
 			}
 
-			ProcType const &callable_proc_type = std::get<ProcType>(*type_of(*e.callable));
-			FixedArray<Type> const *param_types = callable_proc_type.inst->params;
+			ProcType const &proc_type = std::get<ProcType>(e.callable->type());
+			FixedArray<Type> const *param_types = proc_type.inst->params;
 
 			// Evaluate arguments in the order they were provided
 			vector<string> arg_vals(param_types->count);
@@ -604,13 +610,14 @@ string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
 			}
 
 			// Evaluate a parameter's default value if an argument is missing
-			size_t param_count = callable_proc_type.param_count();
+			Callable *callable = proc_type.callable;
+			size_t param_count = callable->param_count();
 			for(size_t i = 0; i < param_count; ++i)
 			{
 				if(arg_vals[i].empty())
 				{
-					assert(callable_proc_type.param_default_value_at(i));
-					Expr const &default_value = callable_proc_type.param_default_value_at(i).get_expr();
+					assert(callable->param_default_value_at(i));
+					Expr const &default_value = callable->param_default_value_at(i).get_expr();
 					arg_vals[i] = generate_c_cast(param_types->items[i], default_value, backend);
 				}
 			}
@@ -644,7 +651,7 @@ string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
 			string addr_val = generate_c(*e.addr, backend);
 
 			string result_var = backend.new_tmp_var();
-			backend << generate_c_type(*e.type) << " " << result_var << " = " << generate_c_cast(*e.type, addr_val, *type_of(*e.addr)) << ";" << LineEnd;
+			backend << generate_c_type(*e.type) << " " << result_var << " = " << generate_c_cast(*e.type, addr_val, e.addr->type()) << ";" << LineEnd;
 
 			string init_val = generate_c(*e.init, backend);
 			backend << "*" << result_var << " = " << init_val << ";" << LineEnd;
@@ -711,10 +718,10 @@ void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type
 					string object_str = generate_c_cast(*p.ctor, rhs_expr, rhs_type);
 					Type const &param_type = ctor_type.inst->params->items[arg.param_idx];
 
-					if(is_optional_ptr(*p.ctor) && ctor_type.param_name_at(arg.param_idx) == "value")
+					if(is_optional_ptr(*p.ctor) && ctor_type.callable->param_name_at(arg.param_idx) == "value")
 						generate_c_pattern(arg.pattern, object_str, param_type, backend);
 					else
-						generate_c_pattern(arg.pattern, object_str + "." + ctor_type.param_name_at(arg.param_idx), param_type, backend);
+						generate_c_pattern(arg.pattern, object_str + "." + ctor_type.callable->param_name_at(arg.param_idx), param_type, backend);
 				}
 			}
 		},
@@ -727,7 +734,7 @@ MatchArm const* get_optional_some(MatchStmt const &stmt)
 {
 	for(MatchArm const &arm: *stmt.arms)
 	{
-		if(StructType const *st = std::get_if<StructType>(&type_of(arm.capture)))
+		if(StructType const *st = std::get_if<StructType>(&arm.capture.type()))
 		{
 			if(st->inst->struct_()->name == "Option" or st->inst->struct_()->name == "Some")
 				return &arm;
@@ -741,7 +748,7 @@ MatchArm const* get_optional_none(MatchStmt const &stmt)
 {
 	for(MatchArm const &arm: *stmt.arms)
 	{
-		if(StructType const *st = std::get_if<StructType>(&type_of(arm.capture)))
+		if(StructType const *st = std::get_if<StructType>(&arm.capture.type()))
 		{
 			if(st->inst->struct_()->name == "Option" or st->inst->struct_()->name == "None")
 				return &arm;
@@ -760,7 +767,7 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 			if(s.init_expr)
 			{
 				string init_expr_var = generate_c(*s.init_expr, backend);
-				generate_c_pattern(*s.lhs, init_expr_var, *type_of(*s.init_expr), backend);
+				generate_c_pattern(*s.lhs, init_expr_var, s.init_expr->type(), backend);
 			}
 			else
 			{
@@ -830,7 +837,7 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 		[&](DeclStmt const&) {},
 		[&](MatchStmt const &s)
 		{
-			if(is_optional_ptr(*type_of(*s.expr)))
+			if(is_optional_ptr(s.expr->type()))
 			{
 				string subject_str = generate_c(*s.expr, backend);
 				backend << "if(" << subject_str << ")" << LineEnd;
@@ -838,7 +845,7 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 				backend.increase_indent();
 					if(MatchArm const *some_arm = get_optional_some(s))
 					{
-						generate_c_pattern(some_arm->capture, subject_str, *type_of(*s.expr), backend);
+						generate_c_pattern(some_arm->capture, subject_str, s.expr->type(), backend);
 						generate_c(some_arm->stmt, backend);
 					}
 				backend.decrease_indent();
@@ -848,7 +855,7 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 				backend.increase_indent();
 					if(MatchArm const *none_arm = get_optional_none(s))
 					{
-						generate_c_pattern(none_arm->capture, subject_str, *type_of(*s.expr), backend);
+						generate_c_pattern(none_arm->capture, subject_str, s.expr->type(), backend);
 						generate_c(none_arm->stmt, backend);
 					}
 				backend.decrease_indent();
@@ -857,7 +864,7 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 			else
 			{
 				string subject_str = generate_c(*s.expr, backend);
-				backend << "switch(" << subject_str << "." << get_discr_name(*type_of(*s.expr)) << ")" << LineEnd;
+				backend << "switch(" << subject_str << "." << get_discr_name(s.expr->type()) << ")" << LineEnd;
 				backend << "{" << LineEnd;
 				backend.increase_indent();
 					bool has_wildcard = false;
@@ -876,13 +883,13 @@ void generate_c(Stmt const &stmt, CBackend &backend)
 
 						if(not is<WildcardPattern>(arm.capture))
 						{
-							if(is<UnionType>(*type_of(*s.expr)))
+							if(is<UnionType>(s.expr->type()))
 							{
 								string arm_expr = subject_str + ".__myca_alt" + std::to_string(arm.discr);
-								generate_c_pattern(arm.capture, arm_expr, type_of(arm.capture), backend);
+								generate_c_pattern(arm.capture, arm_expr, arm.capture.type(), backend);
 							}
 							else
-								generate_c_pattern(arm.capture, subject_str, *type_of(*s.expr), backend);
+								generate_c_pattern(arm.capture, subject_str, s.expr->type(), backend);
 						}
 
 						generate_c(arm.stmt, backend);
@@ -918,7 +925,7 @@ void create_c_struct_initial_vars(StructInstance *struct_inst, optional<size_t> 
 
 	for(Parameter const &member: struct_inst->initial_var_members())
 	{
-		string member_name = string(name_of(member, &struct_inst->mod()));
+		string member_name = string(struct_inst->mod().name_of(member));
 		result->add(CMember(member_name, *member.type));
 	}
 }
@@ -928,7 +935,7 @@ void create_c_struct_trailing_vars(StructInstance *struct_inst, CStruct *result)
 {
 	for(Parameter const &member: struct_inst->trailing_var_members())
 	{
-		string member_name = string(name_of(member, &struct_inst->mod()));
+		string member_name = string(struct_inst->mod().name_of(member));
 		result->add(CMember(member_name, *member.type));
 	}
 
@@ -1068,7 +1075,7 @@ void generate_c_proc_sig(ProcInstance *proc, CBackend &backend)
 	{
 		if(i != 0) backend << ", ";
 
-		string_view param_name = proc->get_proc_type().param_name_at(i);
+		string_view param_name = proc->get_proc_type().callable->param_name_at(i);
 		backend << generate_c_type(proc_type->params->items[i]) << " " << param_name;
 	}
 	backend << ")";
