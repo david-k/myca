@@ -1,0 +1,47 @@
+proc uninitialized'T() -> T {}
+
+proc concat'
+	(T, let count_a: usize, let count_b: usize)
+	(a: ^[count_a]T, b: ^[count_b]T)
+	-> [count_a + count_b]T
+{
+	let mut result: [count_a + count_b]T = uninitialized();
+	let mut i: usize = 0;
+	while i < count_a {
+		result[i] := a^[i];
+		i := i + 1;
+	}
+	while i < count_a + count_b {
+		result[i] := b^[i - count_a];
+		i := i + 1;
+	}
+	return result;
+}
+
+// Take arr by value so we can chain the result of concat directly to array_sum
+proc array_sum'(let N: usize)(arr: [N]i32) -> i32
+{
+	let mut sum: i32 = 0;
+	let mut i: usize = 0;
+	while i < N
+	{
+		sum := sum + arr[i];
+		i := i + 1;
+	}
+
+	return sum;
+}
+
+proc main() -> i32
+{
+	let mut a: [3]i32 = uninitialized();
+	a[0] := 7;
+	a[1] := 11;
+	a[2] := 13;
+
+	let mut b: [2]i32 = uninitialized();
+	b[0] := 23;
+	b[1] := 42;
+
+	return array_sum(concat(&a, &b));
+}

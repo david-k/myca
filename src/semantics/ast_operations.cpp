@@ -1,8 +1,9 @@
 #include "semantics/ast_operations.hpp"
 #include "semantics/ast_traversal.hpp"
-#include "semantics/module.hpp"
 #include "semantics/context.hpp"
-
+#include "semantics/error.hpp"
+#include "semantics/module.hpp"
+#include "semantics/type_properties.hpp"
 
 //--------------------------------------------------------------------
 // Equality
@@ -246,6 +247,11 @@ bool operator < (Expr const &a, Expr const &b)
 		{
 			return ea.var < std::get<GenericVarExpr>(b).var;
 		},
+		[&](BinaryExpr const &ea)
+		{
+			BinaryExpr const &eb = std::get<BinaryExpr>(b);
+			return std::tie(ea.op, *ea.left, *ea.right) < std::tie(eb.op, *eb.left, *eb.right);
+		},
 		[&](auto const&) -> bool
 		{
 			assert(!"[TODO] operator <: Expr");
@@ -397,25 +403,44 @@ size_t std::hash<Type>::operator () (Type const &type) const
 size_t std::hash<Expr>::operator () (Expr const &expr) const
 {
 	size_t h = compute_hash(expr.index());
-	traverse(expr, match
+	auto visitor = [&](this auto &self, Expr const &expr) -> void
 	{
-		[&](IntLiteralExpr e)
+		expr | match
 		{
-			combine_hashes(h, compute_hash(e.value));
-		},
-		[&](BinaryExpr const &e)
-		{
-			combine_hashes(h, compute_hash((int)e.op));
-		},
-		[&](GenericVarExpr const &e)
-		{
-			combine_hashes(h, compute_hash(e.var));
-		},
-		[&](const auto&)
-		{
-			assert(!"[TODO] hash<Expr>");
-		},
-	});
+			[&](IntLiteralExpr const &e)
+			{
+				combine_hashes(h, compute_hash(e.value));
+			},
+			[&](UnaryExpr const &e) -> void
+			{
+				combine_hashes(h, compute_hash((int)e.op));
+				visit_child_exprs(e, self);
+			},
+			[&](BinaryExpr const &e) -> void
+			{
+				combine_hashes(h, compute_hash((int)e.op));
+				visit_child_exprs(e, self);
+			},
+			[&](AsExpr const &e) -> void
+			{
+				combine_hashes(h, compute_hash(*e.target_type));
+				visit_child_exprs(e, self);
+			},
+			[&](VarExpr const &e)
+			{
+				combine_hashes(h, compute_hash(e.var));
+			},
+			[&](GenericVarExpr const &e)
+			{
+				combine_hashes(h, compute_hash(e.var));
+			},
+			[&](const auto&) // Not sure why I have to pass `this` explicitly here
+			{
+				assert(!"[TODO] hash<Expr>");
+			},
+		};
+	};
+	visitor(expr);
 
 	return h;
 }
@@ -1732,15 +1757,22 @@ void compute_direct_type_dependencies(Type const &type, unordered_set<TypeInstan
 bool type_var_occurs_in(GenericVar var, Expr const &expr)
 {
 	bool result = false;
-	traverse(expr, match
+	auto visitor = [&](Expr const &expr) -> void
 	{
-		[&](GenericVarExpr const &e)
+		expr | match
 		{
-			if(e.var == var)
-				result = true;
-		},
-		[&](auto const&) {}
-	});
+			[&](GenericVarExpr const &e)
+			{
+				if(e.var == var)
+					result = true;
+			},
+			[&](this auto &self, auto const &e) -> void
+			{
+				visit_child_exprs(e, self);
+			}
+		};
+	};
+	visitor(expr);
 
 	return result;
 }
@@ -1790,5 +1822,148 @@ bool type_var_occurs_in(GenericVar var, GenericArg const &arg)
 	{
 		[&](Type const &type) { return type_var_occurs_in(var, type); },
 		[&](Expr const &expr) { return type_var_occurs_in(var, expr); }
+	};
+}
+
+void const_eval(Type &type, Module const &mod)
+{
+	type | match
+	{
+		[&](ArrayType &t)
+		{
+			if(t.count_arg)
+				const_eval(*t.count_arg, mod);
+		},
+		[&](this auto &self, auto &t)
+		{
+			visit_child_types(t, self);
+		},
+	};
+}
+
+static Expr const_eval_int_opt(Int128 a, Int128 b, BinaryOp op, TokenRange range)
+{
+	switch(op)
+	{
+		case BinaryOp::ADD: return IntLiteralExpr(range, a + b);
+		case BinaryOp::SUB: return IntLiteralExpr(range, a - b);
+		case BinaryOp::MUL: return IntLiteralExpr(range, a * b);
+		case BinaryOp::DIV: return IntLiteralExpr(range, a / b);
+		case BinaryOp::LT: return BoolLiteralExpr(range, a < b);
+		case BinaryOp::LE: return BoolLiteralExpr(range, a <= b);
+		case BinaryOp::GT: return BoolLiteralExpr(range, a > b);
+		case BinaryOp::GE: return BoolLiteralExpr(range, a >= b);
+		case BinaryOp::EQ: return BoolLiteralExpr(range, a == b);
+		default: assert(!"const_eval_int_opt: invalid op");
+	}
+}
+
+static Expr const_eval_bool_opt(bool a, bool b, BinaryOp op, TokenRange range)
+{
+	switch(op)
+	{
+		case BinaryOp::EQ: return BoolLiteralExpr(range, a == b);
+		default: assert(!"const_eval_bool_opt: invalid op");
+	}
+}
+
+// Best-effort constant evaluation
+void const_eval(Expr &expr, Module const &mod)
+{
+	if(Type *type = expr.try_get_type())
+		const_eval(*type, mod);
+
+	expr | match
+	{
+		[&](IntLiteralExpr const&) {},
+		[&](BoolLiteralExpr const&) {},
+		[&](UnaryExpr const &e)
+		{
+			const_eval(*e.sub, mod);
+			switch(e.op)
+			{
+				case UnaryOp::NEG:
+				{
+					if(IntLiteralExpr const *val = std::get_if<IntLiteralExpr>(e.sub))
+						expr = IntLiteralExpr(e.range, -val->value);
+				} break;
+
+				case UnaryOp::NOT:
+				{
+					assert(!"[TODO] const_eval: UnaryExpr: NOT");
+				}
+			}
+		},
+		[&](BinaryExpr const &e)
+		{
+			const_eval(*e.left, mod);
+			const_eval(*e.right, mod);
+			
+			IntLiteralExpr const *left_int = std::get_if<IntLiteralExpr>(e.left);
+			IntLiteralExpr const *right_int = std::get_if<IntLiteralExpr>(e.right);
+			if(left_int and right_int)
+			{
+				expr = const_eval_int_opt(left_int->value, right_int->value, e.op, e.range);
+				return;
+			}
+
+			BoolLiteralExpr const *left_bool = std::get_if<BoolLiteralExpr>(e.left);
+			BoolLiteralExpr const *right_bool = std::get_if<BoolLiteralExpr>(e.right);
+			if(left_bool and right_bool)
+			{
+				expr = const_eval_bool_opt(left_bool->value, right_bool->value, e.op, e.range);
+				return;
+			}
+		},
+		[&](AsExpr const &e)
+		{
+			const_eval(*e.src_expr, mod);
+			const_eval(*e.target_type, mod);
+			*e.target_type | match
+			{
+				[&](BuiltinType t)
+				{
+					switch(t.builtin)
+					{
+						case BuiltinTypeDef::BOOL:
+						{
+							if(BoolLiteralExpr const *val = std::get_if<BoolLiteralExpr>(e.src_expr))
+								expr = *val;
+						} break;
+
+						case BuiltinTypeDef::I8:
+						case BuiltinTypeDef::U8:
+						case BuiltinTypeDef::I32:
+						case BuiltinTypeDef::U32:
+						case BuiltinTypeDef::ISIZE:
+						case BuiltinTypeDef::USIZE:
+						{
+							if(IntLiteralExpr const *val = std::get_if<IntLiteralExpr>(e.src_expr))
+							{
+								if(not integer_assignable_to(t.builtin, val->value))
+									throw_sem_error("Invalid integer cast", e.range.first, &mod);
+
+								expr = *val;
+							}
+						} break;
+
+						case BuiltinTypeDef::NEVER:
+						case BuiltinTypeDef::UNIT:
+						{
+							assert(!"[TODO] const_eval: AsExpr: NEVER, UNIT");
+						}break;
+					}
+				},
+				[&](auto const&)
+				{
+					throw_sem_error("Invalid type in constant cast expression", e.target_type->token_range().first, &mod);
+				},
+			};
+		},
+		[&](GenericVarExpr const&) {},
+		[&](auto const &e)
+		{
+			throw_sem_error("Expected constant expression", e.range.first, &mod);
+		}
 	};
 }

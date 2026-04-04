@@ -193,7 +193,7 @@ void generate_c_struct_def(CStruct const &cstruct, CBackend &backend)
 //
 // <generic-arg> ::= <type-segment> | <generic-val>
 //
-// <generic-val> ::= 'V' <num> // Integer value
+// <generic-val> ::= 'V' ('p' | 'n') <num> // Positive/negative integer value
 //
 // <type-segment> ::= 'P' ('c' | 'm') <path-segment>  // Pointer
 //                  | 'M' ('c' | 'm') <path-segment>  // Many pointer
@@ -209,7 +209,8 @@ static string mangle_generic_expr_arg(Expr const &expr)
 		[&](IntLiteralExpr const &e)
 		{
 			std::stringstream ss;
-			ss << e.value;
+			if(e.value < 0) ss << "n" << -e.value;
+			else            ss << "p" << e.value;
 			return "V" + ss.str();
 		},
 		[](auto const&) -> string
@@ -1133,66 +1134,77 @@ void gather_array_types(Type const &type, unordered_set<TypeDependency> &result)
 
 void gather_array_types(Expr const &expr, unordered_set<TypeDependency> &result)
 {
-	traverse(expr, match
+	auto visitor = [&](this auto &self, Expr const &expr) -> void
 	{
-		[&](auto const &e)
+		expr | match
 		{
-			gather_array_types(*e.type, result);
-		},
-		[&](Path const&) {}, // Has no type
-	});
+			[&](auto const &e)
+			{
+				if(e.type)
+					gather_array_types(*e.type, result);
+
+				visit_child_exprs(e, self);
+			},
+			[&](Path const&) {}, // Has no type
+		};
+	};
+	std::visit(visitor, expr);
 }
 
 void gather_array_types(Pattern const &pattern, unordered_set<TypeDependency> &result)
 {
-	traverse(pattern, match
+	auto visitor = [&](this auto &self, Pattern const &pattern) -> void
 	{
-		[&](auto const &p, Type const *NULLABLE provided_type)
-		{
-			gather_array_types(*p.type, result);
-			if(provided_type)
-				gather_array_types(*provided_type, result);
-		},
-		[&](VarPatternUnresolved const&, Type const *NULLABLE) {}, // Has no type
-	});
+		gather_array_types(pattern.type(), result);
+		if(pattern.provided_type)
+			gather_array_types(*pattern.provided_type, result);
+
+		visit_child_patterns(pattern, self);
+	};
+	visitor(pattern);
 }
 
 void gather_array_types(Stmt const &stmt, unordered_set<TypeDependency> &result)
 {
-	traverse(stmt, match
+	auto visitor = [&](this auto &self, Stmt const &stmt) -> void
 	{
-		[&](LetStmt const &s)
+		stmt | match
 		{
-			gather_array_types(*s.lhs, result);
-			if(s.init_expr)
-				gather_array_types(*s.init_expr, result);
-		},
-		[&](ExprStmt const &s)
-		{
-			gather_array_types(*s.expr, result);
-		},
-		[&](BlockStmt const&) {},
-		[&](ReturnStmt const &s)
-		{
-			if(s.ret_expr)
-				gather_array_types(*s.ret_expr, result);
-		},
-		[&](IfStmt const &s)
-		{
-			gather_array_types(*s.condition, result);
-		},
-		[&](WhileStmt const &s)
-		{
-			gather_array_types(*s.condition, result);
-		},
-		[&](DeclStmt const&) {},
-		[&](MatchStmt const &s)
-		{
-			gather_array_types(*s.expr, result);
-			for(MatchArm const &arm: *s.arms)
-				gather_array_types(arm.capture, result);
-		},
-	});
+			[&](LetStmt const &s)
+			{
+				gather_array_types(*s.lhs, result);
+				if(s.init_expr)
+					gather_array_types(*s.init_expr, result);
+			},
+			[&](ExprStmt const &s)
+			{
+				gather_array_types(*s.expr, result);
+			},
+			[&](BlockStmt const&) {},
+			[&](ReturnStmt const &s)
+			{
+				if(s.ret_expr)
+					gather_array_types(*s.ret_expr, result);
+			},
+			[&](IfStmt const &s)
+			{
+				gather_array_types(*s.condition, result);
+			},
+			[&](WhileStmt const &s)
+			{
+				gather_array_types(*s.condition, result);
+			},
+			[&](DeclStmt const&) {},
+			[&](MatchStmt const &s)
+			{
+				gather_array_types(*s.expr, result);
+				for(MatchArm const &arm: *s.arms)
+					gather_array_types(arm.capture, result);
+			},
+		};
+		visit_child_stmts(stmt, self);
+	};
+	visitor(stmt);
 }
 
 
@@ -1290,7 +1302,12 @@ struct ConcreteProcInstance
 		if(proc->proc()->body)
 		{
 			body = clone(*proc->proc()->body, proc->registry()->arena());
-			substitute_types_in_stmt(*body, proc->create_type_env(), *proc->registry(), FullSubstitution());
+			substitute_in_stmt(
+				*body,
+				proc->create_type_env(),
+				*proc->registry(),
+				{.mode = SubstitutionMode::FULL}
+			);
 		}
 	}
 

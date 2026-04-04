@@ -156,9 +156,9 @@ void typecheck_type(Type &type, ConstraintGatheringSubst &subst, SemaContext &ct
 		[&](this auto &self, ArrayType &t)
 		{
 			Type *count_type = typecheck_subexpr(*t.count_arg, subst, ctx);
-			auto error_msg = [](Expr const &ret_expr, string const &reason, Module const &mod)
+			auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 			{
-				throw_sem_error("Invalid array count: " + reason, ret_expr.token_range().first, &mod);
+				throw_sem_error("Invalid array count: " + reason, expr.token_range().first, &mod);
 			};
 			Unifier(ctx)
 				.left(*count_type, TypeConversion::NONE)
@@ -192,22 +192,26 @@ void typecheck_generic_args(
 	SemaContext &ctx
 )
 {
-	for(auto const &[idx, arg]: *args | std::views::enumerate)
+	for(auto const &[idx, generic_param]: *params | std::views::enumerate)
 	{
-		GenericParameter const &generic_param = params->items[idx];
-		arg | match
+		GenericArg &arg = args->items[idx];
+		generic_param.kind | match
 		{
-			[&](Type &type)
+			[&](GenericTypeParameter const&)
 			{
-				typecheck_type(type, subst, ctx);
-			},
-			[&](Expr &expr)
-			{
-				GenericValueParameter const *gen_val = std::get_if<GenericValueParameter>(&generic_param.kind);
-				if(not gen_val)
-					throw_sem_error("Expected value, got type", expr.token_range().first, ctx.mod);
+				Type *type_arg = std::get_if<Type>(&arg);
+				if(not type_arg)
+					throw_sem_error("Expected type, got value", arg.token_range().first, ctx.mod);
 
-				Type *type = typecheck_subexpr(expr, subst, ctx);
+				typecheck_type(*type_arg, subst, ctx);
+			},
+			[&](GenericValueParameter const &value_param)
+			{
+				Expr *expr_arg = std::get_if<Expr>(&arg);
+				if(not expr_arg)
+					throw_sem_error("Expected value, got type", arg.token_range().first, ctx.mod);
+
+				Type *type = typecheck_subexpr(*expr_arg, subst, ctx);
 
 				auto error_msg = [](Expr const &ret_expr, string const &reason, Module const &mod)
 				{
@@ -215,9 +219,9 @@ void typecheck_generic_args(
 				};
 				Unifier(ctx)
 					.left(*type, TypeConversion::NONE)
-					.right(*gen_val->type, TypeConversion::NONE)
+					.right(*value_param.type, TypeConversion::NONE)
 					.set(&subst)
-					.set(LazyErrorMsg(&expr, error_msg))
+					.set(LazyErrorMsg(expr_arg, error_msg))
 					.go();
 			},
 		};
@@ -574,6 +578,7 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 				throw_sem_error("Expected callable expression", e.range.first, ctx.mod);
 
 			proc_type->inst->typecheck(subst, ctx);
+			proc_type->callable->typecheck_generic_args(subst, ctx);
 
 			FixedArray<Type> const *param_types = proc_type->inst->params;
 			if(e.args->count > param_types->count)
@@ -707,7 +712,10 @@ Type const* typecheck_expr(Expr &expr, SemaContext &ctx)
 	LOGGER(ctx.logger(), on_data, solver);
 
 	TypeEnv subst = solver.solve();
-	substitute_types_in_expr(expr, subst, ctx.mod->sema->insts, FullDeductionSubstitution(expr.token_range()));
+	substitute_in_expr(expr, subst, ctx.mod->sema->insts, {
+		.mode = SubstitutionMode::FULL_DEDUCTION,
+		.region_being_substituted = expr.token_range()
+	});
 
 	LOGGER(ctx.logger(), on_data, subst);
 	LOGGER(ctx.logger(), on_expr_end);
@@ -984,7 +992,10 @@ static void typecheck_param(Parameter &param, SemaContext &ctx)
 		TypeEnv subst = solver.solve();
 		LOGGER(ctx.logger(), on_data, subst);
 
-		substitute_types_in_expr(*default_value, subst, ctx.mod->sema->insts, FullDeductionSubstitution(default_value->token_range()));
+		substitute_in_expr(*default_value, subst, ctx.mod->sema->insts, {
+			.mode = SubstitutionMode::FULL_DEDUCTION,
+			.region_being_substituted = default_value->token_range(),
+		});
 		LOGGER(ctx.logger(), on_expr_end);
 	}
 }
@@ -1022,8 +1033,14 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				TypeEnv subst = solver.solve();
 				LOGGER(ctx.logger(), on_data, subst);
 
-				substitute_types_in_expr(*s.init_expr, subst, ctx.mod->sema->insts, FullDeductionSubstitution(s.range));
-				substitute_types_in_pattern(*s.lhs, subst, ctx.mod->sema->insts, FullDeductionSubstitution(s.range));
+				substitute_in_expr(*s.init_expr, subst, ctx.mod->sema->insts, {
+					.mode = SubstitutionMode::FULL_DEDUCTION,
+					.region_being_substituted = s.range,
+				});
+				substitute_in_pattern(*s.lhs, subst, ctx.mod->sema->insts, {
+					.mode = SubstitutionMode::FULL_DEDUCTION,
+					.region_being_substituted = s.range,
+				});
 
 				LOGGER(ctx.logger(), on_expr_end);
 			}
@@ -1069,7 +1086,10 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				TypeEnv subst = solver.solve();
 				LOGGER(ctx.logger(), on_data, subst);
 
-				substitute_types_in_expr(*s.ret_expr, subst, ctx.mod->sema->insts, FullDeductionSubstitution(s.range));
+				substitute_in_expr(*s.ret_expr, subst, ctx.mod->sema->insts, {
+					.mode = SubstitutionMode::FULL_DEDUCTION,
+					.region_being_substituted = s.range,
+				});
 
 				LOGGER(ctx.logger(), on_expr_end);
 			}
@@ -1122,11 +1142,11 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 						typecheck_pattern(arm.capture, s.expr->type(), false, arm_constraints, ctx, s.expr);
 						TypeEnv subst_arm = arm_constraints.solve();
 
-						substitute_types_in_pattern(
+						substitute_in_pattern(
 							arm.capture,
 							subst_arm,
 							ctx.mod->sema->insts,
-							FullDeductionSubstitution(arm.capture.token_range())
+							{.mode = SubstitutionMode::FULL_DEDUCTION, .region_being_substituted = arm.capture.token_range()}
 						);
 
 						if(is<WildcardPattern>(arm.capture))
@@ -1212,11 +1232,11 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 						typecheck_pattern(arm.capture, s.expr->type(), false, arm_constraints, ctx, s.expr);
 						TypeEnv subst_arm = arm_constraints.solve();
 
-						substitute_types_in_pattern(
+						substitute_in_pattern(
 							arm.capture,
 							subst_arm,
 							ctx.mod->sema->insts,
-							FullDeductionSubstitution(arm.capture.token_range())
+							{.mode = SubstitutionMode::FULL_DEDUCTION, .region_being_substituted = arm.capture.token_range()}
 						);
 
 						if(is<WildcardPattern>(arm.capture))

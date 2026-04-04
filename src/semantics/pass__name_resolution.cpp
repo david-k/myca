@@ -158,7 +158,7 @@ static variant<Expr, Type> resolve_path(
 			TypeEnv env = TypeEnv::from_type_args(alias->type_params, resolved_type_args, ctx.mod->sema->insts);
 
 			Type type = clone(*alias->aliased_type, ctx.arena);
-			substitute(type, env, ctx.mod->sema->insts, BestEffortSubstitution());
+			substitute_in_type(type, env, ctx.mod->sema->insts, {.mode = SubstitutionMode::BEST_EFFORT});
 
 			if(path.child)
 			{
@@ -291,9 +291,31 @@ static void resolve_generic_arg(GenericArg &arg, Scope *scope, ResolutionContext
 	{
 		[&](Type &t)
 		{
-			resolve_type(t, scope, res_ctx, ctx);
+			if(Path const *path = std::get_if<Path>(&t))
+			{
+				// If we encounter an identifier when parsing a GenericArg we don't know yet if the
+				// identifier refers to a type or a variable. However, we still need to decide
+				// whether to put the Path into a Type or Expr. What we do is to always treat the
+				// Path as a Type, but if the Path later resolved to an Expr, that is fine.
+				variant<Expr, Type> resolved_path = resolve_path(*path, nullopt, scope, res_ctx, ctx);
+				arg = resolved_path | match
+				{
+					[&](Expr &e)
+					{
+						const_eval(e, *ctx.mod);
+						return GenericArg(e);
+					},
+					[](Type &t) { return GenericArg(t); },
+				};
+			}
+			else
+				resolve_type(t, scope, res_ctx, ctx);
 		},
-		[&](Expr &e) { resolve_expr(e, scope, res_ctx, ctx); },
+		[&](Expr &e)
+		{
+			resolve_expr(e, scope, res_ctx, ctx);
+			const_eval(e, *ctx.mod);
+		},
 	};
 }
 
@@ -313,7 +335,10 @@ void resolve_type(Type &type, Scope *scope, ResolutionContext res_ctx, SemaConte
 		{
 			resolve_type(*t.element, scope, res_ctx, ctx);
 			if(t.count_arg)
+			{
 				resolve_expr(*t.count_arg, scope, res_ctx, ctx);
+				const_eval(*t.count_arg, *ctx.mod);
+			}
 			else
 			{
 				assert(!"[TODO] resolve_type: ArrayType: UnknownCount");

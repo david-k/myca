@@ -75,6 +75,7 @@ T* clone_ptr(T const *ptr, Arena &arena)
 	return arena.alloc<T>(clone(*ptr, arena));
 }
 
+void print_type_args(FixedArray<GenericArg> const *type_args, Module const &mod, std::ostream &os);
 void print(GenericArg const &g, Module const &mod, std::ostream &os);
 void print(Path const &path, Module const &mod, std::ostream &os);
 void print(GenericVar const &var, std::ostream &os);
@@ -106,3 +107,6 @@ void compute_direct_type_dependencies(Type const &type, unordered_set<TypeInstan
 bool type_var_occurs_in(GenericVar var, Expr const &expr);
 bool type_var_occurs_in(GenericVar var, Type const &type);
 bool type_var_occurs_in(GenericVar var, GenericArg const &arg);
+
+void const_eval(Type &type, Module const &mod);
+void const_eval(Expr &expr, Module const &mod);

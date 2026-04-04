@@ -787,6 +787,14 @@ void Unifier::unify_generic_values()
 	Expr const &left = std::get<Expr>(*m_left);
 	Expr const &right = std::get<Expr>(*m_right);
 
+	if(equiv(left, right))
+	{
+		if(m_result)
+			*m_result = *m_left;
+
+		return;
+	}
+
 	IntLiteralExpr const *left_int = std::get_if<IntLiteralExpr>(&left);
 	IntLiteralExpr const *right_int = std::get_if<IntLiteralExpr>(&right);
 	if(left_int and right_int)

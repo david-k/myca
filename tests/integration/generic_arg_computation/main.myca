@@ -1,0 +1,9 @@
+proc add'(let x: i32, let y: i32)() -> i32
+{
+	return x + y;
+}
+
+proc main() -> i32
+{
+	return add'(23, 9)();
+}

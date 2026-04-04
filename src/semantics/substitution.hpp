@@ -5,70 +5,73 @@
 class InstanceRegistry;
 struct TypeArgList;
 
-struct BestEffortSubstitution {};
-struct FullDeductionSubstitution { TokenRange region_being_substituted; };
-struct FullSubstitution {};
+enum class SubstitutionMode
+{
+	BEST_EFFORT,
+	FULL_DEDUCTION,
+	FULL,
+};
 
-using SubstitutionMode = variant<
-	BestEffortSubstitution,
-	FullDeductionSubstitution,
-	FullSubstitution
->;
+struct SubstitutionOptions
+{
+	SubstitutionMode mode;
+	TokenRange region_being_substituted{};
+};
 
-void substitute(
+void substitute_in_type(
 	Type &type,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions options
 );
 
 void substitute(
 	TypeArgList &args,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions options
 );
 
-void substitute_types_in_expr(
+void substitute_in_expr(
 	Expr &expr,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions options
 );
 
-void substitute_types_in_pattern(
+void substitute_in_pattern(
 	Pattern &pattern,
 	TypeEnv const &subst,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions options
 );
 
-void substitute_types_in_stmt(
+void substitute_in_stmt(
 	Stmt &stmt,
 	TypeEnv const &subst,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions options
 );
 
-StructInstance* substitute_types_in_struct(
+StructInstance* substitute_in_struct(
 	StructInstance *inst,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode,
+	SubstitutionOptions options,
 	bool *modified = nullptr
 );
 
-ProcInstance* substitute_types_in_proc(
+ProcInstance* substitute_in_proc(
 	ProcInstance *inst,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode,
+	SubstitutionOptions options,
 	bool *modified = nullptr
 );
 
-void substitute(
+void substitute_in_generic_arg(
 	GenericArg &arg,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions options
 );

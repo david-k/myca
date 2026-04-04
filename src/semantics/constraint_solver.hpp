@@ -23,7 +23,7 @@ struct LValueCheck
 	IsMutable mutability;
 };
 
-// A check that is performed on a type after all TypeDeductionVars have been deduced
+// A check that is performed on a type/expr after all TypeDeductionVars have been deduced
 using TypeCheck = variant<
 	IntegerCheck,
 	CastCheck,

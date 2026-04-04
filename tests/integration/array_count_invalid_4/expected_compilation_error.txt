@@ -1,0 +1,1 @@
+|5:12| error: Expected constant expression

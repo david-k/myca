@@ -6,6 +6,7 @@
 #include "semantics/type_env.hpp"
 
 #include <algorithm>
+#include <variant>
 
 static TypeStatInfo gather_type_vars(DeclContainerInst cont, unordered_set<GenericVar> &type_vars, bool deduction_vars_only = false)
 {
@@ -37,14 +38,21 @@ static TypeStatInfo gather_type_vars(DeclContainerInst cont, unordered_set<Gener
 TypeStatInfo gather_type_vars(Expr const &expr, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
 {
 	TypeStatInfo info;
-	traverse(expr, match
+	auto visitor = [&](this auto &self, Expr const &expr) -> void
 	{
-		[&](GenericVarExpr const &e)
+		expr | match
 		{
-			info.merge(gather_type_vars(Type(VarType(e.range, e.var)), type_vars, deduction_vars_only));
-		},
-		[](auto const&) {}
-	});
+			[&](GenericVarExpr const &e)
+			{
+				info.merge(gather_type_vars(Type(VarType(e.range, e.var)), type_vars, deduction_vars_only));
+			},
+			[&](auto const &e) -> void
+			{
+				visit_child_exprs(e, self);
+			},
+		};
+	};
+	visitor(expr);
 
 	return info;
 }
@@ -340,7 +348,7 @@ void StructInstance::compute_dependent_properties()
 					.default_value = var_member.var.default_value ?
 						DefaultValueExpr(ExprPending()) : DefaultValueExpr(NoDefaultValue()),
 				};
-				substitute(*inst_var_member.type, env, *m_registry, BestEffortSubstitution());
+				substitute_in_type(*inst_var_member.type, env, *m_registry, {.mode = SubstitutionMode::BEST_EFFORT});
 
 				new (m_members->items+member_idx) InstanceMember(inst_var_member);
 				member_idx += 1;
@@ -494,7 +502,7 @@ void StructInstance::finalize_typechecking()
 			if(Expr *default_value = var_member->var.default_value.try_get_expr())
 			{
 				default_value = clone_ptr(default_value, m_registry->arena());
-				substitute_types_in_expr(*default_value, env, *m_registry, BestEffortSubstitution());
+				substitute_in_expr(*default_value, env, *m_registry, {.mode = SubstitutionMode::BEST_EFFORT});
 				inst_var_member.default_value = default_value;
 			}
 		}
@@ -688,12 +696,12 @@ static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRe
 	for(auto const &[idx, param]: *proc->params | std::views::enumerate)
 	{
 		Type param_type = clone(*param.type, instances.arena());
-		substitute(param_type, env, instances, BestEffortSubstitution());
+		substitute_in_type(param_type, env, instances, {.mode = SubstitutionMode::BEST_EFFORT});
 		ctor_params->items[idx] = param_type;
 	}
 
 	Type *new_ret = clone_ptr(proc->ret_type, instances.arena());
-	substitute(*new_ret, env, instances, BestEffortSubstitution());
+	substitute_in_type(*new_ret, env, instances, {.mode = SubstitutionMode::BEST_EFFORT});
 
 	ProcTypeInstance *proc_type_inst = instances.get_proc_type_instance(ctor_params, new_ret);
 	return instances.arena().alloc<Type>(ProcType{
@@ -848,7 +856,7 @@ StructInstance* InstanceRegistry::get_struct_instance(
 	TypeArgList const &type_args,
 	TypeEnv const &subst,
 	optional<DeclContainerInst> decl_parent,
-	SubstitutionMode mode
+	SubstitutionOptions mode
 )
 {
 	check_struct_parents(struct_, decl_parent);
@@ -988,7 +996,7 @@ ProcInstance* InstanceRegistry::get_proc_instance(
 	ProcItem const *proc,
 	TypeArgList const &type_args,
 	TypeEnv const &subst,
-	SubstitutionMode mode
+	SubstitutionOptions mode
 )
 {
 	void *original_mem_pos = m_arena.current_ptr();
@@ -1034,7 +1042,7 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
 	FixedArray<Type> *params,
 	Type *ret,
 	TypeEnv const &subst,
-	SubstitutionMode mode
+	SubstitutionOptions mode
 )
 {
 	void *original_mem_pos = m_arena.current_ptr();
@@ -1042,11 +1050,11 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
 	// Substitute params
 	FixedArray<Type> *new_params = clone(params, m_arena);
 	for(Type &new_param: *new_params)
-		substitute(new_param, subst, *this, mode);
+		substitute_in_type(new_param, subst, *this, mode);
 
 	// Substitute return type
 	Type *new_ret = clone_ptr(ret, m_arena);
-	substitute(*new_ret, subst, *this, mode);
+	substitute_in_type(*new_ret, subst, *this, mode);
 
 	auto it = m_proc_type_instances.find(ProcTypeInstanceKey(new_params, new_ret));
 	if(it != m_proc_type_instances.end())

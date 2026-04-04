@@ -72,7 +72,7 @@ void TypeEnv::materialize(class InstanceRegistry &registry)
 	for(auto &[_, gen_arg]: m_env)
 	{
 		if(Type *t = std::get_if<Type>(&gen_arg))
-			substitute(*t, *this, registry, FullDeductionSubstitution());
+			substitute_in_type(*t, *this, registry, {.mode = SubstitutionMode::FULL_DEDUCTION});
 	}
 }
 
@@ -125,7 +125,7 @@ void add_type_args_to_env(
 
 		// See tests struct_recursive_type_param_<N> for why we call substitute() and perform the
 		// type_var_occurs_in() check
-		substitute(type_arg, result, registry, BestEffortSubstitution());
+		substitute_in_generic_arg(type_arg, result, registry, {.mode = SubstitutionMode::BEST_EFFORT});
 		if(not equiv(mk_generic_arg(type_param.def, UNKNOWN_TOKEN_RANGE), type_arg))
 		{
 			if(type_var_occurs_in(type_param, type_arg))

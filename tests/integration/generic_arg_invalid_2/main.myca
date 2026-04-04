@@ -1,0 +1,6 @@
+proc foo'(T)() {}
+
+proc main() -> i32
+{
+	foo'(2)();
+}

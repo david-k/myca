@@ -16,6 +16,8 @@ using std::unordered_set;
 // is not a type by the same principle applies).
 
 class InstanceRegistry;
+class ConstraintGatheringSubst;
+struct SemaContext;
 
 struct TypeStatInfo
 {
@@ -102,10 +104,11 @@ public:
 	virtual size_t param_count() = 0;
 	virtual string_view param_name_at(size_t idx) = 0;
 	virtual DefaultValueExpr param_default_value_at(size_t idx) = 0;
+	virtual void typecheck_generic_args(ConstraintGatheringSubst &subst, SemaContext &ctx) = 0;
 	virtual Callable* get_substituted(
 		TypeEnv const &env,
 		InstanceRegistry &registry,
-		SubstitutionMode mode
+		SubstitutionOptions mode
 	) = 0;
 };
 
@@ -190,7 +193,7 @@ public:
 		return this;
 	}
 
-	void typecheck_generic_args(class ConstraintGatheringSubst &subst, struct SemaContext &ctx);
+	virtual void typecheck_generic_args(ConstraintGatheringSubst &subst, SemaContext &ctx);
 
 	size_t id() const { return m_id; }
 	int variant_depth() const;
@@ -228,10 +231,10 @@ public:
 	virtual Callable* get_substituted(
 		TypeEnv const &env,
 		InstanceRegistry &registry,
-		SubstitutionMode mode
+		SubstitutionOptions mode
 	)
 	{
-		return substitute_types_in_struct(this, env, registry, mode);
+		return substitute_in_struct(this, env, registry, mode);
 	}
 
 	// Computes the struct's memory layout considering only its own members, ignoring any members of
@@ -336,7 +339,7 @@ public:
 
 	TypeEnv create_type_env() const;
 
-	void typecheck_generic_args(class ConstraintGatheringSubst &subst, struct SemaContext &ctx);
+	virtual void typecheck_generic_args(ConstraintGatheringSubst &subst, SemaContext &ctx);
 
 	bool is_concrete() const { return m_type_args.occurring_vars.empty() and not m_type_args.has_known_ints; }
 	bool is_deduction_complete() const { return not m_type_args.has_type_deduction_vars and not m_type_args.has_known_ints; }
@@ -362,10 +365,10 @@ public:
 	virtual Callable* get_substituted(
 		TypeEnv const &env,
 		InstanceRegistry &registry,
-		SubstitutionMode mode
+		SubstitutionOptions mode
 	)
 	{
-		return substitute_types_in_proc(this, env, registry, mode);
+		return substitute_in_proc(this, env, registry, mode);
 	}
 
 private:
@@ -418,7 +421,7 @@ struct ProcTypeInstance
 	}
 
 	bool is_deduction_complete() const { return not has_type_deduction_vars and not has_known_ints; }
-	void typecheck(class ConstraintGatheringSubst &subst, struct SemaContext &ctx);
+	void typecheck(ConstraintGatheringSubst &subst, SemaContext &ctx);
 
 	FixedArray<Type> *params;
 	Type *ret;
@@ -525,7 +528,7 @@ public:
 	}
 
 	void compute_properties();
-	void typecheck(class ConstraintGatheringSubst &subst, struct SemaContext &ctx);
+	void typecheck(ConstraintGatheringSubst &subst, SemaContext &ctx);
 
 private:
 	vector<Type*> m_alternatives;
@@ -621,7 +624,7 @@ public:
 		TypeArgList const &type_args,
 		TypeEnv const &subst,
 		optional<DeclContainerInst> decl_parent,
-		SubstitutionMode mode
+		SubstitutionOptions mode
 	);
 
 
@@ -631,7 +634,7 @@ public:
 		ProcItem const *proc,
 		TypeArgList const &type_args,
 		TypeEnv const &subst,
-		SubstitutionMode mode
+		SubstitutionOptions mode
 	);
 
 	ProcTypeInstance* get_proc_type_instance(FixedArray<Type> *params, Type *ret);
@@ -639,7 +642,7 @@ public:
 		FixedArray<Type> *params,
 		Type *ret,
 		TypeEnv const &subst,
-		SubstitutionMode mode
+		SubstitutionOptions mode
 	);
 
 	// `alternatives` must be the result of canonicalize_union_alternatives()

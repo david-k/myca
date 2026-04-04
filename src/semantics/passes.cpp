@@ -9,31 +9,21 @@ void sema(Module &mod, Arena &arena, optional<EventLogger> &&logger)
 	if(logger)
 		ctx.mod->sema->logger = std::move(logger);
 
-	LOGGER(ctx.mod->sema->logger, on_declare_items_start);
-	{
-		register_items(ctx);
-	}
-	LOGGER(ctx.mod->sema->logger, on_declare_items_end);
+	LOGGER(ctx.logger(), on_declare_items_start);
+	register_items(ctx);
+	LOGGER(ctx.logger(), on_declare_items_end);
 
-	LOGGER(ctx.mod->sema->logger, on_resolve_names_start);
-	{
-		resolve_names(ctx);
-	}
-	LOGGER(ctx.mod->sema->logger, on_resolve_names_end);
+	LOGGER(ctx.logger(), on_resolve_names_start);
+	resolve_names(ctx);
+	LOGGER(ctx.logger(), on_resolve_names_end);
 
-	LOGGER(ctx.mod->sema->logger, on_typecheck_start);
-	{
-		typecheck(ctx);
-	}
-	LOGGER(ctx.mod->sema->logger, on_typecheck_end);
+	LOGGER(ctx.logger(), on_typecheck_start);
+	typecheck(ctx);
+	LOGGER(ctx.logger(), on_typecheck_end);
 
-	{
-		check_default_values(ctx);
-	}
+	check_default_values(ctx);
 
-	LOGGER(ctx.mod->sema->logger, on_layout_computation_start);
-	{
-		compute_type_layouts(mod);
-	}
-	LOGGER(ctx.mod->sema->logger, on_layout_computation_end);
+	LOGGER(ctx.logger(), on_layout_computation_start);
+	compute_type_layouts(mod);
+	LOGGER(ctx.logger(), on_layout_computation_end);
 }

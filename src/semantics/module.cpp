@@ -324,7 +324,9 @@ void EventLogger::on_proc_register(ProcInstance *inst)
 		deduction_state = "fully deduced";
 
 	*m_os << "<li>Register proc: \n";
-		*m_os << "<code class='myca-inline'>" << inst->proc()->name << "</code>";
+		*m_os << "<code class='myca-inline'>" << inst->proc()->name;
+		print_type_args(inst->type_args().args, *m_mod, *m_os);
+		*m_os << "</code>";
 		*m_os << " <span class='side-info'>[" << deduction_state << "]</span>\n";
 		*m_os << " <span class='side-info'>[" << inst << "]</span>\n";
 	*m_os << "</li>\n";

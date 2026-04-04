@@ -56,32 +56,57 @@ uint64_t parse_integer(string_view integer_string)
 	return integer;
 }
 
-
 //--------------------------------------------------------------------
 // Parsing types
 //--------------------------------------------------------------------
+static Expr parse_prefix_expr(Parser &parser, Memory M);
 static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path = true);
 static Type parse_union_type(Parser &parser, Memory M);
 
-static FixedArray<GenericArg>* parse_type_arg_list(Parser &parser, Memory M)
+enum class IsLoneTypeArg
+{
+	YES,
+	NO,
+};
+
+static GenericArg parse_generic_arg(IsLoneTypeArg is_lone, Parser &parser, Memory M)
+{
+	if(parser.get().kind == Lexeme::INT_LITERAL or parser.get().kind == Lexeme::MINUS)
+		return parse_prefix_expr(parser, M);
+	else if(try_consume(parser, Lexeme::LEFT_PAREN))
+	{
+		Expr expr = parse_expr(parser, M);
+		consume(parser, Lexeme::RIGHT_PAREN);
+		return expr;
+	}
+	else
+	{
+		if(is_lone == IsLoneTypeArg::YES)
+		{
+			// By setting `parse_full_path` to `false` we parse `Option'T.Some` as `Option'(T).Some` and
+			// not as `Option'(T.Some)`, which I feel is more natural in practice
+			return parse_prefix_type(parser, M, false);
+		}
+		else
+			return parse_type(parser, M);
+	}
+}
+
+static FixedArray<GenericArg>* parse_generic_arg_list(Parser &parser, Memory M)
 {
 	ListBuilder<GenericArg> type_args(M.temp);
 	if(try_consume(parser, Lexeme::LEFT_PAREN))
 	{
 		while(parser.get().kind != Lexeme::RIGHT_PAREN)
 		{
-			type_args.append(parse_type(parser, M));
+			type_args.append(parse_generic_arg(IsLoneTypeArg::NO, parser, M));
 			if(parser.get().kind != Lexeme::RIGHT_PAREN)
 				consume(parser, Lexeme::COMMA);
 		}
 		consume(parser, Lexeme::RIGHT_PAREN);
 	}
 	else
-	{
-		// By setting `parse_full_path` to `false` we parse `Option'T.Some` as `Option'(T).Some` and
-		// not as `Option'(T.Some)`, which I feel is more natural in practice
-		type_args.append(parse_prefix_type(parser, M, false));
-	}
+		type_args.append(parse_generic_arg(IsLoneTypeArg::YES, parser, M));
 
 	return type_args.to_array(*M.main);
 }
@@ -93,7 +118,7 @@ static Path parse_path(Parser &parser, Memory M)
 
 	Path path;
 	if(try_consume(parser, Lexeme::SINGLE_QUOTE))
-		path.type_args = parse_type_arg_list(parser, M);
+		path.type_args = parse_generic_arg_list(parser, M);
 	else
 		path.type_args = alloc_fixed_array<GenericArg>(0, *M.main);
 
@@ -265,15 +290,11 @@ Type parse_type(Parser &parser, Memory M)
 	return parse_union_type(parser, M);
 }
 
-
 //--------------------------------------------------------------------
 // Expressions
 //--------------------------------------------------------------------
 namespace
 {
-	Expr parse_prefix_expr(Parser &parser, Memory M);
-	Expr parse_infix_expr(Parser &parser, Expr left, Memory M);
-
 	enum class Associativity
 	{
 		LEFT,
@@ -289,323 +310,331 @@ namespace
 	};
 
 	constexpr OperatorInfo NO_PREVIOUS_OP = {.precedence = INT_MAX, .assoc = Associativity::LEFT};
+}
 
-	optional<OperatorInfo> get_operator_info(Lexeme tok)
+enum class IsPrefix
+{
+	YES,
+	NO,
+};
+
+static optional<OperatorInfo> get_operator_info(Lexeme tok, IsPrefix is_prefix = IsPrefix::NO)
+{
+	switch(tok)
 	{
-		switch(tok)
-		{
-			// Member access
-			case Lexeme::DOT:
-				return OperatorInfo{.precedence = 0, .assoc = Associativity::LEFT};
+		// Member access
+		case Lexeme::DOT:
+			return OperatorInfo{.precedence = 0, .assoc = Associativity::LEFT};
 
-			// Procedure/constructor calls
-			case Lexeme::LEFT_PAREN:
-				return OperatorInfo{.precedence = 1, .assoc = Associativity::LEFT};
+		// Procedure/constructor calls
+		case Lexeme::LEFT_PAREN:
+			return OperatorInfo{.precedence = 1, .assoc = Associativity::LEFT};
 
-			// Pointer dereference
-			case Lexeme::CIRCUMFLEX:
-				return OperatorInfo{.precedence = 2, .assoc = Associativity::LEFT};
+		// Pointer dereference
+		case Lexeme::CIRCUMFLEX:
+			return OperatorInfo{.precedence = 2, .assoc = Associativity::LEFT};
 
-			// Indexing
-			case Lexeme::LEFT_BRACKET:
-				return OperatorInfo{.precedence = 2, .assoc = Associativity::LEFT};
+		// Indexing
+		case Lexeme::LEFT_BRACKET:
+			return OperatorInfo{.precedence = 2, .assoc = Associativity::LEFT};
 
-			// Address of
-			case Lexeme::AMPERSAND:
-				return OperatorInfo{.precedence = 3, .assoc = Associativity::LEFT};
+		// Address of
+		case Lexeme::AMPERSAND:
+			return OperatorInfo{.precedence = 3, .assoc = Associativity::LEFT};
 
-			// Try
-			case Lexeme::QUESTIONMARK:
-				return OperatorInfo{.precedence = 3, .assoc = Associativity::LEFT};
+		// Try
+		case Lexeme::QUESTIONMARK:
+			return OperatorInfo{.precedence = 3, .assoc = Associativity::LEFT};
 
-			// Unary minus
-			case Lexeme::UNARY_MINUS:
+		// Logical NOT
+		case Lexeme::NOT:
+			return OperatorInfo{.precedence = 4, .assoc = Associativity::LEFT};
+
+		// Multiplication/division
+		case Lexeme::STAR:
+		case Lexeme::SLASH:
+			return OperatorInfo{.precedence = 5, .assoc = Associativity::LEFT};
+
+		// Addition
+		case Lexeme::PLUS:
+			return OperatorInfo{.precedence = 6, .assoc = Associativity::LEFT};
+
+		case Lexeme::MINUS:
+			if(is_prefix == IsPrefix::YES)
+				// Unary minus
 				return OperatorInfo{.precedence = 4, .assoc = Associativity::LEFT};
-
-			// Logical NOT
-			case Lexeme::NOT:
-				return OperatorInfo{.precedence = 4, .assoc = Associativity::LEFT};
-
-			// Multiplication/division
-			case Lexeme::STAR:
-			case Lexeme::SLASH:
-				return OperatorInfo{.precedence = 5, .assoc = Associativity::LEFT};
-
-			// Addition/subtraction
-			case Lexeme::PLUS:
-			case Lexeme::MINUS:
+			else
+				// Subtraction
 				return OperatorInfo{.precedence = 6, .assoc = Associativity::LEFT};
 
-			// Casting
-			case Lexeme::AS:
-				return OperatorInfo{.precedence = 7, .assoc = Associativity::LEFT};
+		// Casting
+		case Lexeme::AS:
+			return OperatorInfo{.precedence = 7, .assoc = Associativity::LEFT};
 
-			// Comparison
-			case Lexeme::DOUBLE_EQ:
-			case Lexeme::LT:
-			case Lexeme::LE:
-			case Lexeme::GT:
-			case Lexeme::GE:
-				return OperatorInfo{.precedence = 8, .assoc = Associativity::LEFT};
+		// Comparison
+		case Lexeme::DOUBLE_EQ:
+		case Lexeme::LT:
+		case Lexeme::LE:
+		case Lexeme::GT:
+		case Lexeme::GE:
+			return OperatorInfo{.precedence = 8, .assoc = Associativity::LEFT};
 
-			// Assignment
-			case Lexeme::COLON_EQ:
-				return OperatorInfo{.precedence = 9, .assoc = Associativity::RIGHT};
+		// Assignment
+		case Lexeme::COLON_EQ:
+			return OperatorInfo{.precedence = 9, .assoc = Associativity::RIGHT};
 
-			default:
-				return nullopt;
-		}
+		default:
+			return nullopt;
+	}
+}
+
+static Expr parse_infix_expr(Parser &parser, Expr left, Memory M);
+
+static Expr parse_expr(Parser &parser, OperatorInfo prev_op, Memory M)
+{
+	Expr expr = parse_prefix_expr(parser, M);
+	for(;;)
+	{
+		optional<OperatorInfo> next_op = get_operator_info(parser.get().kind);
+		if(!next_op)
+			break;
+
+		if(
+			prev_op.tighter_than(*next_op) ||
+			(prev_op.precedence == next_op->precedence && next_op->assoc == Associativity::LEFT)
+		)
+			break;
+
+		expr = parse_infix_expr(parser, expr, M);
 	}
 
-	Expr parse_expr(Parser &parser, OperatorInfo prev_op, Memory M)
+	return expr;
+}
+
+static Expr parse_prefix_expr(Parser &parser, Memory M)
+{
+	TokenRanger ranger(parser);
+	Token const &tok = parser.next();
+	switch(tok.kind)
 	{
-		Expr expr = parse_prefix_expr(parser, M);
-		for(;;)
+		case Lexeme::IDENTIFIER:
 		{
-			optional<OperatorInfo> next_op = get_operator_info(parser.get().kind);
-			if(!next_op)
-				break;
-
-			if(
-				prev_op.tighter_than(*next_op) ||
-				(prev_op.precedence == next_op->precedence && next_op->assoc == Associativity::LEFT)
-			)
-				break;
-
-			expr = parse_infix_expr(parser, expr, M);
+			parser.rewind();
+			return parse_path(parser, M);
 		}
 
-		return expr;
-	}
-
-	Expr parse_prefix_expr(Parser &parser, Memory M)
-	{
-		TokenRanger ranger(parser);
-		Token const &tok = parser.next();
-		switch(tok.kind)
+		case Lexeme::LEFT_PAREN:
 		{
-			case Lexeme::IDENTIFIER:
-			{
-				parser.rewind();
-				return parse_path(parser, M);
-			}
-
-			case Lexeme::LEFT_PAREN:
-			{
-				Expr sub_expr = parse_expr(parser, NO_PREVIOUS_OP, M);
-				consume(parser, Lexeme::RIGHT_PAREN);
-				return sub_expr;
-			}
-
-			case Lexeme::INT_LITERAL:
-				return IntLiteralExpr(ranger.get(), parse_integer(tok.text));
-
-			case Lexeme::TRUE:
-				return BoolLiteralExpr(ranger.get(), true);
-
-			case Lexeme::FALSE:
-				return BoolLiteralExpr(ranger.get(), false);
-
-			case Lexeme::C_STRING_LITERAL:
-				return StringLiteralExpr(ranger.get(), StringLiteralKind::C, tok.text);
-
-			case Lexeme::NOT:
-			{
-				Expr sub_expr = parse_expr(parser, *get_operator_info(tok.kind), M);
-				return UnaryExpr(
-					ranger.get(),
-					M.main->alloc<Expr>(sub_expr),
-					UnaryOp::NOT
-				);
-			}
-
-			case Lexeme::MINUS:
-			{
-				Expr sub_expr = parse_expr(parser, *get_operator_info(Lexeme::UNARY_MINUS), M);
-				return UnaryExpr(
-					ranger.get(),
-					M.main->alloc<Expr>(sub_expr),
-					UnaryOp::NEG
-				);
-			}
-
-			case Lexeme::AMPERSAND:
-			{
-				IsMutable mutability = try_consume(parser, Lexeme::MUT) ? IsMutable::YES : IsMutable::NO;
-				Expr sub_expr = parse_expr(parser, *get_operator_info(tok.kind), M);
-				return AddressOfExpr(
-					ranger.get(),
-					M.main->alloc<Expr>(sub_expr),
-					mutability
-				);
-			}
-
-			case Lexeme::SIZE_OF:
-			{
-				consume(parser, Lexeme::LEFT_PAREN);
-				Type type = parse_type(parser, M);
-				consume(parser, Lexeme::RIGHT_PAREN);
-
-				return SizeOfExpr(ranger.get(), M.main->alloc<Type>(type));
-			}
-
-			case Lexeme::MAKE:
-			{
-				Expr init = parse_expr(parser, NO_PREVIOUS_OP, M);
-				consume(parser, Lexeme::AT);
-				Expr addr = parse_expr(parser, NO_PREVIOUS_OP, M);
-
-				return MakeExpr(
-					ranger.get(),
-					M.main->alloc<Expr>(init),
-					M.main->alloc<Expr>(addr)
-				);
-			}
-
-			default:
-				throw_parse_error("Invalid token while parsing expression: "s + str(tok.kind), ranger.first, parser);
+			Expr sub_expr = parse_expr(parser, NO_PREVIOUS_OP, M);
+			consume(parser, Lexeme::RIGHT_PAREN);
+			return sub_expr;
 		}
-	}
 
-	Expr parse_infix_expr(Parser &parser, Expr left, Memory M)
-	{
-		Token tok = parser.next();
-		switch(tok.kind)
+		case Lexeme::INT_LITERAL:
+			return IntLiteralExpr(ranger.get(), parse_integer(tok.text));
+
+		case Lexeme::TRUE:
+			return BoolLiteralExpr(ranger.get(), true);
+
+		case Lexeme::FALSE:
+			return BoolLiteralExpr(ranger.get(), false);
+
+		case Lexeme::C_STRING_LITERAL:
+			return StringLiteralExpr(ranger.get(), StringLiteralKind::C, tok.text);
+
+		case Lexeme::NOT:
 		{
-			case Lexeme::DOT:
-			{
-				string_view member_name = consume(parser, Lexeme::IDENTIFIER).text;
-				return MemberAccessExpr(
-					TokenRange{left.token_range().first, parser.prev_token_idx()},
-					M.main->alloc<Expr>(left),
-					member_name
-				);
-			}
+			Expr sub_expr = parse_expr(parser, *get_operator_info(tok.kind), M);
+			return UnaryExpr(
+				ranger.get(),
+				M.main->alloc<Expr>(sub_expr),
+				UnaryOp::NOT
+			);
+		}
 
-			case Lexeme::PLUS:
-			case Lexeme::MINUS:
-			case Lexeme::STAR:
-			case Lexeme::SLASH:
-			case Lexeme::DOUBLE_EQ:
-			case Lexeme::LT:
-			case Lexeme::LE:
-			case Lexeme::GT:
-			case Lexeme::GE:
-			{
-				Expr right = parse_expr(parser, *get_operator_info(tok.kind), M);
-				return BinaryExpr(
-					TokenRange{left.token_range().first, parser.prev_token_idx()},
-					M.main->alloc<Expr>(left),
-					M.main->alloc<Expr>(right),
-					BinaryOp(tok.kind)
-				);
-			}
+		case Lexeme::MINUS:
+		{
+			Expr sub_expr = parse_expr(parser, *get_operator_info(Lexeme::MINUS, IsPrefix::YES), M);
+			return UnaryExpr(
+				ranger.get(),
+				M.main->alloc<Expr>(sub_expr),
+				UnaryOp::NEG
+			);
+		}
 
-			case Lexeme::COLON_EQ:
-			{
-				Expr right = parse_expr(parser, *get_operator_info(tok.kind), M);
-				return AssignmentExpr(
-					TokenRange{left.token_range().first, parser.prev_token_idx()},
-					M.main->alloc<Expr>(left),
-					M.main->alloc<Expr>(right)
-				);
-			}
+		case Lexeme::AMPERSAND:
+		{
+			IsMutable mutability = try_consume(parser, Lexeme::MUT) ? IsMutable::YES : IsMutable::NO;
+			Expr sub_expr = parse_expr(parser, *get_operator_info(tok.kind), M);
+			return AddressOfExpr(
+				ranger.get(),
+				M.main->alloc<Expr>(sub_expr),
+				mutability
+			);
+		}
 
-			case Lexeme::LEFT_PAREN:
+		case Lexeme::SIZE_OF:
+		{
+			consume(parser, Lexeme::LEFT_PAREN);
+			Type type = parse_type(parser, M);
+			consume(parser, Lexeme::RIGHT_PAREN);
+
+			return SizeOfExpr(ranger.get(), M.main->alloc<Type>(type));
+		}
+
+		case Lexeme::MAKE:
+		{
+			Expr init = parse_expr(parser, NO_PREVIOUS_OP, M);
+			consume(parser, Lexeme::AT);
+			Expr addr = parse_expr(parser, NO_PREVIOUS_OP, M);
+
+			return MakeExpr(
+				ranger.get(),
+				M.main->alloc<Expr>(init),
+				M.main->alloc<Expr>(addr)
+			);
+		}
+
+		default:
+			throw_parse_error("Invalid token while parsing expression: "s + str(tok.kind), ranger.first, parser);
+	}
+}
+
+static Expr parse_infix_expr(Parser &parser, Expr left, Memory M)
+{
+	Token tok = parser.next();
+	switch(tok.kind)
+	{
+		case Lexeme::DOT:
+		{
+			string_view member_name = consume(parser, Lexeme::IDENTIFIER).text;
+			return MemberAccessExpr(
+				TokenRange{left.token_range().first, parser.prev_token_idx()},
+				M.main->alloc<Expr>(left),
+				member_name
+			);
+		}
+
+		case Lexeme::PLUS:
+		case Lexeme::MINUS:
+		case Lexeme::STAR:
+		case Lexeme::SLASH:
+		case Lexeme::DOUBLE_EQ:
+		case Lexeme::LT:
+		case Lexeme::LE:
+		case Lexeme::GT:
+		case Lexeme::GE:
+		{
+			Expr right = parse_expr(parser, *get_operator_info(tok.kind), M);
+			return BinaryExpr(
+				TokenRange{left.token_range().first, parser.prev_token_idx()},
+				M.main->alloc<Expr>(left),
+				M.main->alloc<Expr>(right),
+				BinaryOp(tok.kind)
+			);
+		}
+
+		case Lexeme::COLON_EQ:
+		{
+			Expr right = parse_expr(parser, *get_operator_info(tok.kind), M);
+			return AssignmentExpr(
+				TokenRange{left.token_range().first, parser.prev_token_idx()},
+				M.main->alloc<Expr>(left),
+				M.main->alloc<Expr>(right)
+			);
+		}
+
+		case Lexeme::LEFT_PAREN:
+		{
+			ListBuilder<Argument> args(M.temp);
+			while(parser.get().kind != Lexeme::RIGHT_PAREN)
 			{
-				ListBuilder<Argument> args(M.temp);
-				while(parser.get().kind != Lexeme::RIGHT_PAREN)
+				TokenRanger arg_ranger(parser);
+				Argument arg;
+				if(try_consume(parser, Lexeme::DOT))
 				{
-					TokenRanger arg_ranger(parser);
-					Argument arg;
-					if(try_consume(parser, Lexeme::DOT))
-					{
-						arg.name = consume(parser, Lexeme::IDENTIFIER).text;
+					arg.name = consume(parser, Lexeme::IDENTIFIER).text;
 
-						// TODO Let's try switching to `.arg: default_val`
-						consume(parser, Lexeme::EQ);
-					}
-
-					arg.expr = parse_expr(parser, NO_PREVIOUS_OP, M);
-					arg.range = arg_ranger.get();
-					args.append(arg);
-
-					if(parser.get().kind != Lexeme::RIGHT_PAREN)
-						consume(parser, Lexeme::COMMA);
-				}
-				consume(parser, Lexeme::RIGHT_PAREN);
-
-				return CallExpr(
-					TokenRange{left.token_range().first, parser.prev_token_idx()},
-					M.main->alloc<Expr>(left),
-					args.to_array(*M.main)
-				);
-			}
-
-			case Lexeme::CIRCUMFLEX:
-				return DerefExpr(
-					TokenRange{left.token_range().first,
-					parser.prev_token_idx()},
-					M.main->alloc<Expr>(left)
-				);
-
-			case Lexeme::LEFT_BRACKET:
-			{
-				Expr index = parse_expr(parser, NO_PREVIOUS_OP, M);
-				consume(parser, Lexeme::RIGHT_BRACKET);
-				return IndexExpr(
-					TokenRange{left.token_range().first, parser.prev_token_idx()},
-					M.main->alloc<Expr>(left),
-					M.main->alloc<Expr>(index)
-				);
-			}
-
-			case Lexeme::AS:
-			{
-				Type target_type = parse_type(parser, M);
-				return AsExpr(
-					TokenRange{left.token_range().first, parser.prev_token_idx()},
-					M.main->alloc<Expr>(left),
-					M.main->alloc<Type>(target_type)
-				);
-			}
-
-			case Lexeme::QUESTIONMARK:
-			{
-				assert(!"TODO");
-				/*optional<Stmt> on_failure;
-				optional<Pattern> error_capture;
-				if(try_consume(parser, Lexeme::ELSE))
-				{
-					if(parser.tok().kind != Lexeme::LEFT_BRACE)
-					{
-						Pattern error_pat = parse_pattern(parser, mod);
-						error_capture = pattern_Ctor(
-							mk_path({"Result"}, {"Err"}, mod.global()),
-							mk_vec(std::move(error_pat))
-						);
-					}
-
-					on_failure = parse_block_stmt(parser, mod, ScopePolicy::NEW_SCOPE);
-					parser.insert(Lexeme::SEMICOLON);
+					// TODO Let's try switching to `.arg: default_val`
+					consume(parser, Lexeme::EQ);
 				}
 
-				Expr expr = with_location(TryExpr(std::move(left), std::move(on_failure), std::move(error_capture)));
-				return expr;*/
+				arg.expr = parse_expr(parser, NO_PREVIOUS_OP, M);
+				arg.range = arg_ranger.get();
+				args.append(arg);
+
+				if(parser.get().kind != Lexeme::RIGHT_PAREN)
+					consume(parser, Lexeme::COMMA);
+			}
+			consume(parser, Lexeme::RIGHT_PAREN);
+
+			return CallExpr(
+				TokenRange{left.token_range().first, parser.prev_token_idx()},
+				M.main->alloc<Expr>(left),
+				args.to_array(*M.main)
+			);
+		}
+
+		case Lexeme::CIRCUMFLEX:
+			return DerefExpr(
+				TokenRange{left.token_range().first,
+				parser.prev_token_idx()},
+				M.main->alloc<Expr>(left)
+			);
+
+		case Lexeme::LEFT_BRACKET:
+		{
+			Expr index = parse_expr(parser, NO_PREVIOUS_OP, M);
+			consume(parser, Lexeme::RIGHT_BRACKET);
+			return IndexExpr(
+				TokenRange{left.token_range().first, parser.prev_token_idx()},
+				M.main->alloc<Expr>(left),
+				M.main->alloc<Expr>(index)
+			);
+		}
+
+		case Lexeme::AS:
+		{
+			Type target_type = parse_type(parser, M);
+			return AsExpr(
+				TokenRange{left.token_range().first, parser.prev_token_idx()},
+				M.main->alloc<Expr>(left),
+				M.main->alloc<Type>(target_type)
+			);
+		}
+
+		case Lexeme::QUESTIONMARK:
+		{
+			assert(!"TODO");
+			/*optional<Stmt> on_failure;
+			optional<Pattern> error_capture;
+			if(try_consume(parser, Lexeme::ELSE))
+			{
+				if(parser.tok().kind != Lexeme::LEFT_BRACE)
+				{
+					Pattern error_pat = parse_pattern(parser, mod);
+					error_capture = pattern_Ctor(
+						mk_path({"Result"}, {"Err"}, mod.global()),
+						mk_vec(std::move(error_pat))
+					);
+				}
+
+				on_failure = parse_block_stmt(parser, mod, ScopePolicy::NEW_SCOPE);
+				parser.insert(Lexeme::SEMICOLON);
 			}
 
-			default: UNREACHABLE;
+			Expr expr = with_location(TryExpr(std::move(left), std::move(on_failure), std::move(error_capture)));
+			return expr;*/
 		}
+
+		default: UNREACHABLE;
 	}
-
-} // anonymous namespace
-
+}
 
 Expr parse_expr(Parser &parser, Memory M)
 {
 	return parse_expr(parser, NO_PREVIOUS_OP, M);
 }
-
 
 //--------------------------------------------------------------------
 // Patterns
@@ -694,7 +723,6 @@ Pattern parse_pattern(Parser &parser, Memory M)
 
 	return p;
 }
-
 
 //--------------------------------------------------------------------
 // Statements
@@ -805,7 +833,6 @@ Stmt parse_stmt(Parser &parser, Memory M)
 		}
 	}
 }
-
 
 //--------------------------------------------------------------------
 // Top-level items

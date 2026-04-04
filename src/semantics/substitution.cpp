@@ -9,10 +9,10 @@
 
 using std::unordered_set;
 
-void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &registry, SubstitutionMode mode)
+void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &registry, SubstitutionOptions opts)
 {
 	for(size_t i = 0; i < args.args->count; ++i)
-		substitute(args.args->items[i], env, registry, mode);
+		substitute_in_generic_arg(args.args->items[i], env, registry, opts);
 
 	// Update args.occurring_vars and args.has_type_deduction_vars
 	args.occurring_vars.clear();
@@ -25,14 +25,14 @@ void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &registr
 	}
 }
 
-void validate_unsubstituted_var(GenericVar var, SubstitutionMode mode, Module const &mod)
+void validate_unsubstituted_var(GenericVar var, SubstitutionOptions opts, Module const &mod)
 {
-	assert(not is<FullSubstitution>(mode) and "VarType has not been substituted");
+	assert(opts.mode != SubstitutionMode::FULL and "VarType has not been substituted");
 
-	if(FullDeductionSubstitution *m = std::get_if<FullDeductionSubstitution>(&mode))
+	if(opts.mode == SubstitutionMode::FULL_DEDUCTION)
 	{
 		if(is<GenericDeductionVar>(var))
-			throw_sem_error("Type parameter could not be deduced", m->region_being_substituted.first, &mod);
+			throw_sem_error("Type parameter could not be deduced", opts.region_being_substituted.first, &mod);
 	}
 }
 
@@ -41,19 +41,19 @@ void validate_unsubstituted_vars(
 	unordered_set<GenericVar> const &vars,
 	bool has_type_deduction_vars,
 	TypeEnv const &env,
-	SubstitutionMode mode,
+	SubstitutionOptions opts,
 	Module const &mod
 )
 {
 	if(
-		(is<FullDeductionSubstitution>(mode) and has_type_deduction_vars)
-		or (is<FullSubstitution>(mode) and vars.size())
+		(opts.mode == SubstitutionMode::FULL_DEDUCTION and has_type_deduction_vars)
+		or (opts.mode == SubstitutionMode::FULL and vars.size())
 	)
 	{
 		for(GenericVar var: vars)
 		{
 			if(not env.try_lookup(var))
-				validate_unsubstituted_var(var, mode, mod);
+				validate_unsubstituted_var(var, opts, mod);
 		}
 	}
 }
@@ -61,11 +61,11 @@ void validate_unsubstituted_vars(
 // If `inst` is deduction complete, apply `env` to it directly and return `inst`.
 // Otherwise, leave `inst` unchanged and return the StructInstance that corresponds to `inst` where
 // `env` has been applied to the type args of `inst`
-StructInstance* substitute_types_in_struct(
+StructInstance* substitute_in_struct(
 	StructInstance *inst,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode,
+	SubstitutionOptions opts,
 	bool *modified
 )
 {
@@ -81,18 +81,18 @@ StructInstance* substitute_types_in_struct(
 		{
 			[&](StructInstance *parent_inst)
 			{
-				new_decl_parent = substitute_types_in_struct(parent_inst, env, registry, mode, &parent_modified);
+				new_decl_parent = substitute_in_struct(parent_inst, env, registry, opts, &parent_modified);
 			},
 			[&](ProcInstance *parent_inst)
 			{
-				new_decl_parent = substitute_types_in_proc(parent_inst, env, registry, mode, &parent_modified);
+				new_decl_parent = substitute_in_proc(parent_inst, env, registry, opts, &parent_modified);
 			},
 		};
 	}
 
 	if(parent_modified or inst->type_args().needs_substitution(env))
 	{
-		inst = registry.get_struct_instance(inst->struct_(), inst->type_args(), env, new_decl_parent, mode);
+		inst = registry.get_struct_instance(inst->struct_(), inst->type_args(), env, new_decl_parent, opts);
 
 		LOGGER(logger, on_struct_substitution_replaced, inst);
 		if(modified) *modified = true;
@@ -102,7 +102,7 @@ StructInstance* substitute_types_in_struct(
 		validate_unsubstituted_vars(
 			inst->type_args().occurring_vars,
 			inst->type_args().has_type_deduction_vars,
-			env, mode, registry.mod()
+			env, opts, registry.mod()
 		);
 
 		LOGGER(logger, on_struct_substitution_noop);
@@ -114,17 +114,17 @@ StructInstance* substitute_types_in_struct(
 	return inst;
 }
 
-ProcInstance* substitute_types_in_proc(
+ProcInstance* substitute_in_proc(
 	ProcInstance *inst,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode,
+	SubstitutionOptions opts,
 	bool *modified
 )
 {
 	if(inst->type_args().needs_substitution(env))
 	{
-		inst = registry.get_proc_instance(inst->proc(), inst->type_args(), env, mode);
+		inst = registry.get_proc_instance(inst->proc(), inst->type_args(), env, opts);
 		if(modified) *modified = true;
 	}
 	else
@@ -132,7 +132,7 @@ ProcInstance* substitute_types_in_proc(
 		validate_unsubstituted_vars(
 			inst->type_args().occurring_vars,
 			inst->type_args().has_type_deduction_vars,
-			env, mode, registry.mod()
+			env, opts, registry.mod()
 		);
 		if(modified) *modified = false;
 	}
@@ -140,32 +140,32 @@ ProcInstance* substitute_types_in_proc(
 	return inst;
 }
 
-static ProcTypeInstance* substitute_types_in_proc_type(
+static ProcTypeInstance* substitute_in_proc_type(
 	ProcTypeInstance *inst,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions opts
 )
 {
 	if(inst->needs_substitution(env))
-		inst = registry.get_proc_type_instance(inst->params, inst->ret, env, mode);
+		inst = registry.get_proc_type_instance(inst->params, inst->ret, env, opts);
 	else
 	{
 		validate_unsubstituted_vars(
 			inst->occurring_vars,
 			inst->has_type_deduction_vars,
-			env, mode, registry.mod()
+			env, opts, registry.mod()
 		);
 	}
 
 	return inst;
 }
 
-static UnionInstance* substitute_types_in_union(
+static UnionInstance* substitute_in_union(
 	UnionInstance *inst,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions opts
 )
 {
 	if(inst->needs_substitution(env))
@@ -175,7 +175,7 @@ static UnionInstance* substitute_types_in_union(
 		for(Type const *alt: inst->alternatives())
 		{
 			Type *new_alt = clone_ptr(alt, registry.arena());
-			substitute(*new_alt, env, registry, mode);
+			substitute_in_type(*new_alt, env, registry, opts);
 			new_alts.push_back(new_alt);
 		}
 
@@ -187,7 +187,7 @@ static UnionInstance* substitute_types_in_union(
 		validate_unsubstituted_vars(
 			inst->occurring_vars(),
 			inst->has_type_deduction_vars(),
-			env, mode, registry.mod()
+			env, opts, registry.mod()
 		);
 	}
 
@@ -198,7 +198,7 @@ static optional<GenericArg> get_substituted(
 	GenericVar var,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions opts
 )
 {
 	if(GenericArg const *mapped_arg = env.try_lookup(var))
@@ -208,20 +208,20 @@ static optional<GenericArg> get_substituted(
 		// Apply substitution recursively.
 		// This is not how substitution is traditionally defined for e.g. first-order logic,
 		// but is easier to implement. See note for the unify() function.
-		substitute(result, env, registry, mode); // TODO Implement substitute() for GenericArg
+		substitute_in_generic_arg(result, env, registry, opts); // TODO Implement substitute() for GenericArg
 		return result;
 	}
 	else
 	{
-		validate_unsubstituted_var(var, mode, registry.mod());
+		validate_unsubstituted_var(var, opts, registry.mod());
 		return nullopt;
 	}
 }
-void substitute(
+void substitute_in_type(
 	Type &type,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions opts
 )
 {
 	type | match
@@ -229,34 +229,44 @@ void substitute(
 		[&](BuiltinType&) {},
 		[&](KnownIntType &t)
 		{
-			if(is<FullDeductionSubstitution>(mode))
+			if(opts.mode == SubstitutionMode::FULL_DEDUCTION)
 				type = materialize_known_int(t);
 		},
 		[&](PointerType &t)
 		{
-			substitute(*t.pointee, env, registry, mode);
+			substitute_in_type(*t.pointee, env, registry, opts);
 		},
 		[&](ArrayType &t)
 		{
-			substitute(*t.element, env, registry, mode);
-			substitute_types_in_expr(*t.count_arg, env, registry, mode);
+			substitute_in_type(*t.element, env, registry, opts);
+			substitute_in_expr(*t.count_arg, env, registry, opts);
+			try {
+				const_eval(*t.count_arg, registry.mod());
+			}
+			catch(ParseError const &exc)
+			{
+				if(opts.mode == SubstitutionMode::FULL) {
+					assert(!"substitute_in_type: ArrayType: const_eval failed");
+				}
+				throw;
+			}
 		},
 		[&](StructType &t)
 		{
-			t.inst = substitute_types_in_struct(t.inst, env, registry, mode);
+			t.inst = substitute_in_struct(t.inst, env, registry, opts);
 		},
 		[&](ProcType &t)
 		{
-			t.inst = substitute_types_in_proc_type(t.inst, env, registry, mode);
-			t.callable = t.callable->get_substituted(env, registry, mode);
+			t.inst = substitute_in_proc_type(t.inst, env, registry, opts);
+			t.callable = t.callable->get_substituted(env, registry, opts);
 		},
 		[&](UnionType &t)
 		{
-			t.inst = substitute_types_in_union(t.inst, env, registry, mode);
+			t.inst = substitute_in_union(t.inst, env, registry, opts);
 		},
 		[&](VarType &t)
 		{
-			if(optional<GenericArg> result = get_substituted(t.var, env, registry, mode))
+			if(optional<GenericArg> result = get_substituted(t.var, env, registry, opts))
 				type = std::get<Type>(*result);
 		},
 		[&](ProcTypeUnresolved const&) { UNREACHABLE; },
@@ -266,10 +276,10 @@ void substitute(
 	};
 }
 
-void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceRegistry &registry, SubstitutionMode mode)
+void substitute_in_expr(Expr &expr, TypeEnv const &env, InstanceRegistry &registry, SubstitutionOptions opts)
 {
 	if(Type *expr_type = expr.try_get_type())
-		substitute(*expr_type, env, registry, mode);
+		substitute_in_type(*expr_type, env, registry, opts);
 
 	expr | match
 	{
@@ -278,58 +288,58 @@ void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceRegistry &
 		[&](StringLiteralExpr&) {},
 		[&](UnaryExpr &e)
 		{
-			substitute_types_in_expr(*e.sub, env, registry, mode);
+			substitute_in_expr(*e.sub, env, registry, opts);
 		},
 		[&](BinaryExpr &e)
 		{
-			substitute_types_in_expr(*e.left, env, registry, mode);
-			substitute_types_in_expr(*e.right, env, registry, mode);
+			substitute_in_expr(*e.left, env, registry, opts);
+			substitute_in_expr(*e.right, env, registry, opts);
 		},
 		[&](AddressOfExpr &e)
 		{
-			substitute_types_in_expr(*e.object, env, registry, mode);
+			substitute_in_expr(*e.object, env, registry, opts);
 		},
 		[&](DerefExpr &e)
 		{
-			substitute_types_in_expr(*e.addr, env, registry, mode);
+			substitute_in_expr(*e.addr, env, registry, opts);
 		},
 		[&](IndexExpr &e)
 		{
-			substitute_types_in_expr(*e.addr, env, registry, mode);
-			substitute_types_in_expr(*e.index, env, registry, mode);
+			substitute_in_expr(*e.addr, env, registry, opts);
+			substitute_in_expr(*e.index, env, registry, opts);
 		},
 		[&](MemberAccessExpr &e)
 		{
-			substitute_types_in_expr(*e.object, env, registry, mode);
+			substitute_in_expr(*e.object, env, registry, opts);
 		},
 		[&](AssignmentExpr &e)
 		{
-			substitute_types_in_expr(*e.lhs, env, registry, mode);
-			substitute_types_in_expr(*e.rhs, env, registry, mode);
+			substitute_in_expr(*e.lhs, env, registry, opts);
+			substitute_in_expr(*e.rhs, env, registry, opts);
 		},
 		[&](AsExpr &e)
 		{
-			substitute_types_in_expr(*e.src_expr, env, registry, mode);
-			substitute(*e.target_type, env, registry, mode);
+			substitute_in_expr(*e.src_expr, env, registry, opts);
+			substitute_in_type(*e.target_type, env, registry, opts);
 		},
 		[&](ConstructorExpr &e)
 		{
-			substitute(*e.ctor, env, registry, mode);
+			substitute_in_type(*e.ctor, env, registry, opts);
 		},
 		[&](ProcExpr &e)
 		{
-			e.inst = substitute_types_in_proc(e.inst, env, registry, mode);
+			e.inst = substitute_in_proc(e.inst, env, registry, opts);
 		},
 		[&](CallExpr &e)
 		{
-			substitute_types_in_expr(*e.callable, env, registry, mode);
+			substitute_in_expr(*e.callable, env, registry, opts);
 
 			for(Argument &arg: *e.args)
-				substitute_types_in_expr(arg.expr, env, registry, mode);
+				substitute_in_expr(arg.expr, env, registry, opts);
 		},
 		[&](SizeOfExpr &e)
 		{
-			substitute(*e.subject, env, registry, mode);
+			substitute_in_type(*e.subject, env, registry, opts);
 		},
 		[&](MakeExpr&)
 		{
@@ -337,113 +347,117 @@ void substitute_types_in_expr(Expr &expr, TypeEnv const &env, InstanceRegistry &
 		},
 		[&](UnionInitExpr &e)
 		{
-			substitute_types_in_expr(*e.alt_expr, env, registry, mode);
-			substitute(*e.alt_type, env, registry, mode);
+			substitute_in_expr(*e.alt_expr, env, registry, opts);
+			substitute_in_type(*e.alt_type, env, registry, opts);
 		},
 		[&](VarExpr&) {},
 		[&](GenericVarExpr &e)
 		{
-			if(optional<GenericArg> result = get_substituted(e.var, env, registry, mode))
+			if(optional<GenericArg> result = get_substituted(e.var, env, registry, opts))
 				expr = std::get<Expr>(*result);
 		},
 		[&](Path&) { assert(!"substitute_types_in_expr: Path"); },
 	};
 }
 
-void substitute_types_in_pattern(
+void substitute_in_pattern(
 	Pattern &pattern,
 	TypeEnv const &subst,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions opts
 )
 {
-	substitute(pattern.type(), subst, registry, mode);
+	substitute_in_type(pattern.type(), subst, registry, opts);
 
 	if(pattern.provided_type)
-		substitute(*pattern.provided_type, subst, registry, mode);
+		substitute_in_type(*pattern.provided_type, subst, registry, opts);
 
 	pattern | match
 	{
 		[&](VarPattern &p)
 		{
-			substitute(*p.var->type, subst, registry, mode);
+			substitute_in_type(*p.var->type, subst, registry, opts);
 		},
 		[&](DerefPattern &p)
 		{
-			substitute_types_in_pattern(*p.sub, subst, registry, mode);
+			substitute_in_pattern(*p.sub, subst, registry, opts);
 		},
 		[&](AddressOfPattern &p)
 		{
-			substitute_types_in_pattern(*p.sub, subst, registry, mode);
+			substitute_in_pattern(*p.sub, subst, registry, opts);
 		},
 		[&](ConstructorPattern &p)
 		{
-			substitute(*p.ctor, subst, registry, mode);
+			substitute_in_type(*p.ctor, subst, registry, opts);
 			for(PatternArgument &arg: *p.args)
-				substitute_types_in_pattern(arg.pattern, subst, registry, mode);
+				substitute_in_pattern(arg.pattern, subst, registry, opts);
 		},
 		[&](WildcardPattern &) {},
 		[&](VarPatternUnresolved&) { assert(!"substitute_types_in_pattern: VarPatternUnresolved"); },
 	};
 }
 
-void substitute_types_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry, SubstitutionMode mode)
+void substitute_in_stmt(Stmt &stmt, TypeEnv const &subst, InstanceRegistry &registry, SubstitutionOptions opts)
 {
 	stmt | match
 	{
 		[&](LetStmt &s)
 		{
-			substitute_types_in_pattern(*s.lhs, subst, registry, mode);
-			substitute_types_in_expr(*s.init_expr, subst, registry, mode);
+			substitute_in_pattern(*s.lhs, subst, registry, opts);
+			substitute_in_expr(*s.init_expr, subst, registry, opts);
 		},
 		[&](ExprStmt &s)
 		{
-			substitute_types_in_expr(*s.expr, subst, registry, mode);
+			substitute_in_expr(*s.expr, subst, registry, opts);
 		},
 		[&](BlockStmt &s)
 		{
 			for(Stmt &child_stmt: *s.stmts)
-				substitute_types_in_stmt(child_stmt, subst, registry, mode);
+				substitute_in_stmt(child_stmt, subst, registry, opts);
 		},
 		[&](ReturnStmt &s)
 		{
-			substitute_types_in_expr(*s.ret_expr, subst, registry, mode);
+			substitute_in_expr(*s.ret_expr, subst, registry, opts);
 		},
 		[&](IfStmt &s)
 		{
-			substitute_types_in_expr(*s.condition, subst, registry, mode);
-			substitute_types_in_stmt(*s.then, subst, registry, mode);
+			substitute_in_expr(*s.condition, subst, registry, opts);
+			substitute_in_stmt(*s.then, subst, registry, opts);
 			if(s.else_)
-				substitute_types_in_stmt(*s.else_, subst, registry, mode);
+				substitute_in_stmt(*s.else_, subst, registry, opts);
 		},
 		[&](WhileStmt &s)
 		{
-			substitute_types_in_expr(*s.condition, subst, registry, mode);
-			substitute_types_in_stmt(*s.body, subst, registry, mode);
+			substitute_in_expr(*s.condition, subst, registry, opts);
+			substitute_in_stmt(*s.body, subst, registry, opts);
 		},
 		[&](DeclStmt&) {},
 		[&](MatchStmt &s)
 		{
-			substitute_types_in_expr(*s.expr, subst, registry, mode);
+			substitute_in_expr(*s.expr, subst, registry, opts);
 			for(MatchArm &arm: *s.arms)
 			{
-				substitute_types_in_pattern(arm.capture, subst, registry, mode);
-				substitute_types_in_stmt(arm.stmt, subst, registry, mode);
+				substitute_in_pattern(arm.capture, subst, registry, opts);
+				substitute_in_stmt(arm.stmt, subst, registry, opts);
 			}
 		},
 	};
 }
 
-void substitute(
+void substitute_in_generic_arg(
 	GenericArg &arg,
 	TypeEnv const &env,
 	InstanceRegistry &registry,
-	SubstitutionMode mode
+	SubstitutionOptions opts
 )
 {
 	arg | match
 	{
-		[&](Type &type) { substitute(type, env, registry, mode); },
-		[&](Expr &expr) { substitute_types_in_expr(expr, env, registry, mode); },
+		[&](Type &type) { substitute_in_type(type, env, registry, opts); },
+		[&](Expr &expr)
+		{
+			substitute_in_expr(expr, env, registry, opts);
+			const_eval(expr, registry.mod());
+		},
 	};
 }

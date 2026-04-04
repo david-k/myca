@@ -1,0 +1,7 @@
+proc foo'(let c: i32)() {}
+
+proc main() -> i32
+{
+	let c = 5;
+	foo'(c)();
+}

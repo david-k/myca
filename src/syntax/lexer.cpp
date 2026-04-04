@@ -32,7 +32,6 @@ string_view str(Lexeme tok)
 
 		case Lexeme::PLUS: return "PLUS";
 		case Lexeme::MINUS: return "MINUS";
-		case Lexeme::UNARY_MINUS: return "UNARY_MINUS";
 		case Lexeme::SLASH: return "SLASH";
 		case Lexeme::STAR: return "STAR";
 		case Lexeme::EQ: return "EQ";
@@ -84,7 +83,7 @@ string_view str(Lexeme tok)
 }
 
 
-// Locale-independent versions of std::isalpha, 
+// Locale-independent versions of std::isalpha etc
 
 static bool is_alphabetic(char ch)
 {

@@ -1,0 +1,6 @@
+proc foo'(let count: i32)() {}
+
+proc main() -> i32
+{
+	foo'(i32)();
+}
