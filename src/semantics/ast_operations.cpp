@@ -414,17 +414,17 @@ size_t std::hash<Expr>::operator () (Expr const &expr) const
 			[&](UnaryExpr const &e) -> void
 			{
 				combine_hashes(h, compute_hash((int)e.op));
-				visit_child_exprs(e, self);
+				expr_visit_children(e, self);
 			},
 			[&](BinaryExpr const &e) -> void
 			{
 				combine_hashes(h, compute_hash((int)e.op));
-				visit_child_exprs(e, self);
+				expr_visit_children(e, self);
 			},
 			[&](AsExpr const &e) -> void
 			{
 				combine_hashes(h, compute_hash(*e.target_type));
-				visit_child_exprs(e, self);
+				expr_visit_children(e, self);
 			},
 			[&](VarExpr const &e)
 			{
@@ -1150,6 +1150,13 @@ string str(Type const &type, Module const &mod)
 	return std::move(ss).str();
 }
 
+string str(Expr const &expr, Module const &mod)
+{
+	std::stringstream ss;
+	print(expr, mod, ss);
+	return std::move(ss).str();
+}
+
 void print(Argument const &arg, Module const &mod, std::ostream &os)
 {
 	if(arg.name.size())
@@ -1757,7 +1764,7 @@ void compute_direct_type_dependencies(Type const &type, unordered_set<TypeInstan
 bool type_var_occurs_in(GenericVar var, Expr const &expr)
 {
 	bool result = false;
-	auto visitor = [&](Expr const &expr) -> void
+	auto visitor = [&](this auto &self, Expr const &expr) -> void
 	{
 		expr | match
 		{
@@ -1766,11 +1773,10 @@ bool type_var_occurs_in(GenericVar var, Expr const &expr)
 				if(e.var == var)
 					result = true;
 			},
-			[&](this auto &self, auto const &e) -> void
-			{
-				visit_child_exprs(e, self);
-			}
+			[&](auto const&) -> void {}
 		};
+
+		expr_visit_children(expr, self);
 	};
 	visitor(expr);
 
@@ -1827,18 +1833,20 @@ bool type_var_occurs_in(GenericVar var, GenericArg const &arg)
 
 void const_eval(Type &type, Module const &mod)
 {
-	type | match
+	auto visitor = [&](this auto &self, Type const &type)
 	{
-		[&](ArrayType &t)
+		type | match
 		{
-			if(t.count_arg)
-				const_eval(*t.count_arg, mod);
-		},
-		[&](this auto &self, auto &t)
-		{
-			visit_child_types(t, self);
-		},
+			[&](ArrayType &t)
+			{
+				if(t.count_arg)
+					const_eval(*t.count_arg, mod);
+			},
+			[&](auto&) {},
+		};
+		type_visit_children(type, self);
 	};
+	visitor(type);
 }
 
 static Expr const_eval_int_opt(Int128 a, Int128 b, BinaryOp op, TokenRange range)

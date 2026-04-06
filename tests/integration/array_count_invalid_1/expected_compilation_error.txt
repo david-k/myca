@@ -1,1 +1,0 @@
-|1:14| error: Invalid array count: Incompatible types usize and $KnownInt(-2,-2)

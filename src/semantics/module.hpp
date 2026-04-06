@@ -8,7 +8,6 @@ struct Scope;
 struct DeclContainer : variant<StructItem*, ProcItem*>
 {
 	using variant::variant;
-
 	StructItem* as_struct() const { return std::get<StructItem*>(*this); }
 };
 
@@ -33,7 +32,6 @@ enum class ResolutionState
 	IN_PROGRESS,
 	DONE,
 };
-
 struct Alias
 {
 	Scope *scope; // Only contains type params

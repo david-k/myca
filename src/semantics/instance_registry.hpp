@@ -19,37 +19,41 @@ class InstanceRegistry;
 class ConstraintGatheringSubst;
 struct SemaContext;
 
-struct TypeStatInfo
+struct TermInfo
 {
-	void merge(TypeStatInfo other)
+	void merge(TermInfo other)
 	{
-		has_type_deduction_vars |= other.has_type_deduction_vars;
+		has_generic_parameter_vars |= other.has_generic_parameter_vars;
+		has_deduction_vars |= other.has_deduction_vars;
 		has_known_ints |= other.has_known_ints;
 	}
 
-	bool has_type_deduction_vars = false;
+	bool has_generic_parameter_vars = false;
+	bool has_deduction_vars = false;
 	bool has_known_ints = false;
 };
 
-TypeStatInfo gather_type_vars(
+TermInfo gather_type_vars(
 	Type const &type,
 	unordered_set<GenericVar> &type_vars,
 	bool deduction_vars_only = false
 );
 
-TypeStatInfo gather_type_vars(
+TermInfo gather_type_vars(
 	Expr const &expr,
 	unordered_set<GenericVar> &type_vars,
 	bool deduction_vars_only
 );
 
-TypeStatInfo gather_type_vars(
+TermInfo gather_type_vars(
 	GenericArg const &arg,
 	unordered_set<GenericVar> &type_vars,
 	bool deduction_vars_only
 );
 
-TypeStatInfo get_type_stats(GenericArg const &arg);
+TermInfo get_term_info(Type const &type);
+TermInfo get_term_info(Expr const &expr);
+TermInfo get_term_info(GenericArg const &arg);
 
 bool have_common_vars(unordered_set<GenericVar> const &occurring_vars, TypeEnv const &env);
 

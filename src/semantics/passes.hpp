@@ -3,6 +3,7 @@
 #include "semantics/unification.hpp"
 
 #include <expected>
+#include <initializer_list>
 
 // Semantic analysis consists of the following passes:
 // 1. Name registration            (pass__name_registration.cpp)
@@ -26,10 +27,16 @@ enum class ResolutionContext
 };
 void resolve_type(Type &type, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
 void resolve_expr(Expr &expr, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
+void resolve_stmt(Stmt &stmt, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx);
 void resolve_item(TopLevelItem &item, SemaContext &ctx);
 void resolve_names(SemaContext &ctx);
 
 // 3. Typechecking
+// Typechecking is itself split into constraint generation and actual type checking.
+// The split isn't clean: some type checks already need to be performed during constraint
+// generation, while others are done after all types have been fully deduced.
+
+// 3.1 Constraint generation
 class ConstraintGatheringSubst : public Subst
 {
 public:
@@ -55,7 +62,6 @@ public:
 };
 
 struct ErrorMsg { string msg; };
-
 std::expected<Type, ErrorMsg> get_pointee_type(
 	Type const *type,
 	PointerType::Kind pointer_kind,
@@ -68,14 +74,23 @@ std::expected<Type, ErrorMsg> get_member_type(
 	TokenRange range,
 	Module const &mod
 );
-void typecheck_generic_args(
+void generate_constraints_for_generic_args(
 	FixedArray<GenericArg> *args,
 	FixedArray<GenericParameter> const *params,
 	ConstraintGatheringSubst &subst,
 	SemaContext &ctx
 );
-void typecheck_type(Type &type, ConstraintGatheringSubst &subst, SemaContext &ctx);
-Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext &ctx);
+
+void generate_constraints_for_type(Type &type, ConstraintGatheringSubst &subst, SemaContext &ctx);
+Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext &ctx);
+
+// 3.2 Typechecking
+using ApplyTarget = variant<
+	Type*,
+	Expr*,
+	std::pair<Pattern*, Expr const*> // The expression must not contain any GenericDeductionVar anymore
+>;
+void solve_and_check(ConstraintSolver &solver, std::initializer_list<ApplyTarget> targets);
 Type const* typecheck_expr(Expr &expr, SemaContext &ctx);
 void typecheck(SemaContext &ctx);
 

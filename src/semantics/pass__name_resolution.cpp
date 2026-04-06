@@ -511,7 +511,7 @@ static void resolve_pattern(Pattern &pattern, Scope *scope, ResolutionContext re
 		resolve_type(*pattern.provided_type, scope, res_ctx, ctx);
 }
 
-static void resolve_stmt(Stmt &stmt, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
+void resolve_stmt(Stmt &stmt, Scope *scope, ResolutionContext res_ctx, SemaContext &ctx)
 {
 	stmt | match
 	{
@@ -576,8 +576,8 @@ static void resolve_param(Parameter &param, Scope *scope, SemaContext &ctx)
 
 static bool is_deduction_complete(GenericArg const &arg)
 {
-	TypeStatInfo info = get_type_stats(arg);
-	return not info.has_type_deduction_vars and not info.has_known_ints;
+	TermInfo info = get_term_info(arg);
+	return not info.has_deduction_vars and not info.has_known_ints;
 }
 
 static void resolve_struct(StructItem &struct_, SemaContext &ctx)

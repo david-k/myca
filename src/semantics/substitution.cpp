@@ -9,23 +9,11 @@
 
 using std::unordered_set;
 
-void substitute(TypeArgList &args, TypeEnv const &env, InstanceRegistry &registry, SubstitutionOptions opts)
-{
-	for(size_t i = 0; i < args.args->count; ++i)
-		substitute_in_generic_arg(args.args->items[i], env, registry, opts);
-
-	// Update args.occurring_vars and args.has_type_deduction_vars
-	args.occurring_vars.clear();
-	args.has_type_deduction_vars = false;
-	for(GenericArg const &arg: *args.args)
-	{
-		TypeStatInfo info = gather_type_vars(arg, args.occurring_vars, false);
-		args.has_type_deduction_vars |= info.has_type_deduction_vars;
-		args.has_known_ints |= info.has_known_ints;
-	}
-}
-
-void validate_unsubstituted_var(GenericVar var, SubstitutionOptions opts, Module const &mod)
+static void validate_unsubstituted_var(
+	GenericVar var,
+	SubstitutionOptions opts,
+	Module const &mod
+)
 {
 	assert(opts.mode != SubstitutionMode::FULL and "VarType has not been substituted");
 
@@ -37,7 +25,7 @@ void validate_unsubstituted_var(GenericVar var, SubstitutionOptions opts, Module
 }
 
 // Make sure that the kinds of variables that must be substituted actually have been substituted
-void validate_unsubstituted_vars(
+static void validate_unsubstituted_vars(
 	unordered_set<GenericVar> const &vars,
 	bool has_type_deduction_vars,
 	TypeEnv const &env,
@@ -55,6 +43,22 @@ void validate_unsubstituted_vars(
 			if(not env.try_lookup(var))
 				validate_unsubstituted_var(var, opts, mod);
 		}
+	}
+}
+
+void substitute_in_type_args(TypeArgList &args, TypeEnv const &env, InstanceRegistry &registry, SubstitutionOptions opts)
+{
+	for(size_t i = 0; i < args.args->count; ++i)
+		substitute_in_generic_arg(args.args->items[i], env, registry, opts);
+
+	// Update args.occurring_vars and args.has_type_deduction_vars
+	args.occurring_vars.clear();
+	args.has_type_deduction_vars = false;
+	for(GenericArg const &arg: *args.args)
+	{
+		TermInfo info = gather_type_vars(arg, args.occurring_vars, false);
+		args.has_type_deduction_vars |= info.has_deduction_vars;
+		args.has_known_ints |= info.has_known_ints;
 	}
 }
 
@@ -207,8 +211,8 @@ static optional<GenericArg> get_substituted(
 
 		// Apply substitution recursively.
 		// This is not how substitution is traditionally defined for e.g. first-order logic,
-		// but is easier to implement. See note for the unify() function.
-		substitute_in_generic_arg(result, env, registry, opts); // TODO Implement substitute() for GenericArg
+		// but is easier to implement. See note for the Unifier::go() function.
+		substitute_in_generic_arg(result, env, registry, opts);
 		return result;
 	}
 	else
@@ -217,6 +221,25 @@ static optional<GenericArg> get_substituted(
 		return nullopt;
 	}
 }
+
+static void validate_const_eval(Expr &expr, Module const &mod, SubstitutionOptions opts)
+{
+	try {
+		const_eval(expr, mod);
+	}
+	catch(ParseError const &exc)
+	{
+		if(opts.mode == SubstitutionMode::FULL)
+		{
+			// FULL substitution is only performed during code generation. If const_eval fails at
+			// that point we messed up during semantic analysis. (We are doing definition-checked
+			// generics, so all potential errors should be caught before instantiation.)
+			assert(!"substitute_in_type: ArrayType: const_eval failed");
+		}
+		throw;
+	}
+}
+
 void substitute_in_type(
 	Type &type,
 	TypeEnv const &env,
@@ -240,16 +263,7 @@ void substitute_in_type(
 		{
 			substitute_in_type(*t.element, env, registry, opts);
 			substitute_in_expr(*t.count_arg, env, registry, opts);
-			try {
-				const_eval(*t.count_arg, registry.mod());
-			}
-			catch(ParseError const &exc)
-			{
-				if(opts.mode == SubstitutionMode::FULL) {
-					assert(!"substitute_in_type: ArrayType: const_eval failed");
-				}
-				throw;
-			}
+			validate_const_eval(*t.count_arg, registry.mod(), opts);
 		},
 		[&](StructType &t)
 		{
@@ -457,7 +471,7 @@ void substitute_in_generic_arg(
 		[&](Expr &expr)
 		{
 			substitute_in_expr(expr, env, registry, opts);
-			const_eval(expr, registry.mod());
+			validate_const_eval(expr, registry.mod(), opts);
 		},
 	};
 }

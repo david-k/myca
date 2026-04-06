@@ -1,0 +1,6 @@
+proc foo() -> i32 {}
+
+proc main() -> i32
+{
+	let q & = foo();
+}

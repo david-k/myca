@@ -1,0 +1,1 @@
+|3:8| error: Array count cannot be determined to be valid: (c + 1)

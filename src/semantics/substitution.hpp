@@ -25,7 +25,7 @@ void substitute_in_type(
 	SubstitutionOptions options
 );
 
-void substitute(
+void substitute_in_type_args(
 	TypeArgList &args,
 	TypeEnv const &env,
 	InstanceRegistry &registry,

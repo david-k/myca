@@ -1121,20 +1121,23 @@ struct std::hash<TypeDependency>
 
 void gather_array_types(Type const &type, unordered_set<TypeDependency> &result)
 {
-	type | match
+	type_visit(type, [&](this auto &&self, Type const &type) -> void
 	{
-		[&](this auto &self, ArrayType const &t)
+		type | match
 		{
-			result.insert(t);
-			visit_child_types(t, self);
-		},
-		[](this auto &self, auto const &t) { visit_child_types(t, self); },
-	};
+			[&](ArrayType const &t)
+			{
+				result.insert(t);
+			},
+			[](auto const&) {},
+		};
+		type_visit_children(type, self);
+	});
 }
 
 void gather_array_types(Expr const &expr, unordered_set<TypeDependency> &result)
 {
-	auto visitor = [&](this auto &self, Expr const &expr) -> void
+	expr_visit(expr, [&](this auto &&self, Expr const &expr) -> void
 	{
 		expr | match
 		{
@@ -1143,30 +1146,28 @@ void gather_array_types(Expr const &expr, unordered_set<TypeDependency> &result)
 				if(e.type)
 					gather_array_types(*e.type, result);
 
-				visit_child_exprs(e, self);
+				expr_visit_children(e, self);
 			},
 			[&](Path const&) {}, // Has no type
 		};
-	};
-	std::visit(visitor, expr);
+	});
 }
 
 void gather_array_types(Pattern const &pattern, unordered_set<TypeDependency> &result)
 {
-	auto visitor = [&](this auto &self, Pattern const &pattern) -> void
+	pattern_visit(pattern, [&](this auto &&self, Pattern const &pattern) -> void
 	{
 		gather_array_types(pattern.type(), result);
 		if(pattern.provided_type)
 			gather_array_types(*pattern.provided_type, result);
 
-		visit_child_patterns(pattern, self);
-	};
-	visitor(pattern);
+		pattern_visit_children(pattern, self);
+	});
 }
 
 void gather_array_types(Stmt const &stmt, unordered_set<TypeDependency> &result)
 {
-	auto visitor = [&](this auto &self, Stmt const &stmt) -> void
+	stmt_visit(stmt, [&](this auto &&self, Stmt const &stmt) -> void
 	{
 		stmt | match
 		{
@@ -1202,9 +1203,8 @@ void gather_array_types(Stmt const &stmt, unordered_set<TypeDependency> &result)
 					gather_array_types(arm.capture, result);
 			},
 		};
-		visit_child_stmts(stmt, self);
-	};
-	visitor(stmt);
+		stmt_visit_children(stmt, self);
+	});
 }
 
 
@@ -1251,32 +1251,35 @@ void _sort_types_by_deps(
 		},
 		[&](ArrayType const &array)
 		{
-			Type(array) | match
+			type_visit(Type(array), [&](this auto &&self, Type const &type)
 			{
-				[&](this auto &self, StructType const &t)
+				type | match
 				{
-					_sort_types_by_deps(t.inst, result, visited, mod);
-					visit_child_types(t, self);
-				},
-				[&](this auto &self, UnionType const &t)
-				{
-					_sort_types_by_deps(t.inst, result, visited, mod);
-					visit_child_types(t, self);
-				},
-				[&](this auto &self, ArrayType const &t)
-				{
-					_sort_types_by_deps(t, result, visited, mod);
-					visit_child_types(t, self);
-				},
-				[&](PointerType const&)
-				{
-					// Do not traverse into pointer types
-				},
-				[&](this auto &self, auto const &t)
-				{
-					visit_child_types(t, self);
-				},
-			};
+					[&](StructType const &t)
+					{
+						_sort_types_by_deps(t.inst, result, visited, mod);
+						type_visit_children(t, self);
+					},
+					[&](UnionType const &t)
+					{
+						_sort_types_by_deps(t.inst, result, visited, mod);
+						type_visit_children(t, self);
+					},
+					[&](ArrayType const &t)
+					{
+						_sort_types_by_deps(t, result, visited, mod);
+						type_visit_children(t, self);
+					},
+					[&](PointerType const&)
+					{
+						// Do not traverse into pointer types
+					},
+					[&](auto const &t)
+					{
+						type_visit_children(t, self);
+					},
+				};
+			});
 		}
 	};
 

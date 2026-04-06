@@ -1,0 +1,18 @@
+proc uninitialized'(T)() -> T
+{
+}
+
+struct S'(T, let c: usize)
+{
+    arr: [c]T,
+}
+
+proc main() -> i32
+{
+    let arr: [2]i8 = uninitialized'([2]i8)();
+    let mut s: S'(i8, 2) = S'(i8, 2)(arr);
+    ((s.arr)^ = 2);
+    ((s.arr)^ = 3);
+    return ((s.arr)^ + (s.arr)^);
+}
+

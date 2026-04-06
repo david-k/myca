@@ -1,0 +1,5 @@
+struct S'T {}
+proc main() -> i32
+{
+	let s = S'([0]i32)();
+}

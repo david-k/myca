@@ -1,6 +1,7 @@
 #pragma once
 
 #include "syntax/ast.hpp"
+#include "semantics/well_formed_term_set.hpp"
 
 struct TypeDeductionVar {};
 struct ValueDeductionVar { Type *type; };
@@ -17,7 +18,8 @@ struct SemaContext
 {
 	SemaContext(Module &mod, Arena &arena) :
 		mod(&mod),
-		arena(arena) {}
+		arena(arena),
+		well_formed_terms(mod, arena) {}
 
 	optional<class EventLogger>& logger();
 	GenericDeductionVar new_deduction_var(DeductionVarKind kind)
@@ -29,5 +31,6 @@ struct SemaContext
 	Module *mod;
 	Arena &arena;
 	ProcItem *NULLABLE proc = nullptr; // The current procedure being analyzed
+	WellFormedTermSet well_formed_terms;
 	uint32_t next_deduction_var_id = 0;
 };

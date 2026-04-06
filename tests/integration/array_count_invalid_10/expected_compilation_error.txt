@@ -1,0 +1,1 @@
+|4:8| error: Array count must be strictly larger that zero

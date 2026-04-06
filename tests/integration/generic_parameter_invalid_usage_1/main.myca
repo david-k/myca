@@ -1,0 +1,4 @@
+struct S'(let c: usize)
+{
+	arr: [c + 1]i32,
+}

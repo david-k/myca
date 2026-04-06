@@ -1,0 +1,1 @@
+|5:12| error: Array count cannot be determined to be valid: (c + 1)

@@ -1,0 +1,5 @@
+proc foo'T() -> T {}
+proc main() -> i32
+{
+	foo'([0]i32)();
+}

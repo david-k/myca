@@ -1,0 +1,6 @@
+proc uninitialized'T() -> T {}
+
+proc foo'(let c: usize)()
+{
+	let arr: [c + 1]i32 = uninitialized();
+}

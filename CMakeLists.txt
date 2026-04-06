@@ -30,7 +30,9 @@ add_library(myca-common OBJECT
 	src/semantics/passes.cpp
 	src/semantics/substitution.cpp
 	src/semantics/type_env.cpp
+	src/semantics/type_properties.cpp
 	src/semantics/unification.cpp
+	src/semantics/well_formed_term_set.cpp
 )
 target_include_directories(myca-common PUBLIC src)
 

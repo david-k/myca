@@ -1,7 +1,6 @@
 #include "semantics/context.hpp"
 #include "semantics/constraint_solver.hpp"
 #include "semantics/type_env.hpp"
-#include "semantics/type_properties.hpp"
 #include "semantics/module.hpp"
 
 #include <expected>
@@ -46,120 +45,6 @@ size_t std::hash<ConstraintEdge>::operator () (ConstraintEdge const &edge) const
 static TypeConversion glb(TypeConversion a, TypeConversion b)
 {
 	return (TypeConversion)std::min((int)a, (int)b);
-}
-
-static Type const& follow_type_var(Type const &type, TypeEnv const &env)
-{
-	if(optional<GenericDeductionVar> var = type.try_get_deduction_var())
-		return follow_type_var(env.lookup(*var).as_type(), env);
-
-	return type;
-}
-
-static optional<IsMutable> is_lvalue_expr(Expr const &expr, TypeEnv const &env)
-{
-	return expr | match
-	{
-		[&](VarExpr const &e) -> optional<IsMutable>
-		{
-			return e.var->mutability;
-		},
-		[&](DerefExpr const &e) -> optional<IsMutable>
-		{
-			return std::get<PointerType>(follow_type_var(e.addr->type(), env)).mutability;
-		},
-		[&](IndexExpr const &e) -> optional<IsMutable>
-		{
-			Type const &indexed_type = follow_type_var(e.addr->type(), env);
-			return indexed_type | match
-			{
-				[&](ArrayType const&) -> optional<IsMutable>
-				{
-					return is_lvalue_expr(*e.addr, env);
-				},
-				[&](PointerType const &ptr) -> optional<IsMutable>
-				{
-					assert(ptr.kind == PointerType::MANY);
-					return ptr.mutability;
-				},
-				[](auto const&) -> optional<IsMutable> { assert(!"is_lvalue_expr: IndexExpr"); },
-			};
-		},
-		[&](MemberAccessExpr const &e) -> optional<IsMutable>
-		{
-			return is_lvalue_expr(*e.object, env);
-		},
-
-		[](auto const&) -> optional<IsMutable> { return nullopt; },
-	};
-}
-
-static bool is_cast_ok(Type const &target_type, Expr &src_expr, TypeEnv const &env, SemaContext &ctx)
-{
-	Type const &src_type = src_expr.type();
-	try
-	{
-		TypeEnvReadonlySubst subst(env, ctx.arena);
-		Unifier(ctx)
-			.left(target_type, TypeConversion::NONE)
-			.right(src_type, TypeConversion::IMPLICIT_CTOR, &src_expr)
-			.set(&subst)
-			.go();
-
-		return true;
-	}
-	catch(ParseError const&) {}
-
-	return src_type | match
-	{
-		[&](BuiltinType const &src_t)
-		{
-			BuiltinType const *target_t = std::get_if<BuiltinType>(&target_type);
-			if(not target_t)
-				return false;
-
-			return is_builtin_int_type(src_t.builtin) and is_builtin_int_type(target_t->builtin);
-		},
-		[&](KnownIntType const&) -> bool
-		{
-			return is_integer_type(target_type);
-		},
-		[&](VarType const &src_t) -> bool
-		{
-			if(GenericArg const *arg = env.try_lookup(src_t.var))
-				return is_cast_ok(arg->as_type(), src_expr, env, ctx);
-
-			return false;
-		},
-		[&](PointerType const &src_t) -> bool
-		{
-			if(PointerType const *target_t = std::get_if<PointerType>(&target_type))
-				return src_t.mutability == IsMutable::YES || target_t->mutability == IsMutable::NO;
-
-			return false;
-		},
-		[&](ArrayType const&) -> bool
-		{
-			assert(!"[TODO] is_cast_ok: ArrayType");
-		},
-		[&](StructType const&) -> bool
-		{
-			assert(!"[TODO] is_cast_ok: StructType");
-		},
-		[&](ProcType const&) -> bool
-		{
-			assert(!"[TODO] is_cast_ok: ProcType");
-		},
-		[&](UnionType const&) -> bool
-		{
-			assert(!"[TODO] is_cast_ok: UnionType");
-		},
-
-		[&](ProcTypeUnresolved const&) -> bool { assert(!"is_cast_ok: ProcTypeUnresolved"); },
-		[&](UnionTypeUnresolved const&) -> bool { assert(!"is_cast_ok: UnionTypeUnresolved"); },
-		[&](Path const&) -> bool { assert(!"is_cast_ok: Path"); },
-		[&](InlineStructType const&) -> bool { assert(!"is_cast_ok: InlineStructType"); },
-	};
 }
 
 std::expected<GenericArg, ErrorMsg> follow_arg(
@@ -223,33 +108,6 @@ std::expected<GenericArg, ErrorMsg> follow_arg(
 	return result;
 }
 
-void do_check(TypeCheck const &check, TypeEnv const &env, SemaContext &ctx)
-{
-	check | match
-	{
-		[&](IntegerCheck c)
-		{
-			Type const &type = follow_type_var(*c.type, env);
-			if(not is_integer_type(type))
-				c.error_msg.throw_error("Expected integer, got " + str(type, *ctx.mod), *ctx.mod);
-		},
-		[&](CastCheck const &c)
-		{
-			if(not is_cast_ok(*c.target_type, *c.expr, env, ctx))
-				throw_sem_error("Invalid cast", c.expr->token_range().first, ctx.mod);
-		},
-		[&](LValueCheck const &c)
-		{
-			optional<IsMutable> object_mutability = is_lvalue_expr(*c.expr, env);
-			if(not object_mutability)
-				throw_sem_error("Address-of expression requires lvalue", c.expr->token_range().first, ctx.mod);
-
-			if(c.mutability == IsMutable::YES and object_mutability == IsMutable::NO)
-				throw_sem_error("Cannot make mutable reference to const object", c.expr->token_range().first, ctx.mod);
-		},
-	};
-}
-
 string_view type_conv_symbol(TypeConversion conv)
 {
 	switch(conv)
@@ -260,11 +118,6 @@ string_view type_conv_symbol(TypeConversion conv)
 	}
 
 	UNREACHABLE;
-}
-
-void ConstraintSolver::add_check(TypeCheck const &check)
-{
-	m_checks.push_back(check);
 }
 
 bool ConstraintSolver::add_relational_constraint(
@@ -334,37 +187,6 @@ void ConstraintSolver::print(std::ostream &os) const
 			table.add_row({edge_to_str(edge, *m_ctx.mod)});
 
 		table.print(os);
-	}
-
-	if(m_checks.size())
-	{
-		for(TypeCheck const &check: m_checks)
-		{
-			check | match
-			{
-				[&](IntegerCheck c)
-				{
-					os << "is_integer(" << str(*c.type, *m_ctx.mod) << ")";
-				},
-				[&](CastCheck c)
-				{
-					::print(*c.expr, *m_ctx.mod, os);
-					os << " as " << str(*c.target_type, *m_ctx.mod);
-				},
-				[&](LValueCheck const &c)
-				{
-					if(c.mutability == IsMutable::YES)
-						os << "is_mut_lvalue(";
-					else
-						os << "is_lvalue(";
-
-					::print(*c.expr, *m_ctx.mod, os);
-					os << ")";
-				},
-			};
-
-			os << std::endl;
-		}
 	}
 }
 
@@ -668,7 +490,7 @@ void ConstraintSolver::reduce(
 			bool result_is_concrete = false;
 			if(red_state.result)
 			{
-				result_is_concrete = not get_type_stats(red_state.result->arg).has_type_deduction_vars;
+				result_is_concrete = not get_term_info(red_state.result->arg).has_deduction_vars;
 				if(env and not type_var_occurs_in(var, red_state.result->arg))
 					changed |= env->update(var, red_state.result->arg);
 			}
@@ -741,9 +563,6 @@ TypeEnv ConstraintSolver::solve()
 		for(TypeConversionEvent const &event: events)
 			apply_conversion(event, expr, m_ctx.arena);
 	}
-
-	for(TypeCheck const &check: m_checks)
-		do_check(check, env, m_ctx);
 
 	return env;
 }

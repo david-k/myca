@@ -8,9 +8,20 @@
 #include <algorithm>
 #include <variant>
 
-static TypeStatInfo gather_type_vars(DeclContainerInst cont, unordered_set<GenericVar> &type_vars, bool deduction_vars_only = false)
+static TermInfo gather_type_vars(GenericVar var, unordered_set<GenericVar> &type_vars, bool deduction_vars_only = false)
 {
-	TypeStatInfo info;
+	if(std::holds_alternative<GenericDeductionVar>(var) or not deduction_vars_only)
+		type_vars.insert(var);
+
+	return TermInfo{
+		.has_generic_parameter_vars = std::holds_alternative<GenericParameterVar>(var),
+		.has_deduction_vars = std::holds_alternative<GenericDeductionVar>(var),
+	};
+}
+
+static TermInfo gather_type_vars(DeclContainerInst cont, unordered_set<GenericVar> &type_vars, bool deduction_vars_only = false)
+{
+	TermInfo info;
 	if(cont.decl_parent())
 		info.merge(gather_type_vars(*cont.decl_parent(), type_vars, deduction_vars_only));
 
@@ -27,28 +38,28 @@ static TypeStatInfo gather_type_vars(DeclContainerInst cont, unordered_set<Gener
 	};
 
 	for(GenericVar v: type_args.occurring_vars)
-		gather_type_vars(Type(VarType(UNKNOWN_TOKEN_RANGE, v)), type_vars, deduction_vars_only);
+		gather_type_vars(v, type_vars, deduction_vars_only);
 
-	info.has_type_deduction_vars |= type_args.has_type_deduction_vars;
+	info.has_deduction_vars |= type_args.has_type_deduction_vars;
 	info.has_known_ints |= type_args.has_known_ints;
 
 	return info;
 }
 
-TypeStatInfo gather_type_vars(Expr const &expr, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
+TermInfo gather_type_vars(Expr const &expr, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
 {
-	TypeStatInfo info;
+	TermInfo info;
 	auto visitor = [&](this auto &self, Expr const &expr) -> void
 	{
 		expr | match
 		{
 			[&](GenericVarExpr const &e)
 			{
-				info.merge(gather_type_vars(Type(VarType(e.range, e.var)), type_vars, deduction_vars_only));
+				info.merge(gather_type_vars(e.var, type_vars, deduction_vars_only));
 			},
 			[&](auto const &e) -> void
 			{
-				visit_child_exprs(e, self);
+				expr_visit_children(e, self);
 			},
 		};
 	};
@@ -57,7 +68,7 @@ TypeStatInfo gather_type_vars(Expr const &expr, unordered_set<GenericVar> &type_
 	return info;
 }
 
-TypeStatInfo gather_type_vars(GenericArg const &arg, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
+TermInfo gather_type_vars(GenericArg const &arg, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
 {
 	return arg | match
 	{
@@ -66,12 +77,12 @@ TypeStatInfo gather_type_vars(GenericArg const &arg, unordered_set<GenericVar> &
 	};
 }
 
-TypeStatInfo gather_type_vars(Type const &type, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
+TermInfo gather_type_vars(Type const &type, unordered_set<GenericVar> &type_vars, bool deduction_vars_only)
 {
 	return type | match
 	{
-		[&](BuiltinType const&) { return TypeStatInfo{}; },
-		[&](KnownIntType const&) { return TypeStatInfo{.has_known_ints = true}; },
+		[&](BuiltinType const&) { return TermInfo{}; },
+		[&](KnownIntType const&) { return TermInfo{.has_known_ints = true}; },
 		[&](PointerType const &t)
 		{
 			return gather_type_vars(*t.pointee, type_vars, deduction_vars_only);
@@ -80,12 +91,12 @@ TypeStatInfo gather_type_vars(Type const &type, unordered_set<GenericVar> &type_
 		{
 			assert(t.count_arg);
 
-			TypeStatInfo info;
+			TermInfo info;
 			info.merge(gather_type_vars(*t.count_arg, type_vars, deduction_vars_only));
 			info.merge(gather_type_vars(*t.element, type_vars, deduction_vars_only));
 			return info;
 		},
-		[&](ProcType const&) -> TypeStatInfo
+		[&](ProcType const&) -> TermInfo
 		{
 			assert(!"gather_type_vars: ProcType");
 		},
@@ -98,33 +109,44 @@ TypeStatInfo gather_type_vars(Type const &type, unordered_set<GenericVar> &type_
 			if(not deduction_vars_only or t.inst->has_type_deduction_vars())
 			{
 				for(GenericVar v: t.inst->occurring_vars())
-					gather_type_vars(Type(VarType(UNKNOWN_TOKEN_RANGE, v)), type_vars, deduction_vars_only);
+					gather_type_vars(v, type_vars, deduction_vars_only);
 			}
 
-			return TypeStatInfo{
-				.has_type_deduction_vars = t.inst->has_type_deduction_vars(),
+			return TermInfo{
+				.has_deduction_vars = t.inst->has_type_deduction_vars(),
 				.has_known_ints = t.inst->has_known_ints(),
 			};
 		},
 		[&](VarType const &t)
 		{
-			if(std::holds_alternative<GenericDeductionVar>(t.var) or not deduction_vars_only)
-				type_vars.insert(t.var);
-
-			return TypeStatInfo{.has_type_deduction_vars = std::holds_alternative<GenericDeductionVar>(t.var)};
+			return gather_type_vars(t.var, type_vars, deduction_vars_only);
 		},
-		[&](ProcTypeUnresolved const&) -> TypeStatInfo { assert(!"gather_type_vars: ProcTypeUnresolved"); },
-		[&](UnionTypeUnresolved const&) -> TypeStatInfo { assert(!"gather_type_vars: UnionTypeUnresolved"); },
-		[&](Path const&) -> TypeStatInfo { assert(!"gather_type_vars: Path"); },
-		[&](InlineStructType const&) -> TypeStatInfo { assert(!"gather_type_vars: InlineStructType"); },
+		[&](ProcTypeUnresolved const&) -> TermInfo { assert(!"gather_type_vars: ProcTypeUnresolved"); },
+		[&](UnionTypeUnresolved const&) -> TermInfo { assert(!"gather_type_vars: UnionTypeUnresolved"); },
+		[&](Path const&) -> TermInfo { assert(!"gather_type_vars: Path"); },
+		[&](InlineStructType const&) -> TermInfo { assert(!"gather_type_vars: InlineStructType"); },
 	};
 }
 
-TypeStatInfo get_type_stats(GenericArg const &arg)
+TermInfo get_term_info(GenericArg const &arg)
 {
 	// TODO Change gather_type_vars() so that we don't need to pass type_vars when we don't need it
 	unordered_set<GenericVar> type_vars;
 	return gather_type_vars(arg, type_vars, false);
+}
+
+TermInfo get_term_info(Type const &type)
+{
+	// TODO Change gather_type_vars() so that we don't need to pass type_vars when we don't need it
+	unordered_set<GenericVar> type_vars;
+	return gather_type_vars(type, type_vars, false);
+}
+
+TermInfo get_term_info(Expr const &expr)
+{
+	// TODO Change gather_type_vars() so that we don't need to pass type_vars when we don't need it
+	unordered_set<GenericVar> type_vars;
+	return gather_type_vars(expr, type_vars, false);
 }
 
 bool have_common_vars(unordered_set<GenericVar> const &occurring_vars, TypeEnv const &env)
@@ -532,7 +554,7 @@ void StructInstance::typecheck_generic_args(ConstraintGatheringSubst &subst, Sem
 	if(m_generic_args_typechecked)
 		return;
 
-	::typecheck_generic_args(m_type_args.args, m_struct->type_params, subst, ctx);
+	::generate_constraints_for_generic_args(m_type_args.args, m_struct->type_params, subst, ctx);
 	m_generic_args_typechecked = true;
 }
 
@@ -666,7 +688,7 @@ void UnionInstance::typecheck(ConstraintGatheringSubst &subst, SemaContext &ctx)
 		return;
 
 	for(Type *alt: m_alternatives)
-		typecheck_type(*alt, subst, ctx);
+		generate_constraints_for_type(*alt, subst, ctx);
 
 	m_has_been_typechecked = true;
 }
@@ -742,7 +764,7 @@ void ProcInstance::typecheck_generic_args(ConstraintGatheringSubst &subst, SemaC
 	if(m_generic_args_typechecked)
 		return;
 
-	::typecheck_generic_args(m_type_args.args, m_proc->type_params, subst, ctx);
+	::generate_constraints_for_generic_args(m_type_args.args, m_proc->type_params, subst, ctx);
 	m_generic_args_typechecked = true;
 }
 
@@ -755,9 +777,9 @@ void ProcTypeInstance::typecheck(ConstraintGatheringSubst &subst, SemaContext &c
 		return;
 
 	for(Type &param: *params)
-		typecheck_type(param, subst, ctx);
+		generate_constraints_for_type(param, subst, ctx);
 
-	typecheck_type(*ret, subst, ctx);
+	generate_constraints_for_type(*ret, subst, ctx);
 
 	has_been_typechecked = true;
 }
@@ -790,8 +812,8 @@ static TypeArgList create_type_arg_list(FixedArray<GenericArg> *NULLABLE type_ar
 	TypeArgList arg_list{.args = type_args};
 	for(GenericArg const &arg: *type_args)
 	{
-		TypeStatInfo info = gather_type_vars(arg, arg_list.occurring_vars, false);
-		arg_list.has_type_deduction_vars |= info.has_type_deduction_vars;
+		TermInfo info = gather_type_vars(arg, arg_list.occurring_vars, false);
+		arg_list.has_type_deduction_vars |= info.has_deduction_vars;
 		arg_list.has_known_ints |= info.has_known_ints;
 	}
 
@@ -863,7 +885,7 @@ StructInstance* InstanceRegistry::get_struct_instance(
 
 	void *original_mem_pos = m_arena.current_ptr();
 	TypeArgList new_args = clone(type_args, m_arena);
-	substitute(new_args, subst, *this, mode);
+	substitute_in_type_args(new_args, subst, *this, mode);
 
 	auto it = m_struct_instances.find(StructInstanceKey(struct_, new_args.args, decl_parent));
 	if(it != m_struct_instances.end())
@@ -1001,7 +1023,7 @@ ProcInstance* InstanceRegistry::get_proc_instance(
 {
 	void *original_mem_pos = m_arena.current_ptr();
 	TypeArgList new_args = clone(type_args, m_arena);
-	substitute(new_args, subst, *this, mode);
+	substitute_in_type_args(new_args, subst, *this, mode);
 
 	auto it = m_proc_instances.find(ProcInstanceKey(proc, new_args.args));
 	if(it != m_proc_instances.end())
@@ -1070,7 +1092,7 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
 ProcTypeInstance* InstanceRegistry::add_proc_type_instance(FixedArray<Type> *params, Type *ret)
 {
 	unordered_set<GenericVar> occurring_vars;
-	TypeStatInfo info = gather_type_vars(*ret, occurring_vars);
+	TermInfo info = gather_type_vars(*ret, occurring_vars);
 	for(Type const &type: *params)
 		info.merge(gather_type_vars(type, occurring_vars));
 
@@ -1080,7 +1102,7 @@ ProcTypeInstance* InstanceRegistry::add_proc_type_instance(FixedArray<Type> *par
 			.params = params,
 			.ret = ret,
 			.occurring_vars = std::move(occurring_vars),
-			.has_type_deduction_vars = info.has_type_deduction_vars,
+			.has_type_deduction_vars = info.has_deduction_vars,
 			.has_known_ints = info.has_known_ints,
 		}
 	).first->second;
@@ -1104,14 +1126,14 @@ UnionInstance* InstanceRegistry::get_union_instance(vector<Type*> &&alternatives
 UnionInstance* InstanceRegistry::add_union_instance(vector<Type*> &&alternatives)
 {
 	unordered_set<GenericVar> occurring_vars;
-	TypeStatInfo info;
+	TermInfo info;
 	for(Type const *alt: alternatives)
 		info.merge(gather_type_vars(*alt, occurring_vars));
 
 	UnionInstanceKey key(alternatives);
 	UnionInstance *inst = &m_union_instances.emplace(
 		key,
-		UnionInstance(std::move(alternatives), std::move(occurring_vars), info.has_type_deduction_vars, info.has_known_ints)
+		UnionInstance(std::move(alternatives), std::move(occurring_vars), info.has_deduction_vars, info.has_known_ints)
 	).first->second;
 
 	for(InstanceRegistryListener *l: m_listeners)

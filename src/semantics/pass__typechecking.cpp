@@ -6,7 +6,10 @@
 #include "semantics/type_env.hpp"
 #include "semantics/type_properties.hpp"
 
-GenericArg const * ConstraintGatheringSubst::try_get(GenericDeductionVar var)
+//--------------------------------------------------------------------
+// Constraint generation
+//--------------------------------------------------------------------
+GenericArg const* ConstraintGatheringSubst::try_get(GenericDeductionVar var)
 {
 	(void)var;
 	return nullptr;
@@ -149,43 +152,48 @@ std::expected<Type, ErrorMsg> get_member_type(
 	return *var_member->type;
 }
 
-void typecheck_type(Type &type, ConstraintGatheringSubst &subst, SemaContext &ctx)
+void generate_constraints_for_type(Type &type, ConstraintGatheringSubst &subst, SemaContext &ctx)
 {
-	type | match
+	auto visitor = [&](this auto &self, Type &type) -> void
 	{
-		[&](this auto &self, ArrayType &t)
+		type | match
 		{
-			Type *count_type = typecheck_subexpr(*t.count_arg, subst, ctx);
-			auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
+			[&](ArrayType &t)
 			{
-				throw_sem_error("Invalid array count: " + reason, expr.token_range().first, &mod);
-			};
-			Unifier(ctx)
-				.left(*count_type, TypeConversion::NONE)
-				.right(BuiltinType(UNKNOWN_TOKEN_RANGE, BuiltinTypeDef::USIZE), TypeConversion::NONE)
-				.set(&subst)
-				.set(LazyErrorMsg(t.count_arg, error_msg))
-				.go();
+				Type *count_type = generate_constraints_for_expr(*t.count_arg, subst, ctx);
+				auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
+				{
+					throw_sem_error("Array count has invalid type: " + reason, expr.token_range().first, &mod);
+				};
+				Unifier(ctx)
+					.left(*count_type, TypeConversion::NONE)
+					.right(BuiltinType(UNKNOWN_TOKEN_RANGE, BuiltinTypeDef::USIZE), TypeConversion::NONE)
+					.set(&subst)
+					.set(LazyErrorMsg(t.count_arg, error_msg))
+					.go();
 
-			visit_child_types(t, self);
-		},
-		[&](StructType &t)
-		{
-			t.inst->typecheck_generic_args(subst, ctx);
-		},
-		[&](ProcType &t)
-		{
-			t.inst->typecheck(subst, ctx);
-		},
-		[&](UnionType &t)
-		{
-			t.inst->typecheck(subst, ctx);
-		},
-		[&](this auto &self, auto &t) { visit_child_types(t, self); },
+				type_visit_children(t, self);
+			},
+			[&](StructType &t)
+			{
+				t.inst->typecheck_generic_args(subst, ctx);
+				type_visit_children(t, self);
+			},
+			[&](ProcType &t)
+			{
+				t.inst->typecheck(subst, ctx);
+			},
+			[&](UnionType &t)
+			{
+				t.inst->typecheck(subst, ctx);
+			},
+			[&](auto &t) { type_visit_children(t, self); },
+		};
 	};
+	visitor(type);
 }
 
-void typecheck_generic_args(
+void generate_constraints_for_generic_args(
 	FixedArray<GenericArg> *args,
 	FixedArray<GenericParameter> const *params,
 	ConstraintGatheringSubst &subst,
@@ -203,7 +211,7 @@ void typecheck_generic_args(
 				if(not type_arg)
 					throw_sem_error("Expected type, got value", arg.token_range().first, ctx.mod);
 
-				typecheck_type(*type_arg, subst, ctx);
+				generate_constraints_for_type(*type_arg, subst, ctx);
 			},
 			[&](GenericValueParameter const &value_param)
 			{
@@ -211,7 +219,7 @@ void typecheck_generic_args(
 				if(not expr_arg)
 					throw_sem_error("Expected value, got type", arg.token_range().first, ctx.mod);
 
-				Type *type = typecheck_subexpr(*expr_arg, subst, ctx);
+				Type *type = generate_constraints_for_expr(*expr_arg, subst, ctx);
 
 				auto error_msg = [](Expr const &ret_expr, string const &reason, Module const &mod)
 				{
@@ -228,7 +236,7 @@ void typecheck_generic_args(
 	}
 }
 
-Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext &ctx)
+Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext &ctx)
 {
 	auto res = expr | match
 	{
@@ -259,7 +267,7 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 				case UnaryOp::NOT:
 				{
 					e.type = mk_builtin_type(BuiltinTypeDef::BOOL, ctx.arena);
-					Type const *sub_type = typecheck_subexpr(*e.sub, subst, ctx);
+					Type const *sub_type = generate_constraints_for_expr(*e.sub, subst, ctx);
 
 					auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 					{
@@ -283,22 +291,14 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 					//
 					//     bar(-foo(), 1)
 
-					Type const *sub_type = typecheck_subexpr(*e.sub, subst, ctx);
+					Type const *sub_type = generate_constraints_for_expr(*e.sub, subst, ctx);
 					if(KnownIntType const *known_int = std::get_if<KnownIntType>(sub_type))
 					{
 						// TODO Check for overflow
 						e.type = mk_known_int_type(-known_int->high, -known_int->low, ctx.arena);
 					}
 					else
-					{
 						e.type = ctx.arena.alloc<Type>(clone(*sub_type, ctx.arena));
-
-						auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
-						{
-							throw_sem_error("Invalid operand for negation operator: " + reason, expr.token_range().first, &mod);
-						};
-						subst.solver->add_check(IntegerCheck(LazyErrorMsg(e.sub, error_msg), e.type));
-					}
 				} break;
 			}
 
@@ -313,8 +313,8 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 				case BinaryOp::MUL:
 				case BinaryOp::DIV:
 				{
-					Type const *left_type = typecheck_subexpr(*e.left, subst, ctx);
-					Type const *right_type = typecheck_subexpr(*e.right, subst, ctx);
+					Type const *left_type = generate_constraints_for_expr(*e.left, subst, ctx);
+					Type const *right_type = generate_constraints_for_expr(*e.right, subst, ctx);
 
 					auto uni_error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 					{
@@ -368,21 +368,14 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 						//
 						//     bar(1, foo() + foo(), 4294967295)
 
-						auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
-						{
-							throw_sem_error("Invalid type for binary operator: " + reason, expr.token_range().first, &mod);
-						};
-						subst.solver->add_check(IntegerCheck(LazyErrorMsg(e.left, error_msg), left_type));
-						subst.solver->add_check(IntegerCheck(LazyErrorMsg(e.right, error_msg), right_type));
-
 						e.type = clone_ptr(&result.as_type(), ctx.arena);
 					}
 				} break;
 
 				case BinaryOp::EQ:
 				{
-					Type const *left_type = typecheck_subexpr(*e.left, subst, ctx);
-					Type const *right_type = typecheck_subexpr(*e.right, subst, ctx);
+					Type const *left_type = generate_constraints_for_expr(*e.left, subst, ctx);
+					Type const *right_type = generate_constraints_for_expr(*e.right, subst, ctx);
 
 					auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 					{
@@ -403,8 +396,8 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 				case BinaryOp::GT:
 				case BinaryOp::GE:
 				{
-					Type const *left_type = typecheck_subexpr(*e.left, subst, ctx);
-					Type const *right_type = typecheck_subexpr(*e.right, subst, ctx);
+					Type const *left_type = generate_constraints_for_expr(*e.left, subst, ctx);
+					Type const *right_type = generate_constraints_for_expr(*e.right, subst, ctx);
 
 					auto uni_error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 					{
@@ -417,15 +410,6 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 						.set(LazyErrorMsg(&expr, uni_error_msg))
 						.go();
 
-
-					auto integer_check_msg = [](Expr const &expr, string const &reason, Module const &mod)
-					{
-						throw_sem_error("Invalid operand for comparison operator: " + reason, expr.token_range().first, &mod);
-					};
-
-					subst.solver->add_check(IntegerCheck(LazyErrorMsg(e.left, integer_check_msg), left_type));
-					subst.solver->add_check(IntegerCheck(LazyErrorMsg(e.right, integer_check_msg), right_type));
-
 					e.type = mk_builtin_type(BuiltinTypeDef::BOOL, ctx.arena);
 				} break;
 			}
@@ -434,14 +418,12 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 		},
 		[&](AddressOfExpr &e) -> Type*
 		{
-			Type const *object_type = typecheck_subexpr(*e.object, subst, ctx);
-			subst.solver->add_check(LValueCheck(e.object, e.mutability));
-
+			Type const *object_type = generate_constraints_for_expr(*e.object, subst, ctx);
 			return e.type = mk_pointer_type(clone_ptr(object_type, ctx.arena), e.mutability, ctx.arena);
 		},
 		[&](DerefExpr &e) -> Type*
 		{
-			Type const *addr_type = typecheck_subexpr(*e.addr, subst, ctx);
+			Type const *addr_type = generate_constraints_for_expr(*e.addr, subst, ctx);
 
 			if(optional<GenericDeductionVar> pointer_var = addr_type->try_get_deduction_var())
 			{
@@ -465,8 +447,8 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 		},
 		[&](IndexExpr &e) -> Type*
 		{
-			Type const *addr_type = typecheck_subexpr(*e.addr, subst, ctx);
-			Type const *index_type = typecheck_subexpr(*e.index, subst, ctx);
+			Type const *addr_type = generate_constraints_for_expr(*e.addr, subst, ctx);
+			generate_constraints_for_expr(*e.index, subst, ctx);
 
 			if(optional<GenericDeductionVar> array_var = addr_type->try_get_deduction_var())
 			{
@@ -486,12 +468,6 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 				e.type = clone_ptr(&pointee.value(), ctx.arena);
 			}
 
-			auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
-			{
-				throw_sem_error("Invalid operand for index operator: " + reason, expr.token_range().first, &mod);
-			};
-
-			subst.solver->add_check(IntegerCheck(LazyErrorMsg(e.index, error_msg), index_type));
 			return e.type;
 		},
 		[&](MemberAccessExpr &e) -> Type*
@@ -503,7 +479,7 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 			//
 			//     id(Foo(3)).x
 
-			Type const *object_type = typecheck_subexpr(*e.object, subst, ctx);
+			Type const *object_type = generate_constraints_for_expr(*e.object, subst, ctx);
 
 			if(optional<GenericDeductionVar> object_var = object_type->try_get_deduction_var())
 			{
@@ -528,8 +504,8 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 		},
 		[&](AssignmentExpr &e) -> Type*
 		{
-			Type const *lhs_type = typecheck_subexpr(*e.lhs, subst, ctx);
-			Type const *rhs_type = typecheck_subexpr(*e.rhs, subst, ctx);
+			Type const *lhs_type = generate_constraints_for_expr(*e.lhs, subst, ctx);
+			Type const *rhs_type = generate_constraints_for_expr(*e.rhs, subst, ctx);
 
 			auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 			{
@@ -542,16 +518,12 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 				.set(LazyErrorMsg(&expr, error_msg))
 				.go();
 
-			subst.solver->add_check(LValueCheck(e.lhs, IsMutable::YES));
-
 			return e.type = clone_ptr(lhs_type, ctx.arena);
 		},
 		[&](AsExpr &e) -> Type*
 		{
-			typecheck_type(*e.target_type, subst, ctx);
-			typecheck_subexpr(*e.src_expr, subst, ctx);
-
-			subst.solver->add_check(CastCheck{e.src_expr, e.target_type});
+			generate_constraints_for_type(*e.target_type, subst, ctx);
+			generate_constraints_for_expr(*e.src_expr, subst, ctx);
 			return e.type = clone_ptr(e.target_type, ctx.arena);
 		},
 		[&](ConstructorExpr &e)
@@ -572,7 +544,7 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 		},
 		[&](CallExpr &e)
 		{
-			Type *callable_type = typecheck_subexpr(*e.callable, subst, ctx);
+			Type *callable_type = generate_constraints_for_expr(*e.callable, subst, ctx);
 			ProcType *proc_type = std::get_if<ProcType>(callable_type);
 			if(not proc_type)
 				throw_sem_error("Expected callable expression", e.range.first, ctx.mod);
@@ -621,7 +593,7 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 					throw_sem_error("Multiple arguments for same parameter", arg.range.first, ctx.mod);
 
 				Type const &param_type = param_types->items[arg.param_idx];
-				Type *arg_type = typecheck_subexpr(arg.expr, subst, ctx);
+				Type *arg_type = generate_constraints_for_expr(arg.expr, subst, ctx);
 				Unifier(ctx)
 					.left(param_type, TypeConversion::NONE)
 					.right(*arg_type, TypeConversion::IMPLICIT_CTOR, &arg.expr)
@@ -699,28 +671,6 @@ Type* typecheck_subexpr(Expr &expr, ConstraintGatheringSubst &subst, SemaContext
 	};
 
 	return res;
-	return nullptr;
-}
-
-Type const* typecheck_expr(Expr &expr, SemaContext &ctx)
-{
-	LOGGER(ctx.logger(), on_expr_start, expr);
-
-	ConstraintSolver solver(ctx);
-	ConstraintGatheringSubst constraint_gatherer(&solver, &ctx);
-	Type const *type = typecheck_subexpr(expr, constraint_gatherer, ctx);
-	LOGGER(ctx.logger(), on_data, solver);
-
-	TypeEnv subst = solver.solve();
-	substitute_in_expr(expr, subst, ctx.mod->sema->insts, {
-		.mode = SubstitutionMode::FULL_DEDUCTION,
-		.region_being_substituted = expr.token_range()
-	});
-
-	LOGGER(ctx.logger(), on_data, subst);
-	LOGGER(ctx.logger(), on_expr_end);
-
-	return type;
 }
 
 // Checks whether pattern_type <c rhs_type, where <c refers to the subtype relation induced by the
@@ -733,9 +683,7 @@ static Type const* unify_pattern(
 	TypeConversion lhs_conv,
 	TypeConversion rhs_conv,
 	ConstraintSolver &solver,
-	SemaContext &ctx,
-	// Output
-	optional<IsMutable> &requires_lvalue
+	SemaContext &ctx
 )
 {
 	return lhs_pattern | match
@@ -757,16 +705,12 @@ static Type const* unify_pattern(
 				lhs_conv,
 				rhs_conv,
 				solver,
-				ctx,
-				requires_lvalue
+				ctx
 			);
 			return p.type = clone_ptr(sub_type, ctx.arena);
 		},
 		[&](AddressOfPattern &p)
 		{
-			if(not requires_lvalue or *requires_lvalue == IsMutable::NO)
-				requires_lvalue = p.mutability;
-
 			Type sub_rhs_type(PointerType{
 				.range = UNKNOWN_TOKEN_RANGE,
 				.pointee = clone_ptr(&rhs_type, ctx.arena),
@@ -780,8 +724,7 @@ static Type const* unify_pattern(
 				lhs_conv,
 				rhs_conv,
 				solver,
-				ctx,
-				requires_lvalue
+				ctx
 			);
 
 			return p.type = clone_ptr(sub_type, ctx.arena);
@@ -848,8 +791,7 @@ static Type const* unify_pattern(
 							lhs_conv,
 							rhs_conv,
 							solver,
-							ctx,
-							requires_lvalue
+							ctx
 						);
 						arg.param_idx = i;
 					}
@@ -866,18 +808,15 @@ static Type const* unify_pattern(
 	};
 }
 
-static Type const* typecheck_pattern(
+static Type const* generate_constraints_for_pattern(
 	Pattern &lhs_pattern,
 	Type const &rhs_type,
 	bool irrefutable_pattern_required,
-	ConstraintSolver &solver,
+	ConstraintGatheringSubst &subst,
 	SemaContext &ctx,
 	Expr *root_rhs_expr
 )
 {
-	ConstraintGatheringSubst subst(&solver, &ctx);
-
-	optional<IsMutable> requires_lvalue;
 	if(lhs_pattern.provided_type)
 	{
 		// If pattern must be irrefutable:
@@ -888,7 +827,7 @@ static Type const* typecheck_pattern(
 		// In both cases:
 		//   2. pattern_type <: provided_type
 
-		typecheck_type(*lhs_pattern.provided_type, subst, ctx);
+		generate_constraints_for_type(*lhs_pattern.provided_type, subst, ctx);
 
 		auto error_msg = [](Pattern const &pattern, string const &reason, Module const &mod)
 		{
@@ -922,9 +861,8 @@ static Type const* typecheck_pattern(
 			lhs_pattern,
 			*lhs_pattern.provided_type,
 			TypeConversion::TRIVIAL, TypeConversion::NONE,
-			solver,
-			ctx,
-			requires_lvalue
+			*subst.solver,
+			ctx
 		);
 	}
 	else
@@ -941,9 +879,8 @@ static Type const* typecheck_pattern(
 				rhs_type,
 				TypeConversion::NONE,
 				TypeConversion::IMPLICIT_CTOR,
-				solver,
-				ctx,
-				requires_lvalue
+				*subst.solver,
+				ctx
 			);
 		}
 		else
@@ -953,30 +890,189 @@ static Type const* typecheck_pattern(
 				rhs_type,
 				TypeConversion::IMPLICIT_CTOR,
 				TypeConversion::NONE,
-				solver,
-				ctx,
-				requires_lvalue
+				*subst.solver,
+				ctx
 			);
 		}
 	}
+}
 
-	if(requires_lvalue)
-		solver.add_check(LValueCheck(root_rhs_expr, *requires_lvalue));
+//--------------------------------------------------------------------
+// Type checking
+//--------------------------------------------------------------------
+static void require_lvalue(optional<IsMutable> object_mutability, IsMutable required_mutability, TokenRange range, Module const &mod)
+{
+	if(not object_mutability)
+		throw_sem_error("Address-of expression requires lvalue", range.first, &mod);
+
+	if(required_mutability == IsMutable::YES and object_mutability == IsMutable::NO)
+		throw_sem_error("Cannot make mutable reference to const object", range.first, &mod);
+}
+
+// Performs typechecks after type deduction is complete
+struct DeferredTypechecker
+{
+	void operator () (Expr const &expr)
+	{
+		expr | match
+		{
+			[&](UnaryExpr const &e)
+			{
+				switch(e.op)
+				{
+					case UnaryOp::NOT: break;
+					case UnaryOp::NEG:
+					{
+						if(not is_integer_type(e.sub->type()))
+							throw_sem_error("Expected integer, got " + str(*e.type, *ctx.mod), e.range.first, ctx.mod);
+					} break;
+				}
+			},
+			[&](BinaryExpr const &e)
+			{
+				switch(e.op)
+				{
+					case BinaryOp::EQ:
+						break;
+
+					case BinaryOp::ADD:
+					case BinaryOp::SUB:
+					case BinaryOp::MUL:
+					case BinaryOp::DIV:
+					case BinaryOp::LT:
+					case BinaryOp::LE:
+					case BinaryOp::GT:
+					case BinaryOp::GE:
+					{
+						if(not is_integer_type(e.left->type()))
+							throw_sem_error("Invalid type for binary operator: Expected integer, got " + str(*e.type, *ctx.mod), e.left->token_range().first, ctx.mod);
+
+						if(not is_integer_type(e.right->type()))
+							throw_sem_error("Invalid type for binary operator: Expected integer, got " + str(*e.type, *ctx.mod), e.right->token_range().first, ctx.mod);
+					} break;
+				}
+			},
+			[&](AddressOfExpr const &e)
+			{
+				optional<IsMutable> object_mutability = lvalue_mutability(*e.object);
+				require_lvalue(object_mutability, e.mutability, e.object->token_range(), *ctx.mod);
+			},
+			[&](IndexExpr const &e)
+			{
+				if(not is_integer_type(e.index->type()))
+					throw_sem_error("Expected integer, got " + str(*e.type, *ctx.mod), e.index->token_range().first, ctx.mod);
+			},
+			[&](AssignmentExpr const &e)
+			{
+				optional<IsMutable> lhs_mutability = lvalue_mutability(*e.lhs);
+				require_lvalue(lhs_mutability, IsMutable::YES, e.lhs->token_range(), *ctx.mod);
+			},
+			[&](AsExpr const &e)
+			{
+				if(not is_cast_ok(*e.target_type, *e.src_expr, ctx))
+					throw_sem_error("Invalid cast", e.src_expr->token_range().first, ctx.mod);
+			},
+			[](const auto&) {}
+		};
+
+		expr_visit_children(expr, *this);
+	}
+
+	void operator () (Type const &type)
+	{
+		type | match
+		{
+			[&](ArrayType const &t)
+			{
+				if(IntLiteralExpr const *count_val = std::get_if<IntLiteralExpr>(t.count_arg))
+				{
+					if(count_val->value < 1)
+						throw_sem_error("Array count must be strictly larger that zero", t.count_arg->token_range().first, ctx.mod);
+				}
+				else if(not ctx.well_formed_terms.contains(*t.count_arg))
+					throw_sem_error("Array count cannot be determined to be valid: " + str(*t.count_arg, *ctx.mod), t.count_arg->token_range().first, ctx.mod);
+			},
+			[](const auto&) {}
+		};
+
+		type_visit_children(type, *this);
+	}
+
+	void operator () (Pattern const &pattern)
+	{
+		pattern | match
+		{
+			[&](AddressOfPattern const &p)
+			{
+				require_lvalue(pattern_rhs_mutability, p.mutability, p.range, *ctx.mod);
+			},
+			[](const auto&) {},
+		};
+
+		pattern_visit_children(pattern, *this);
+	}
+
+	SemaContext &ctx;
+	optional<IsMutable> pattern_rhs_mutability = nullopt;
+};
+
+void solve_and_check(ConstraintSolver &solver, std::initializer_list<ApplyTarget> targets)
+{
+	LOGGER(solver.ctx().logger(), on_data, solver);
+
+	TypeEnv env = solver.solve();
+	LOGGER(solver.ctx().logger(), on_data, env);
+
+	for(ApplyTarget target: targets)
+	{
+		target | match
+		{
+			[&](Type *type)
+			{
+				substitute_in_type(*type, env, solver.ctx().mod->sema->insts, {SubstitutionMode::FULL_DEDUCTION, type->token_range()});
+				DeferredTypechecker{solver.ctx()}(*type);
+			},
+			[&](Expr *expr)
+			{
+				substitute_in_expr(*expr, env, solver.ctx().mod->sema->insts, {SubstitutionMode::FULL_DEDUCTION, expr->token_range()});
+				DeferredTypechecker{solver.ctx()}(*expr);
+			},
+			[&](std::pair<Pattern*, Expr const*> p)
+			{
+				Pattern *pattern = p.first;
+				Expr const *rhs_expr = p.second;
+				optional<IsMutable> rhs_mutability = lvalue_mutability(*rhs_expr);
+
+				substitute_in_pattern(*pattern, env, solver.ctx().mod->sema->insts, {SubstitutionMode::FULL_DEDUCTION, pattern->token_range()});
+				DeferredTypechecker{solver.ctx(), rhs_mutability}(*pattern);
+			},
+		};
+	}
+}
+Type const* typecheck_expr(Expr &expr, SemaContext &ctx)
+{
+	LOGGER(ctx.logger(), on_expr_start, expr);
+
+	ConstraintSolver solver(ctx);
+	ConstraintGatheringSubst constraint_gatherer(&solver, &ctx);
+	Type const *type = generate_constraints_for_expr(expr, constraint_gatherer, ctx);
+	solve_and_check(solver, {&expr});
+
+	LOGGER(ctx.logger(), on_expr_end);
+	return type;
 }
 
 static void typecheck_param(Parameter &param, SemaContext &ctx)
 {
 	ConstraintSolver solver(ctx);
 	ConstraintGatheringSubst subst(&solver, &ctx);
-	typecheck_type(*param.type, subst, ctx);
+	generate_constraints_for_type(*param.type, subst, ctx);
 
 	if(Expr *default_value = param.default_value.try_get_expr())
 	{
 		LOGGER(ctx.logger(), on_expr_start, *default_value);
 
-		Type const *default_value_type = typecheck_subexpr(*default_value, subst, ctx);
-		LOGGER(ctx.logger(), on_data, solver);
-
+		Type const *default_value_type = generate_constraints_for_expr(*default_value, subst, ctx);
 		auto error_msg = [](Expr const &init_expr, string const &reason, Module const &mod)
 		{
 			throw_sem_error("Invalid default value: " + reason, init_expr.token_range().first, &mod);
@@ -989,19 +1085,19 @@ static void typecheck_param(Parameter &param, SemaContext &ctx)
 			.set(LazyErrorMsg(default_value, error_msg))
 			.go();
 
-		TypeEnv subst = solver.solve();
-		LOGGER(ctx.logger(), on_data, subst);
+		solve_and_check(solver, {param.type, default_value});
 
-		substitute_in_expr(*default_value, subst, ctx.mod->sema->insts, {
-			.mode = SubstitutionMode::FULL_DEDUCTION,
-			.region_being_substituted = default_value->token_range(),
-		});
 		LOGGER(ctx.logger(), on_expr_end);
 	}
+	else
+		solve_and_check(solver, {param.type});
 }
 
 static void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 {
+	// TODO Do something smarter than making a copy
+	WellFormedTermSet backup = ctx.well_formed_terms;
+	gather_well_formed_terms(*struct_, ctx.well_formed_terms);
 	for(Member &m: *struct_->members)
 	{
 		m | match
@@ -1011,6 +1107,7 @@ static void typecheck_struct(StructItem *struct_, SemaContext &ctx)
 			[&](StructMember struct_member) { typecheck_struct(struct_member.struct_, ctx); },
 		};
 	}
+	ctx.well_formed_terms = backup;
 }
 
 static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
@@ -1026,21 +1123,9 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 
 				ConstraintSolver solver(ctx);
 				ConstraintGatheringSubst constraint_gatherer(&solver, &ctx);
-				Type const *init_type = typecheck_subexpr(*s.init_expr, constraint_gatherer, ctx);
-				typecheck_pattern(*s.lhs, *init_type, true, solver, ctx, s.init_expr);
-				LOGGER(ctx.logger(), on_data, solver);
-
-				TypeEnv subst = solver.solve();
-				LOGGER(ctx.logger(), on_data, subst);
-
-				substitute_in_expr(*s.init_expr, subst, ctx.mod->sema->insts, {
-					.mode = SubstitutionMode::FULL_DEDUCTION,
-					.region_being_substituted = s.range,
-				});
-				substitute_in_pattern(*s.lhs, subst, ctx.mod->sema->insts, {
-					.mode = SubstitutionMode::FULL_DEDUCTION,
-					.region_being_substituted = s.range,
-				});
+				Type const *init_type = generate_constraints_for_expr(*s.init_expr, constraint_gatherer, ctx);
+				generate_constraints_for_pattern(*s.lhs, *init_type, true, constraint_gatherer, ctx, s.init_expr);
+				solve_and_check(solver, {s.init_expr, std::pair{s.lhs, s.init_expr}});
 
 				LOGGER(ctx.logger(), on_expr_end);
 			}
@@ -1071,25 +1156,15 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 
 				ConstraintSolver solver(ctx);
 				ConstraintGatheringSubst constraint_gatherer(&solver, &ctx);
-				Type const *ret_expr_type = typecheck_subexpr(*s.ret_expr, constraint_gatherer, ctx);
-
-				ConstraintGatheringSubst constraint_subst(&solver, &ctx);
+				Type const *ret_expr_type = generate_constraints_for_expr(*s.ret_expr, constraint_gatherer, ctx);
 				Unifier(ctx)
 					.left(*ctx.proc->ret_type, TypeConversion::NONE)
 					.right(*ret_expr_type, TypeConversion::IMPLICIT_CTOR, s.ret_expr)
-					.set(&constraint_subst)
+					.set(&constraint_gatherer)
 					.set(LazyErrorMsg(s.ret_expr, error_msg))
 					.go();
 
-				LOGGER(ctx.logger(), on_data, solver);
-
-				TypeEnv subst = solver.solve();
-				LOGGER(ctx.logger(), on_data, subst);
-
-				substitute_in_expr(*s.ret_expr, subst, ctx.mod->sema->insts, {
-					.mode = SubstitutionMode::FULL_DEDUCTION,
-					.region_being_substituted = s.range,
-				});
+				solve_and_check(solver, {s.ret_expr});
 
 				LOGGER(ctx.logger(), on_expr_end);
 			}
@@ -1139,15 +1214,9 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 							throw_sem_error("Pattern is following wildcard pattern and is therefore unreachable", arm.capture.token_range().first, ctx.mod);
 
 						ConstraintSolver arm_constraints(ctx);
-						typecheck_pattern(arm.capture, s.expr->type(), false, arm_constraints, ctx, s.expr);
-						TypeEnv subst_arm = arm_constraints.solve();
-
-						substitute_in_pattern(
-							arm.capture,
-							subst_arm,
-							ctx.mod->sema->insts,
-							{.mode = SubstitutionMode::FULL_DEDUCTION, .region_being_substituted = arm.capture.token_range()}
-						);
+						ConstraintGatheringSubst subst(&arm_constraints, &ctx);
+						generate_constraints_for_pattern(arm.capture, s.expr->type(), false, subst, ctx, s.expr);
+						solve_and_check(arm_constraints, {std::pair{&arm.capture, s.expr}});
 
 						if(is<WildcardPattern>(arm.capture))
 							has_wildcard = true;
@@ -1229,15 +1298,9 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 						}
 
 						ConstraintSolver arm_constraints(ctx);
-						typecheck_pattern(arm.capture, s.expr->type(), false, arm_constraints, ctx, s.expr);
-						TypeEnv subst_arm = arm_constraints.solve();
-
-						substitute_in_pattern(
-							arm.capture,
-							subst_arm,
-							ctx.mod->sema->insts,
-							{.mode = SubstitutionMode::FULL_DEDUCTION, .region_being_substituted = arm.capture.token_range()}
-						);
+						ConstraintGatheringSubst subst(&arm_constraints, &ctx);
+						generate_constraints_for_pattern(arm.capture, s.expr->type(), false, subst, ctx, s.expr);
+						solve_and_check(arm_constraints, {std::pair{&arm.capture, s.expr}});
 
 						if(is<WildcardPattern>(arm.capture))
 							has_wildcard = true;
@@ -1280,6 +1343,8 @@ void typecheck(SemaContext &ctx)
 			[&](ProcItem &proc)
 			{
 				LOGGER(ctx.logger(), on_proc_start, &proc);
+				ctx.proc = &proc;
+				gather_well_formed_terms(proc, ctx.well_formed_terms);
 
 				for(auto const &[idx, param]: *proc.params | std::views::enumerate)
 				{
@@ -1289,15 +1354,14 @@ void typecheck(SemaContext &ctx)
 
 				ConstraintSolver solver(ctx);
 				ConstraintGatheringSubst subst(&solver, &ctx);
-				typecheck_type(*proc.ret_type, subst, ctx);
+				generate_constraints_for_type(*proc.ret_type, subst, ctx);
+				solve_and_check(solver, {proc.ret_type});
 
 				if(proc.body)
-				{
-					ctx.proc = &proc;
 					typecheck_stmt(*proc.body, ctx);
-					ctx.proc = nullptr;
-				}
 
+				ctx.well_formed_terms.clear();
+				ctx.proc = nullptr;
 				LOGGER(ctx.logger(), on_proc_end);
 			},
 			[&](StructItem &struct_)
@@ -1308,7 +1372,8 @@ void typecheck(SemaContext &ctx)
 			{
 				ConstraintSolver solver(ctx);
 				ConstraintGatheringSubst subst(&solver, &ctx);
-				typecheck_type(*alias.aliased_type, subst, ctx);
+				generate_constraints_for_type(*alias.aliased_type, subst, ctx);
+				solve_and_check(solver, {alias.aliased_type});
 			},
 		};
 	}

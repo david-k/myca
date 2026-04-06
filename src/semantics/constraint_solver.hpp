@@ -5,32 +5,6 @@
 #include "semantics/unification.hpp"
 #include "semantics/passes.hpp"
 
-struct IntegerCheck
-{
-	LazyErrorMsg error_msg;
-	Type const *type;
-};
-
-struct CastCheck
-{
-	Expr *expr;
-	Type const *target_type;
-};
-
-struct LValueCheck
-{
-	Expr *expr;
-	IsMutable mutability;
-};
-
-// A check that is performed on a type/expr after all TypeDeductionVars have been deduced
-using TypeCheck = variant<
-	IntegerCheck,
-	CastCheck,
-	LValueCheck
->;
-
-
 struct MemberTypeModifier
 {
 	friend bool operator == (MemberTypeModifier, MemberTypeModifier) = default;
@@ -98,7 +72,7 @@ public:
 	explicit ConstraintSolver(SemaContext &ctx) :
 		m_ctx(ctx) {}
 
-	void add_check(TypeCheck const &check);
+	SemaContext& ctx() { return m_ctx; }
 	bool add_relational_constraint(
 		GenericDeductionVar var,
 		ConstraintEdge const &edge
@@ -120,7 +94,7 @@ public:
 	}
 
 	void print(std::ostream &os) const;
-	bool empty() const { return m_checks.empty() and m_nodes.empty(); }
+	bool empty() const { return m_nodes.empty(); }
 
 	TypeEnv solve();
 
@@ -132,6 +106,5 @@ private:
 
 	SemaContext &m_ctx;
 	unordered_map<GenericDeductionVar, ConstraintNode> m_nodes;
-	vector<TypeCheck> m_checks;
 };
 

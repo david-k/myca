@@ -5,9 +5,9 @@
 #include <random>
 #include <stdexcept>
 
-#include "semantics/module.hpp"
-#include "semantics/context.hpp"
 #include "semantics/constraint_solver.hpp"
+#include "semantics/context.hpp"
+#include "semantics/module.hpp"
 #include "semantics/type_env.hpp"
 
 //==============================================================================

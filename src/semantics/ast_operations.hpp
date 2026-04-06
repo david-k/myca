@@ -20,6 +20,14 @@ struct TypeEquiv
 	}
 };
 
+struct ExprEquiv
+{
+	bool operator () (Expr const &a, Expr const &b) const
+	{
+		return equiv(a, b);
+	}
+};
+
 bool operator < (GenericVar const &a, GenericVar const &b);
 bool operator < (Expr const &a, Expr const &b);
 bool operator < (GenericArg const &a, GenericArg const &b);
@@ -88,6 +96,7 @@ void print(Module const &mod, std::ostream &os);
 
 string_view str(BuiltinTypeDef t);
 string str(Type const &type, Module const &mod);
+string str(Expr const &expr, Module const &mod);
 string str(GenericArg const &a, Module const &mod);
 
 Type* mk_builtin_type(BuiltinTypeDef builtin, Arena &arena);
