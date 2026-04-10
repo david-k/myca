@@ -45,23 +45,118 @@ static std::pair<Arena, std::unique_ptr<char[]>> mk_arena()
 	return {arena, std::move(memory)};
 }
 
+//--------------------------------------------------------------------
+// Discovering tests
+//--------------------------------------------------------------------
+struct SeparateSpecTest
+{
+	string name;
+	fs::path src_dir;
+};
+
+struct InlineSpecTest
+{
+	string name;
+	string source;
+};
+
+struct Test : variant<SeparateSpecTest, InlineSpecTest>
+{
+	using variant::variant;
+	string const& name() const
+	{
+		return std::visit([](auto const &t) -> string const& { return t.name; }, *this);
+	}
+};
+
+static vector<string_view> split_test_cases(string_view source)
+{
+	vector<string_view> test_case_sources;
+	const char *prev_test_case_end = source.begin();
+	for(string_view line: split_lines(source))
+	{
+		if(line.starts_with("//!---"))
+		{
+			size_t test_case_length = line.begin() - prev_test_case_end;
+			string_view test_case_source(prev_test_case_end, test_case_length);
+			test_case_sources.push_back(test_case_source);
+			prev_test_case_end = line.end();
+		}
+	}
+
+	size_t test_case_length = source.end() - prev_test_case_end;
+	string_view test_case_source(prev_test_case_end, test_case_length);
+	test_case_sources.push_back(test_case_source);
+
+	return test_case_sources;
+}
+
+static optional<string_view> extract_test_case_name(string_view source)
+{
+	Parser parser(source);
+	PrecedingText initial_text = get_preceding_text(TokenIdx(0), parser);
+	vector<Comment> initial_comments = parse_comments(initial_text);
+	OptionSet options;
+	for(Comment const &c: initial_comments)
+	{
+		if(c.kind == CommentKind::SPECIAL and c.target == CommentTarget::NONE)
+			parse_options_from_comment(c, options);
+	}
+
+	return options.try_get("test");
+}
+
+static vector<Test> discover_tests(fs::path const &src_dir)
+{
+	vector<Test> tests;
+	for(fs::directory_entry const &entry: fs::directory_iterator(src_dir))
+	{
+		fs::path test_src_path = entry.path();
+		if(fs::is_directory(test_src_path))
+		{
+			tests.push_back(SeparateSpecTest{
+				.name = test_src_path.filename(),
+				.src_dir = test_src_path,
+			});
+		}
+		else if(test_src_path.extension() == ".myca")
+		{
+			string source = read_file(test_src_path);
+			for(string_view case_source: split_test_cases(source))
+			{
+				optional<string_view> case_name = extract_test_case_name(case_source);
+				if(not case_name)
+					throw std::runtime_error("Test case in "s + test_src_path.filename() + " is missing the \"test\" option");
+
+				tests.push_back(InlineSpecTest{
+					.name = test_src_path.filename() + "." + *case_name,
+					.source = string(case_source),
+				});
+			}
+		}
+	}
+
+	ranges::sort(tests, [](Test const &a, Test const &b) { return a.name() < b.name(); });
+	return tests;
+}
+
+//--------------------------------------------------------------------
+// Compiling and running Myca code
+//--------------------------------------------------------------------
 enum class Outcome
 {
 	SUCCESS,
 	FAILURE,
 };
 
-struct CompilationStep
+// The expected result of compiling the test
+struct CompilationSpec
 {
 	Outcome expected_outcome;
 	optional<string> expected_output;
 };
 
-struct ExecutionStep
-{
-	int expected_return_code;
-};
-
+// The actual result of compilation
 struct CompilationResult
 {
 	std::unique_ptr<char[]> mem;
@@ -74,75 +169,18 @@ struct CompilationResult
 	string output;
 };
 
-constexpr string_view EXPECTED_PARSER_OUTPUT_FILENAME = "expected_parser_output.txt";
-constexpr string_view EXPECTED_COMPILATION_ERROR_FILENAME = "expected_compilation_error.txt";
-constexpr string_view EXPECTED_RETURN_CODE_FILENAME = "expected_return_code.txt";
-
-static optional<CompilationStep> read_compilation_spec(fs::path const &test_src_dir)
+// The expected result of executing the test
+struct ExecutionSpec
 {
-	optional<string> successful_output;
-	if(fs::exists(test_src_dir / EXPECTED_PARSER_OUTPUT_FILENAME))
-		successful_output = read_file(test_src_dir / EXPECTED_PARSER_OUTPUT_FILENAME);
+	int expected_return_code;
+};
 
-	optional<string> error_output;
-	if(fs::exists(test_src_dir / EXPECTED_COMPILATION_ERROR_FILENAME))
-		error_output = read_file(test_src_dir / EXPECTED_COMPILATION_ERROR_FILENAME);
-
-	if(successful_output and error_output)
-		throw std::runtime_error("Both success and error output specified in test " + test_src_dir.string());
-
-	if(successful_output)
-		return CompilationStep(Outcome::SUCCESS, std::move(*successful_output));
-
-	if(error_output)
-		return CompilationStep(Outcome::FAILURE, std::move(*error_output));
-
-	return nullopt;
-}
-
-static optional<ExecutionStep> read_execution_spec(fs::path const &test_src_dir)
+// The actual result of executing the test
+struct ExecutionResult
 {
-	if(fs::exists(test_src_dir / EXPECTED_RETURN_CODE_FILENAME))
-	{
-		string return_code_string = read_file(test_src_dir / EXPECTED_RETURN_CODE_FILENAME);
-		int return_code = parse_int<int>(trimmed(return_code_string));
-		return ExecutionStep(return_code);
-	}
-
-	return nullopt;
-}
-
-static bool validate_files_in_test_dir(fs::path const &test_src_dir)
-{
-	string_view spec_files[] = {
-		EXPECTED_PARSER_OUTPUT_FILENAME,
-		EXPECTED_COMPILATION_ERROR_FILENAME,
-		EXPECTED_RETURN_CODE_FILENAME,
-		"main.myca",
-	};
-
-	bool has_main = false;
-	bool has_spec_files = false;
-	for(fs::directory_entry const &entry: fs::directory_iterator(test_src_dir))
-	{
-		string filename = entry.path().filename();
-		if(filename == "main.myca")
-			has_main = true;
-		else if(std::ranges::contains(spec_files, filename))
-			has_spec_files = true;
-		else
-		{
-			throw std::runtime_error(
-				"Test " + test_src_dir.string() + " contains invalid file " + filename
-			);
-		}
-	}
-
-	if(not has_main)
-		throw std::runtime_error("Test " + test_src_dir.string() + " is missing a main.myca file");
-
-	return has_spec_files;
-}
+	bool gcc_failed;
+	int test_return_code;
+};
 
 static CompilationResult compile_myca(string_view source, fs::path const &test_build_dir)
 {
@@ -186,15 +224,15 @@ static CompilationResult compile_myca(string_view source, fs::path const &test_b
 	}
 }
 
-static bool check_compilation_step(CompilationStep step, CompilationResult const &result, bool print_success)
+static bool check_compilation(CompilationSpec spec, CompilationResult const &result, bool print_success)
 {
 	if(result.outcome == Outcome::SUCCESS)
 	{
-		if(step.expected_outcome == Outcome::SUCCESS)
+		if(spec.expected_outcome == Outcome::SUCCESS)
 		{
-			if(step.expected_output)
+			if(spec.expected_output)
 			{
-				if(trimmed(*step.expected_output) == trimmed(result.output))
+				if(trimmed(*spec.expected_output) == trimmed(result.output))
 				{
 					if(print_success) std::cout << "ok" << std::endl;
 					return true;
@@ -202,7 +240,7 @@ static bool check_compilation_step(CompilationStep step, CompilationResult const
 
 				std::cout << "ERROR" << std::endl;
 				std::cout << "> Expected output:" << std::endl;
-				std::cout << *step.expected_output << std::endl;
+				std::cout << *spec.expected_output << std::endl;
 				std::cout << "> Actual output:" << std::endl;
 				std::cout << result.output << std::endl;
 				return false;
@@ -218,18 +256,18 @@ static bool check_compilation_step(CompilationStep step, CompilationResult const
 	}
 	else // result.outcome == Outcome::FAILURE
 	{
-		if(step.expected_outcome == Outcome::FAILURE)
+		if(spec.expected_outcome == Outcome::FAILURE)
 		{
-			if(step.expected_output)
+			if(spec.expected_output)
 			{
-				if(trimmed(*step.expected_output) == result.output)
+				if(trimmed(*spec.expected_output) == result.output)
 				{
 					if(print_success) std::cout << "ok" << std::endl;
 					return true;
 				}
 
 				std::cout << "ERROR" << std::endl;
-				std::cout << "> Expected error: " << *step.expected_output << std::endl;
+				std::cout << "> Expected error: " << *spec.expected_output << std::endl;
 				std::cout << "> Actual error:   " << result.output << std::endl;
 				return false;
 			}
@@ -245,10 +283,7 @@ static bool check_compilation_step(CompilationStep step, CompilationResult const
 	}
 }
 
-static bool run_exection_step(
-	ExecutionStep step,
-	fs::path const &test_build_dir
-)
+static ExecutionResult execute_myca(fs::path const &test_build_dir)
 {
 	std::stringstream gcc_cmd;
 	gcc_cmd << "gcc -fsanitize=undefined,address ";
@@ -257,23 +292,112 @@ static bool run_exection_step(
 	int gcc_result = run_cmd(gcc_cmd.str());
 	if(gcc_result != 0)
 	{
+		return ExecutionResult{
+			.gcc_failed = true,
+			.test_return_code = 0,
+		};
+	}
+
+	string main_cmd = test_build_dir / "main";
+	int test_result = run_cmd(main_cmd);
+	return ExecutionResult{
+		.gcc_failed = false,
+		.test_return_code = test_result,
+	};
+}
+
+static bool check_execution(ExecutionSpec spec, ExecutionResult result)
+{
+	if(result.gcc_failed)
+	{
 		std::cout << "ERROR" << std::endl;
 		std::cout << "> C compilation failed" << std::endl;
 		return false;
 	}
 
-	string main_cmd = test_build_dir / "main";
-	int run_result = run_cmd(main_cmd);
-	if(run_result != step.expected_return_code)
+	if(result.test_return_code != spec.expected_return_code)
 	{
 		std::cout << "ERROR" << std::endl;
-		std::cout << "> Expected return code: " << step.expected_return_code << std::endl;
-		std::cout << "> Actual return code: " << run_result << std::endl;
+		std::cout << "> Expected return code: " << spec.expected_return_code << std::endl;
+		std::cout << "> Actual return code: " << result.test_return_code << std::endl;
 		return false;
 	}
 
 	std::cout << "ok" << std::endl;
 	return true;
+}
+
+//--------------------------------------------------------------------
+// Running tests with separate spec files
+//--------------------------------------------------------------------
+constexpr string_view EXPECTED_PARSER_OUTPUT_FILENAME = "expected_parser_output.txt";
+constexpr string_view EXPECTED_COMPILATION_ERROR_FILENAME = "expected_compilation_error.txt";
+constexpr string_view EXPECTED_RETURN_CODE_FILENAME = "expected_return_code.txt";
+
+static optional<CompilationSpec> read_compilation_spec(fs::path const &test_src_dir)
+{
+	optional<string> successful_output;
+	if(fs::exists(test_src_dir / EXPECTED_PARSER_OUTPUT_FILENAME))
+		successful_output = read_file(test_src_dir / EXPECTED_PARSER_OUTPUT_FILENAME);
+
+	optional<string> error_output;
+	if(fs::exists(test_src_dir / EXPECTED_COMPILATION_ERROR_FILENAME))
+		error_output = read_file(test_src_dir / EXPECTED_COMPILATION_ERROR_FILENAME);
+
+	if(successful_output and error_output)
+		throw std::runtime_error("Both success and error output specified in test " + test_src_dir.string());
+
+	if(successful_output)
+		return CompilationSpec(Outcome::SUCCESS, std::move(*successful_output));
+
+	if(error_output)
+		return CompilationSpec(Outcome::FAILURE, std::move(*error_output));
+
+	return nullopt;
+}
+
+static optional<ExecutionSpec> read_execution_spec(fs::path const &test_src_dir)
+{
+	if(fs::exists(test_src_dir / EXPECTED_RETURN_CODE_FILENAME))
+	{
+		string return_code_string = read_file(test_src_dir / EXPECTED_RETURN_CODE_FILENAME);
+		int return_code = parse_int<int>(trimmed(return_code_string));
+		return ExecutionSpec(return_code);
+	}
+
+	return nullopt;
+}
+
+static bool validate_files_in_test_dir(fs::path const &test_src_dir)
+{
+	string_view spec_files[] = {
+		EXPECTED_PARSER_OUTPUT_FILENAME,
+		EXPECTED_COMPILATION_ERROR_FILENAME,
+		EXPECTED_RETURN_CODE_FILENAME,
+		"main.myca",
+	};
+
+	bool has_main = false;
+	bool has_spec_files = false;
+	for(fs::directory_entry const &entry: fs::directory_iterator(test_src_dir))
+	{
+		string filename = entry.path().filename();
+		if(filename == "main.myca")
+			has_main = true;
+		else if(std::ranges::contains(spec_files, filename))
+			has_spec_files = true;
+		else
+		{
+			throw std::runtime_error(
+				"Test " + test_src_dir.string() + " contains invalid file " + filename
+			);
+		}
+	}
+
+	if(not has_main)
+		throw std::runtime_error("Test " + test_src_dir.string() + " is missing a main.myca file");
+
+	return has_spec_files;
 }
 
 static bool run_test_with_spec_files(
@@ -282,37 +406,36 @@ static bool run_test_with_spec_files(
 	fs::path const &test_build_dir
 )
 {
-	optional<CompilationStep> compilation_step = read_compilation_spec(test_src_dir);
-	optional<ExecutionStep> execution_step = read_execution_spec(test_src_dir);
-	if(not compilation_step and not execution_step)
+	bool has_spec_files = validate_files_in_test_dir(test_src_dir);
+	if(not has_spec_files)
+		throw std::runtime_error("Test case "s + test_src_dir.filename() + " is missing spec files");
+
+	optional<CompilationSpec> compilation_spec = read_compilation_spec(test_src_dir);
+	optional<ExecutionSpec> execution_spec = read_execution_spec(test_src_dir);
+
+	if(not compilation_spec and not execution_spec)
 		throw std::runtime_error("No test spec for " + test_src_dir.filename());
 
-	if(compilation_step)
-	{
-		bool print_success = not execution_step;
-		bool ok = check_compilation_step(*compilation_step, compilation_result, print_success);
-		if(not ok) return false;
-	}
-	else
-	{
-		if(compilation_result.outcome != Outcome::SUCCESS)
-		{
-			std::cout << "ERROR" << std::endl;
-			std::cout << "> Compilation failed with error:" << std::endl;
-			std::cout << "> " << compilation_result.output << std::endl;
-			return false;
-		}
-	}
+	if(execution_spec and not compilation_spec)
+		compilation_spec = CompilationSpec{.expected_outcome = Outcome::SUCCESS, .expected_output = nullopt};
 
-	if(execution_step)
+	bool print_success = not execution_spec;
+	bool ok = check_compilation(*compilation_spec, compilation_result, print_success);
+	if(not ok) return false;
+
+	if(execution_spec)
 	{
-		bool ok = run_exection_step(*execution_step, test_build_dir);
+		ExecutionResult execution_result = execute_myca(test_build_dir);
+		bool ok = check_execution(*execution_spec, execution_result);
 		if(not ok) return false;
 	}
 
 	return true;
 }
 
+//--------------------------------------------------------------------
+// Running tests with inline specs
+//--------------------------------------------------------------------
 static void validate_inline_spec(ModuleOptions const &opts)
 {
 	bool expect_error = false;
@@ -372,9 +495,9 @@ static bool run_test_with_inline_spec(
 			return false;
 		}
 
-		ExecutionStep execution_step{.expected_return_code = 0};
+		ExecutionSpec execution_spec{.expected_return_code = 0};
 		if(optional<string_view> return_code_str = opts.try_get(TopLevelTarget(), "return_code"))
-			execution_step.expected_return_code = parse_int<int>(*return_code_str);
+			execution_spec.expected_return_code = parse_int<int>(*return_code_str);
 
 		for(auto const &[target, options]: opts.opts)
 		{
@@ -403,7 +526,8 @@ static bool run_test_with_inline_spec(
 			if(not ok) return false;
 		}
 
-		bool ok = run_exection_step(execution_step, test_build_dir);
+		ExecutionResult execution_result = execute_myca(test_build_dir);
+		bool ok = check_execution(execution_spec, execution_result);
 		if(not ok) return false;
 	}
 	else // Outcome::FAILURE
@@ -416,7 +540,6 @@ static bool run_test_with_inline_spec(
 			std::cout << "> " << compilation_result.output << std::endl;
 			return false;
 		}
-
 		if(compilation_result.output != *expected_error)
 		{
 			std::cout << "ERROR" << std::endl;
@@ -430,102 +553,9 @@ static bool run_test_with_inline_spec(
 	return true;
 }
 
-struct SeparateSpecTest
-{
-	string name;
-	fs::path src_dir;
-};
-
-struct InlineSpecTest
-{
-	string name;
-	string source;
-};
-
-struct Test : variant<SeparateSpecTest, InlineSpecTest>
-{
-	using variant::variant;
-	string const& name() const
-	{
-		return std::visit([](auto const &t) -> string const& { return t.name; }, *this);
-	}
-};
-
-static vector<string_view> split_test_cases(string_view source)
-{
-	vector<string_view> test_case_sources;
-	const char *prev_test_case_end = source.begin();
-	for(string_view line: split_lines(source))
-	{
-		if(line.starts_with("//!---"))
-		{
-			size_t test_case_length = line.begin() - prev_test_case_end;
-			string_view test_case_source(prev_test_case_end, test_case_length);
-			test_case_sources.push_back(test_case_source);
-			prev_test_case_end = line.end();
-		}
-	}
-
-	size_t test_case_length = source.end() - prev_test_case_end;
-	string_view test_case_source(prev_test_case_end, test_case_length);
-	test_case_sources.push_back(test_case_source);
-
-	return test_case_sources;
-}
-
-static optional<string_view> extract_test_case_name(string_view source)
-{
-	Parser parser(source);
-	PrecedingText initial_text = get_preceding_text(TokenIdx(0), parser);
-	vector<Comment> initial_comments = parse_comments(initial_text);
-	OptionSet options;
-	for(Comment const &c: initial_comments)
-	{
-		if(c.kind == CommentKind::SPECIAL and c.target == CommentTarget::NONE)
-			parse_options_from_comment(c, options);
-	}
-
-	return options.try_get("test");
-}
-
-static vector<Test> gather_tests(fs::path const &src_dir)
-{
-	vector<Test> tests;
-	for(fs::directory_entry const &entry: fs::directory_iterator(src_dir))
-	{
-		fs::path test_src_dir = entry.path();
-		if(not fs::is_directory(test_src_dir))
-			continue;
-
-		bool has_spec_files = validate_files_in_test_dir(test_src_dir);
-		if(has_spec_files)
-		{
-			tests.push_back(SeparateSpecTest{
-				.name = test_src_dir.filename(),
-				.src_dir = test_src_dir,
-			});
-		}
-		else
-		{
-			string source = read_file(test_src_dir / "main.myca");
-			for(string_view case_source: split_test_cases(source))
-			{
-				optional<string_view> case_name = extract_test_case_name(case_source);
-				if(not case_name)
-					throw std::runtime_error("Test case in "s + test_src_dir.filename() + " is missing the \"test\" option");
-
-				tests.push_back(InlineSpecTest{
-					.name = test_src_dir.filename() + "." + *case_name,
-					.source = string(case_source),
-				});
-			}
-		}
-	}
-
-	ranges::sort(tests, [](Test const &a, Test const &b) { return a.name() < b.name(); });
-	return tests;
-}
-
+//--------------------------------------------------------------------
+// Putting it all together
+//--------------------------------------------------------------------
 static bool run_test(Test const &test, fs::path const &root_build_dir)
 {
 	std::cout << "Testing " << std::quoted(test.name()) << "... " << std::flush;
@@ -579,7 +609,7 @@ int main(int argc, char *argv[])
 	fs::path build_dir = next_arg(argv);
 	fs::path root_test_dir = project_dir / "tests/integration";
 	fs::path root_test_build_dir = build_dir / "tests/integration";
-	vector<Test> tests = gather_tests(root_test_dir);
+	vector<Test> tests = discover_tests(root_test_dir);
 
 	int num_tests_passed = 0;
 	int num_tests_failed = 0;

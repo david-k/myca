@@ -39,7 +39,7 @@ int main(int, char *argv[])
 	next_arg(argv);
 	while(optional<string_view> arg = next_arg(argv))
 	{
-		if(arg == "-o"sv)
+		if(arg == "-o")
 		{
 			if(optional<string_view> filename = next_arg(argv))
 				arg_output_filename = *filename;
@@ -49,15 +49,15 @@ int main(int, char *argv[])
 				return 1;
 			}
 		}
-		else if(arg == "--print-types"sv)
+		else if(arg == "--print-types")
 		{
 			arg_print_types = true;
 		}
-		else if(arg == "--print-stats"sv)
+		else if(arg == "--print-stats")
 		{
 			arg_print_stats = true;
 		}
-		else if(arg == "--log-file"sv)
+		else if(arg == "--log-file")
 		{
 			if(optional<string_view> filename = next_arg(argv))
 				arg_event_log_filename = *filename;
