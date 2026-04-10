@@ -1,16 +1,5 @@
-#include <algorithm>
-#include <cstdlib>
-#include <exception>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
-#include <cassert>
-#include <optional>
-#include <ranges>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <string_view>
 
 #include "syntax/parser.hpp"
 #include "semantics/module.hpp"
@@ -21,6 +10,7 @@ using std::string;
 using std::string_view;
 using std::optional;
 using std::nullopt;
+
 namespace fs = std::filesystem;
 namespace ranges = std::ranges;
 
@@ -136,7 +126,7 @@ static vector<Test> discover_tests(fs::path const &src_dir)
 		}
 	}
 
-	ranges::sort(tests, [](Test const &a, Test const &b) { return a.name() < b.name(); });
+	ranges::sort(tests, {}, &Test::name);
 	return tests;
 }
 
