@@ -1,5 +1,98 @@
+/*struct Option'T
+{
+    case implicit Some{value: T},
+    case None,
+}
+
+typealias Some'T = Option'(T).Some;
+typealias None'T = Option'(T).None;
+
+proc unwrap_or'T(opt: ?T, fallback: T) -> T
+{
+	match opt
+	{
+		case Some(let value) { return value; }
+		case None { return fallback; }
+	}
+}
+
+struct Result'(TOk, TError)
+{
+	case implicit Ok{value: TOk},
+	case Err{value: TError},
+}
+
+typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
+typealias Err'(TOk, TError) = Result'(TOk, TError).Err;*/
+
+//--------------------------------------------------------------------
+proc main() -> i32
+{
+	// This comment attaches to the let-statement of `a`.
+	let a = 0;
+
+	// For a comment to attach to a target, the target must appear on the line
+	// following the comment. Thus, this comment does *not* attach to `b`.
+
+	let b = 0;
+
+	// Comments on the same line as the target are also supported
+
+	/* I'm attached to `c` */ let c = 0; // I'm as well
+
+	// Comments that appear on successive lines always have the same target.
+	/* This applies even if different comment styles are used. If the rules
+	 * result in successive comments having different targets, the result is
+	 * AMBIGUOUS.
+	 * Thus, the 7 lines of comment are attached to `d`.
+	 */
+	let d = 0;
+
+	// There is one exception to the above rule: Comments that appear on
+	// successive lines but are separated by a semantically signigicant token
+	// may in fact have different targets.
+
+	/* This one attaches to `e` */ let e = 0;
+	// But this one attaches to `f`
+	let f = 0;
+
+	let g = 0; // This is AMBIGUOUS
+	// and so is this
+	let h = 0;
+
+	// (Visually it might seem obvious that the first comment should attach to `g`
+	// and the second one to `h`. However, in the presence of tabs, visual
+	// alignment cannot be determined without knowing the tab width. To
+	// circumvent this problem, we make this case AMBIGUOUS.)
+
+	let i = 0; // these three lines
+	           // all are
+	           // AMBNIGUOUS
+	let j = 0;
+
+	let k = 0; // This one is fine though and attaches to `k`
+	let l = 0; // I attach to `l`
+
+	let m = 0; // These lines
+	// all attach
+	           // to `m`
+	                 // (indentation does not matter)
+
+	let n = 0;
+	// i'm attached to `o`
+	let o = 0;
+
+	let p = 0; /*
+	the attachement of this one
+	is ambiguous */
+	let q = 0;
+
+	let r = 0; /* hi */ /* ho */
+}
+
+
 //struct List:T
-struct List'T
+/*struct List'T
 {
 	value: T,
 	//next: ?'List^T = None,
@@ -36,33 +129,4 @@ proc main() -> i32
 	//}
 
 	return sum;
-}
-
-
-//------------------------------------------------------------------------------
-struct Option'T
-{
-    case implicit Some{value: T},
-    case None,
-}
-
-typealias Some'T = Option'(T).Some;
-typealias None'T = Option'(T).None;
-
-proc unwrap_or'T(opt: ?T, fallback: T) -> T
-{
-	match opt
-	{
-		case Some(let value) { return value; }
-		case None { return fallback; }
-	}
-}
-
-struct Result'(TOk, TError)
-{
-	case implicit Ok{value: TOk},
-	case Err{value: TError},
-}
-
-typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
-typealias Err'(TOk, TError) = Result'(TOk, TError).Err;
+}*/

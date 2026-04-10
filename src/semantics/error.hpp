@@ -43,7 +43,7 @@ inline string mk_error_msg(string const &msg, TokenIdx tok_idx, Module const *mo
 	if(tok_idx.value == INVALID_TOKEN_IDX.value)
 		return "error: " + msg;
 
-	Token const &tok = mod->parser.token_at(tok_idx);
+	Token tok = mod->parser.token_at(tok_idx);
 	return "|" + str(tok.span.begin) + "| error: " + msg;
 }
 

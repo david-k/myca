@@ -1,5 +1,10 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
+#include <filesystem>
+#include <fstream>
+#include <generator>
 #include <initializer_list>
 #include <iterator>
 #include <ranges>
@@ -7,12 +12,18 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
-#include <cassert>
-#include <unordered_map>
-#include <generator>
 #include <vector>
+
+using std::vector;
+using std::string;
+using std::string_view;
+using std::variant;
+using std::unordered_map;
+using std::pair;
+using namespace std::string_literals;
 
 #define NULLABLE
 
@@ -25,17 +36,9 @@
 #define UNREACHABLE assert(!"unreachable")
 #define TODO(MSG) throw std::runtime_error("TODO: "s + (MSG))
 
-using std::vector;
-using std::string;
-using std::string_view;
-using std::variant;
-using std::unordered_map;
-using namespace std::string_literals;
-
-
-//==============================================================================
-// Memory management
-//==============================================================================
+//--------------------------------------------------------------------
+// Arena
+//--------------------------------------------------------------------
 // Adapted from https://nullprogram.com/blog/2023/09/27/
 class Arena
 {
@@ -93,9 +96,9 @@ struct Memory
 };
 
 
-//==============================================================================
-// Strings and output formatting
-//==============================================================================
+//--------------------------------------------------------------------
+// Misc
+//--------------------------------------------------------------------
 // Why is this not part of the standard library?
 inline string operator + (string str, string_view view)
 {
@@ -107,6 +110,150 @@ inline string operator + (string_view view, string str)
 {
 	str.insert(str.begin(), view.begin(), view.end());
 	return str;
+}
+
+// Locale-independent versions of std::isalpha etc
+inline bool is_alphabetic(char ch)
+{
+	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+}
+inline bool is_digit(char ch)
+{
+	return ch >= '0' && ch <= '9';
+}
+inline bool is_whitespace(char ch)
+{
+	return ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r';
+}
+
+inline void ltrim(string_view &str)
+{
+	while(str.length() and is_whitespace(str.front()))
+		str.remove_prefix(1);
+}
+
+inline void rtrim(string_view &str)
+{
+	while(str.length() and is_whitespace(str.back()))
+		str.remove_suffix(1);
+}
+
+inline void trim(string_view &str)
+{
+	ltrim(str);
+	rtrim(str);
+}
+
+inline string_view trimmed(string_view str)
+{
+	trim(str);
+	return str;
+}
+
+inline std::generator<string_view> split_lines(string_view text)
+{
+	while(not text.empty())
+	{
+		size_t line_end = text.find('\n');
+		if(line_end != string_view::npos)
+			line_end += 1; // include \n
+
+		string_view line = text.substr(0, line_end);
+		text.remove_prefix(line.length());
+		co_yield line;
+	}
+}
+
+inline bool remove_prefix_if(string_view &text, string_view prefix)
+{
+	if(text.starts_with(prefix))
+	{
+		text.remove_prefix(prefix.length());
+		return true;
+	}
+	return false;
+}
+
+inline bool is_whitespace(string_view str)
+{
+	return std::ranges::all_of(str, [](char c){ return is_whitespace(c);});
+}
+
+inline string read_file(std::filesystem::path const &path)
+{
+	std::ifstream f(path);
+	if(not f)
+		throw std::runtime_error("Opening file failed: " + path.string());
+
+	std::stringstream ss;
+	f >> ss.rdbuf();
+	return std::move(ss).str();
+}
+
+template<typename T>
+T parse_int(string_view s)
+{
+	T num;
+	std::from_chars_result result = std::from_chars(s.begin(), s.end(), num);
+	if(result.ec != std::errc())
+		throw std::runtime_error("Conversion to integer failed");
+	if(result.ptr != s.end())
+		throw std::runtime_error("Conversion to integer failed: invalid trailing characters");
+
+	return num;
+}
+
+// According to https://stackoverflow.com/a/50978188/3491462 this is not how
+// Boost does it anymore but it will do for now.
+inline void combine_hashes(size_t &seed, size_t hash)
+{
+    seed ^= hash + 0x9e3779b9 + (seed<<6) + (seed>>2);
+}
+
+template<typename T>
+inline size_t compute_hash(T const &t)
+{
+	return std::hash<T>()(t);
+}
+
+// The following is taken from https://github.com/AVasK/vx to make std::visit
+// more ergonomic.
+//
+// Example:
+//
+//     std::variant<int, float> var;
+//     var | match
+//     {
+//         [](int i) { ... },
+//         [](float f) { ... },
+//     };
+template<class... Ts>
+struct match : Ts...  {
+	using Ts::operator()...;
+};
+
+// explicit deduction guide (not needed as of C++20)
+template<class... Ts>
+match(Ts...) -> match<Ts...>;
+
+template <typename T, typename... Fs>
+constexpr decltype(auto) operator | (T const &v, match<Fs...> const &match)
+{
+	using std::visit;
+    return visit(match, v);
+}
+
+template <typename T, typename... Fs>
+constexpr decltype(auto) operator | (T &v, match<Fs...> const &match)
+{
+	using std::visit;
+    return visit(match, v);
+}
+
+template<typename T, typename ...Ss>
+bool is(variant<Ss...> const &v)
+{
+	return std::holds_alternative<T>(v);
 }
 
 template<typename RangeT, typename FuncT = std::identity>
@@ -151,86 +298,11 @@ inline std::ostream& operator << (std::ostream &os, RangeFmt<RangeT, FuncT> cons
 	return os;
 }
 
-
-//==============================================================================
-// Variant matching
-//==============================================================================
-// The following is taken from https://github.com/AVasK/vx to make std::visit
-// more ergonomic.
-//
-// Example:
-//
-//     std::variant<int, float> var;
-//     var | match
-//     {
-//         [](int i) { ... },
-//         [](float f) { ... },
-//     };
-template<class... Ts>
-struct match : Ts...  {
-	using Ts::operator()...;
-};
-
-// explicit deduction guide (not needed as of C++20)
-template<class... Ts>
-match(Ts...) -> match<Ts...>;
-
-template <typename T, typename... Fs>
-constexpr decltype(auto) operator | (T const &v, match<Fs...> const &match)
-{
-	using std::visit;
-    return visit(match, v);
-}
-
-template <typename T, typename... Fs>
-constexpr decltype(auto) operator | (T &v, match<Fs...> const &match)
-{
-	using std::visit;
-    return visit(match, v);
-}
-
-template<typename T, typename ...Ss>
-bool is(variant<Ss...> const &v)
-{
-	return std::holds_alternative<T>(v);
-}
-
-
-//==============================================================================
+//--------------------------------------------------------------------
 // Ranges/containers
-//==============================================================================
-
+//--------------------------------------------------------------------
 // Segment arrays seem useful: https://danielchasehooper.com/posts/segment_array/
 // (dynamic array with stable pointers, can be used with arena allocators)
-
-// A simple pair of iterators
-template<typename It>
-struct Range
-{
-	using reference = typename std::iterator_traits<It>::reference;
-
-	It first;
-	It last;
-
-	reference operator [] (size_t idx) { return *(first + idx); }
-	reference const operator [] (size_t idx) const { return *(first + idx); }
-
-	size_t size() const { return last - first; }
-};
-
-template<typename It>
-inline It begin(Range<It> r) { return r.first; }
-
-template<typename It>
-inline It end(Range<It> r) { return r.last; }
-
-
-template<typename RangeT>
-decltype(auto) reversed(RangeT const &r)
-{
-	return Range{r.rbegin(), r.rend()};
-}
-
 
 // Disable warning to allow flexible array members.
 // Unfortunately, it seems there is no specific warning flag for flexible array members, so we
@@ -257,13 +329,13 @@ struct FixedArray
 		return items[0];
 	}
 
-	Range<T*> tail()
+	std::ranges::subrange<T*> tail()
 	{
 		assert(count > 0);
 		return {items + 1, items + count};
 	}
 
-	Range<T const*> tail() const
+	std::ranges::subrange<T const*> tail() const
 	{
 		assert(count > 0);
 		return {items + 1, items + count};
@@ -390,9 +462,9 @@ using UnorderedStringMap = unordered_map<
 >;
 
 
-//==============================================================================
+//--------------------------------------------------------------------
 // Int128
-//==============================================================================
+//--------------------------------------------------------------------
 using Int128 = __int128_t;
 
 inline std::ostream& operator << (std::ostream &os, Int128 value)
@@ -424,27 +496,9 @@ inline string str(Int128 xint)
 	return std::move(ss).str();
 }
 
-
-//==============================================================================
-// Hashing
-//==============================================================================
-// According to https://stackoverflow.com/a/50978188/3491462 this is not how
-// Boost does it anymore but it will do for now.
-inline void combine_hashes(size_t &seed, size_t hash)
-{
-    seed ^= hash + 0x9e3779b9 + (seed<<6) + (seed>>2);
-}
-
-template<typename T>
-inline size_t compute_hash(T const &t)
-{
-	return std::hash<T>()(t);
-}
-
-
-//==============================================================================
+//--------------------------------------------------------------------
 // Simple table renderer for the terminal
-//==============================================================================
+//--------------------------------------------------------------------
 struct TTable
 {
 	struct Style

@@ -1,5 +1,0 @@
-proc uninitialized'T() -> T {}
-proc main() -> i32
-{
-	let arr: [0]i32 = uninitialized();
-}

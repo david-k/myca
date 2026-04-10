@@ -104,6 +104,7 @@ static_assert(sizeof(Token) == 56);
 
 struct TokenIdx { uint32_t value; };
 inline constexpr TokenIdx INVALID_TOKEN_IDX = TokenIdx(-1);
+inline TokenIdx operator + (TokenIdx idx, uint32_t offset) { return TokenIdx(idx.value + offset); }
 
 struct TokenRange { TokenIdx first{}, last{}; };
 inline constexpr TokenRange UNKNOWN_TOKEN_RANGE = TokenRange(INVALID_TOKEN_IDX, INVALID_TOKEN_IDX);
@@ -160,6 +161,14 @@ public:
 		return m_source[m_byte_pos];
 	}
 
+	optional<char> peek(size_t offset = 0) const
+	{
+		if(m_byte_pos + offset < m_source.length())
+			return m_source[m_byte_pos + offset];
+
+		return nullopt;
+	}
+
 	SourceLocation location() const
 	{
 		return SourceLocation{
@@ -203,10 +212,38 @@ private:
 
 void consume(Lexer &lexer, string_view expected_str);
 bool try_consume(Lexer &lexer, string_view expected_str);
-
 void skip_whitespace(Lexer &lexer);
-bool skip_comment(Lexer &lexer);
 void skip_whitespace_and_comments(Lexer &lexer);
+
+enum class CommentStyle
+{
+	LINE,
+	BLOCK,
+};
+enum class CommentKind
+{
+	NORMAL,
+	DOC,
+	SPECIAL,
+};
+// Wether a comment is attached to the next or previous token, if at all
+enum class CommentTarget
+{
+	NONE,
+	PREVIOUS_TOKEN,
+	NEXT_TOKEN,
+	AMBIGUOUS,
+};
+struct Comment
+{
+	SourceLocation start_loc; // Location of the start of the comment marker ("//" or "/*")
+	SourceLocation end_loc; // Location of the end of the comment ("\n" or the end of "*/")
+	string_view text; // Comment text without comment markers
+	CommentStyle style;
+	CommentKind kind;
+	optional<CommentTarget> target; // Needs to be computed separately
+};
+optional<Comment> try_read_comment(Lexer &lexer);
 
 optional<string_view> try_read_identifier(Lexer &lexer);
 optional<string_view> try_read_number(Lexer &lexer);

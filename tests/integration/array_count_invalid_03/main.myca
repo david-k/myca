@@ -1,1 +1,0 @@
-typealias U = i32 | [-1]i32;

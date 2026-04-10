@@ -98,6 +98,8 @@ struct DeclContainerInst : variant<StructInstance*, ProcInstance*>
 
 	TypeArgList const& type_args() const;
 	optional<DeclContainerInst> decl_parent() const;
+
+	size_t hash();
 };
 
 class Callable
@@ -197,6 +199,8 @@ public:
 		return this;
 	}
 
+	size_t hash();
+
 	virtual void typecheck_generic_args(ConstraintGatheringSubst &subst, SemaContext &ctx);
 
 	size_t id() const { return m_id; }
@@ -264,6 +268,7 @@ private:
 	optional<DeclContainerInst> m_decl_parent;
 	size_t m_id;
 	bool m_finalized = false;
+	optional<size_t> m_hash{};
 
 	// Dependent properties (those that depend on `m_type_args`).
 	// Lazily computed by compute_dependent_properties().
@@ -349,6 +354,8 @@ public:
 	bool is_deduction_complete() const { return not m_type_args.has_type_deduction_vars and not m_type_args.has_known_ints; }
 	ProcInstanceKey key() { return ProcInstanceKey(m_proc, m_type_args.args); }
 
+	size_t hash();
+
 	Type* get_type()
 	{
 		if(not m_type)
@@ -381,6 +388,7 @@ private:
 	InstanceRegistry *m_registry;
 	ProcItem const *m_proc;
 	TypeArgList m_type_args;
+	optional<size_t> m_hash;
 
 	bool m_generic_args_typechecked = false;
 

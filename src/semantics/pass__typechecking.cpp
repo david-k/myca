@@ -1029,12 +1029,20 @@ void solve_and_check(ConstraintSolver &solver, std::initializer_list<ApplyTarget
 		{
 			[&](Type *type)
 			{
-				substitute_in_type(*type, env, solver.ctx().mod->sema->insts, {SubstitutionMode::FULL_DEDUCTION, type->token_range()});
+				substitute_in_type(*type, env, solver.ctx().mod->sema->insts, {
+					SubstitutionPhase::DEDUCTION,
+					SubstitutionMode::FULL,
+					type->token_range()
+				});
 				DeferredTypechecker{solver.ctx()}(*type);
 			},
 			[&](Expr *expr)
 			{
-				substitute_in_expr(*expr, env, solver.ctx().mod->sema->insts, {SubstitutionMode::FULL_DEDUCTION, expr->token_range()});
+				substitute_in_expr(*expr, env, solver.ctx().mod->sema->insts, {
+					SubstitutionPhase::DEDUCTION,
+					SubstitutionMode::FULL,
+					expr->token_range()
+				});
 				DeferredTypechecker{solver.ctx()}(*expr);
 			},
 			[&](std::pair<Pattern*, Expr const*> p)
@@ -1043,7 +1051,11 @@ void solve_and_check(ConstraintSolver &solver, std::initializer_list<ApplyTarget
 				Expr const *rhs_expr = p.second;
 				optional<IsMutable> rhs_mutability = lvalue_mutability(*rhs_expr);
 
-				substitute_in_pattern(*pattern, env, solver.ctx().mod->sema->insts, {SubstitutionMode::FULL_DEDUCTION, pattern->token_range()});
+				substitute_in_pattern(*pattern, env, solver.ctx().mod->sema->insts, {
+					SubstitutionPhase::DEDUCTION,
+					SubstitutionMode::FULL,
+					pattern->token_range()
+				});
 				DeferredTypechecker{solver.ctx(), rhs_mutability}(*pattern);
 			},
 		};

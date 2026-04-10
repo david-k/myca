@@ -14,22 +14,22 @@ typealias Ok'(TOk, TError) = Result'(TOk, TError).Ok;
 
 typealias Err'(TOk, TError) = Result'(TOk, TError).Err;
 
-typealias ArithError = DivisionByZero | Overflow;
+typealias ArithError = Overflow | DivisionByZero;
 
 typealias IOError = FileNotFound | NoPermission;
 
-typealias Error = DivisionByZero | Overflow | FileNotFound | NoPermission;
+typealias Error = FileNotFound | Overflow | NoPermission | DivisionByZero;
 
-proc safe_div(a: i32, b: i32) -> Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission)
+proc safe_div(a: i32, b: i32) -> Result'(i32, FileNotFound | Overflow | NoPermission | DivisionByZero)
 {
     if (b == 0)
     {
-        return Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Err($InitUnion'(DivisionByZero | Overflow | FileNotFound | NoPermission)(DivisionByZero()));
+        return Result'(i32, FileNotFound | Overflow | NoPermission | DivisionByZero).Err($InitUnion'(FileNotFound | Overflow | NoPermission | DivisionByZero)(DivisionByZero()));
     }
-    return Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Ok((a / b));
+    return Result'(i32, FileNotFound | Overflow | NoPermission | DivisionByZero).Ok((a / b));
 }
 
-proc get_error_code(err: DivisionByZero | Overflow | FileNotFound | NoPermission) -> i32
+proc get_error_code(err: FileNotFound | Overflow | NoPermission | DivisionByZero) -> i32
 {
     match err
     {
@@ -57,22 +57,22 @@ proc main() -> i32
     let mut result: i32 = 0;
     match safe_div(12, 3)
     {
-        case Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Ok(v: i32)
+        case Result'(i32, FileNotFound | Overflow | NoPermission | DivisionByZero).Ok(v: i32)
         {
             (result = (result + v));
         }
-        case Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Err(err: DivisionByZero | Overflow | FileNotFound | NoPermission)
+        case Result'(i32, FileNotFound | Overflow | NoPermission | DivisionByZero).Err(err: FileNotFound | Overflow | NoPermission | DivisionByZero)
         {
             (result = (result + get_error_code(err)));
         }
     }
     match safe_div(7, 0)
     {
-        case Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Ok(v: i32)
+        case Result'(i32, FileNotFound | Overflow | NoPermission | DivisionByZero).Ok(v: i32)
         {
             (result = (result + v));
         }
-        case Result'(i32, DivisionByZero | Overflow | FileNotFound | NoPermission).Err(err: DivisionByZero | Overflow | FileNotFound | NoPermission)
+        case Result'(i32, FileNotFound | Overflow | NoPermission | DivisionByZero).Err(err: FileNotFound | Overflow | NoPermission | DivisionByZero)
         {
             (result = (result + get_error_code(err)));
         }

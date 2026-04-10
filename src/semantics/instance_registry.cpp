@@ -220,9 +220,29 @@ Scope* DeclContainerInst::scope() const
 	};
 }
 
+size_t DeclContainerInst::hash()
+{
+	return std::visit([](auto *inst) { return inst->hash(); }, *this);
+}
+
 //--------------------------------------------------------------------
 // StructInstance
 //--------------------------------------------------------------------
+size_t StructInstance::hash()
+{
+	if(not m_hash)
+	{
+		m_hash = 0;
+		if(m_decl_parent)
+			combine_hashes(*m_hash, m_decl_parent->hash());
+
+		combine_hashes(*m_hash, compute_hash(m_struct->name));
+		combine_hashes(*m_hash, compute_hash(*m_type_args.args));
+	}
+
+	return *m_hash;
+}
+
 int StructInstance::variant_depth() const
 {
 	return m_struct->sema->variant_depth;
@@ -370,7 +390,10 @@ void StructInstance::compute_dependent_properties()
 					.default_value = var_member.var.default_value ?
 						DefaultValueExpr(ExprPending()) : DefaultValueExpr(NoDefaultValue()),
 				};
-				substitute_in_type(*inst_var_member.type, env, *m_registry, {.mode = SubstitutionMode::BEST_EFFORT});
+				substitute_in_type(*inst_var_member.type, env, *m_registry, {
+					SubstitutionPhase::INSTANTIATION,
+					SubstitutionMode::BEST_EFFORT
+				});
 
 				new (m_members->items+member_idx) InstanceMember(inst_var_member);
 				member_idx += 1;
@@ -524,7 +547,10 @@ void StructInstance::finalize_typechecking()
 			if(Expr *default_value = var_member->var.default_value.try_get_expr())
 			{
 				default_value = clone_ptr(default_value, m_registry->arena());
-				substitute_in_expr(*default_value, env, *m_registry, {.mode = SubstitutionMode::BEST_EFFORT});
+				substitute_in_expr(*default_value, env, *m_registry, {
+					SubstitutionPhase::INSTANTIATION,
+					SubstitutionMode::BEST_EFFORT
+				});
 				inst_var_member.default_value = default_value;
 			}
 		}
@@ -718,12 +744,12 @@ static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRe
 	for(auto const &[idx, param]: *proc->params | std::views::enumerate)
 	{
 		Type param_type = clone(*param.type, instances.arena());
-		substitute_in_type(param_type, env, instances, {.mode = SubstitutionMode::BEST_EFFORT});
+		substitute_in_type(param_type, env, instances, {SubstitutionPhase::INSTANTIATION, SubstitutionMode::BEST_EFFORT});
 		ctor_params->items[idx] = param_type;
 	}
 
 	Type *new_ret = clone_ptr(proc->ret_type, instances.arena());
-	substitute_in_type(*new_ret, env, instances, {.mode = SubstitutionMode::BEST_EFFORT});
+	substitute_in_type(*new_ret, env, instances, {SubstitutionPhase::INSTANTIATION, SubstitutionMode::BEST_EFFORT});
 
 	ProcTypeInstance *proc_type_inst = instances.get_proc_type_instance(ctor_params, new_ret);
 	return instances.arena().alloc<Type>(ProcType{
@@ -731,6 +757,17 @@ static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRe
 		.inst = proc_type_inst,
 		.callable = inst,
 	});
+}
+
+size_t ProcInstance::hash()
+{
+	if(not m_hash)
+	{
+		m_hash = compute_hash(m_proc->name);
+		combine_hashes(*m_hash, compute_hash(*m_type_args.args));
+	}
+
+	return *m_hash;
 }
 
 TypeEnv ProcInstance::create_type_env() const

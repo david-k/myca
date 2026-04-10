@@ -35,18 +35,27 @@ add_library(myca-common OBJECT
 	src/semantics/well_formed_term_set.cpp
 )
 target_include_directories(myca-common PUBLIC src)
+target_precompile_headers(myca-common PUBLIC src/utils.hpp)
 
 add_executable(myca src/main.cpp $<TARGET_OBJECTS:myca-common>)
 target_include_directories(myca PUBLIC src)
 
-add_executable(unit_tests tests/unit.cpp $<TARGET_OBJECTS:myca-common>)
+add_executable(unit_tests
+	tests/unit/runner.cpp
+	tests/unit/test_constraints.cpp
+	tests/unit/test_comments.cpp
+	$<TARGET_OBJECTS:myca-common>
+)
 target_include_directories(unit_tests PUBLIC src)
 
+add_executable(integration_tests tests/integration/runner.cpp $<TARGET_OBJECTS:myca-common>)
+target_include_directories(integration_tests PUBLIC src)
+
 # Custom targets for running tests
-add_custom_target(run-integration-tests
-	python ${CMAKE_SOURCE_DIR}/tests/integration/runner.py ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}
-)
 add_custom_target(run-unit-tests $<TARGET_FILE:unit_tests>)
+add_custom_target(run-integration-tests
+	$<TARGET_FILE:integration_tests> ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}
+)
 
 add_custom_target(run-tests)
 add_dependencies(run-tests run-unit-tests)

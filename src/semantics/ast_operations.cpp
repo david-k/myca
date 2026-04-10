@@ -4,6 +4,9 @@
 #include "semantics/error.hpp"
 #include "semantics/module.hpp"
 #include "semantics/type_properties.hpp"
+#include <ostream>
+
+namespace ranges = std::ranges;
 
 //--------------------------------------------------------------------
 // Equality
@@ -307,9 +310,7 @@ bool operator < (Type const &a, Type const &b)
 		[&](StructType const &ta)
 		{
 			StructType const &tb = std::get<StructType>(b);
-
-			// TODO Use something other than pointers to make comparison deterministic
-			return ta.inst < tb.inst;
+			return ta.inst->hash() < tb.inst->hash();
 		},
 		[&](ProcType const &ta)
 		{
@@ -447,13 +448,21 @@ size_t std::hash<Expr>::operator () (Expr const &expr) const
 
 size_t std::hash<GenericArg>::operator () (GenericArg const &arg) const
 {
-	size_t h = 0;
-	combine_hashes(h, compute_hash(arg.index()));
+	size_t h = compute_hash(arg.index());
 	arg | match
 	{
 		[&](Type const &t) { combine_hashes(h, compute_hash(t)); },
 		[&](Expr const &e) { combine_hashes(h, compute_hash(e)); },
 	};
+
+	return h;
+}
+
+size_t std::hash<FixedArray<GenericArg>>::operator () (FixedArray<GenericArg> const &args) const
+{
+	size_t h = compute_hash(args.count);
+	for(GenericArg const &arg: args)
+		combine_hashes(h, compute_hash(arg));
 
 	return h;
 }
@@ -1154,6 +1163,13 @@ string str(Expr const &expr, Module const &mod)
 {
 	std::stringstream ss;
 	print(expr, mod, ss);
+	return std::move(ss).str();
+}
+
+string str(Stmt const &stmt, Module const &mod)
+{
+	std::stringstream ss;
+	print(stmt, mod, ss);
 	return std::move(ss).str();
 }
 
@@ -1973,5 +1989,175 @@ void const_eval(Expr &expr, Module const &mod)
 		{
 			throw_sem_error("Expected constant expression", e.range.first, &mod);
 		}
+	};
+}
+
+//--------------------------------------------------------------------
+// Special option comments
+//--------------------------------------------------------------------
+class OptionGatherer
+{
+public:
+	explicit OptionGatherer(Module const &mod) :
+		m_mod(&mod)
+	{
+		process_tokens_until_before(TokenIdx(1));
+		for(TopLevelItem const &item: to_range(m_mod->items.list()))
+		{
+			if(ProcItem const *proc = std::get_if<ProcItem>(&item))
+			{
+				if(proc->body)
+					stmt_visit(*proc->body, *this);
+			}
+		}
+		process_tokens_until_before(TokenIdx(m_mod->parser.token_count()));
+	}
+
+	void operator () (Stmt const &stmt)
+	{
+		TokenIdx first_token_idx = stmt.token_range().first;
+		process_tokens_until_before(first_token_idx);
+
+		PrecedingText preceding_text = get_preceding_text(first_token_idx, m_mod->parser);
+		for(Comment const &c: parse_comments(preceding_text))
+			process_comment(c, &stmt);
+
+		m_next_token_to_process = first_token_idx + 1;
+		stmt_visit_children(stmt, *this);
+
+		process_tokens_until_before(stmt.token_range().last + 1);
+		m_previous_target = &stmt;
+	}
+
+	ModuleOptions&& release()
+	{
+		return std::move(m_option_sets);
+	}
+
+private:
+	void process_tokens_until_before(TokenIdx end_idx)
+	{
+		while(m_next_token_to_process.value < end_idx.value)
+		{
+			PrecedingText text = get_preceding_text(m_next_token_to_process, m_mod->parser);
+			for(Comment const &c: parse_comments(text))
+				process_comment(c, nullopt);
+
+			m_next_token_to_process.value += 1;
+			m_previous_target = nullopt;
+		}
+	}
+
+	void process_comment(Comment const &comment, optional<OptionTarget> next_target)
+	{
+		assert(comment.target);
+		if(comment.kind != CommentKind::SPECIAL)
+			return;
+
+		switch(*comment.target)
+		{
+			case CommentTarget::NONE:
+			{
+				if(not m_accept_global_options)
+					throw std::runtime_error("Global options must appear at the beginning of the file");
+
+				add_options_to_target(comment, TopLevelTarget());
+			} break;
+
+			case CommentTarget::PREVIOUS_TOKEN:
+			{
+				if(not m_previous_target)
+					throw std::runtime_error("Option has no target");
+
+				add_options_to_target(comment, *m_previous_target);
+			} break;
+
+			case CommentTarget::NEXT_TOKEN:
+			{
+				if(not next_target)
+					throw std::runtime_error("Option has no target");
+
+				add_options_to_target(comment, *next_target);
+			} break;
+
+			case CommentTarget::AMBIGUOUS:
+				throw std::runtime_error("Option target is ambiguous");
+		}
+	}
+
+	void add_options_to_target(Comment const &comment, OptionTarget target)
+	{
+		OptionSet &options = m_option_sets.opts[target];
+		parse_options_from_comment(comment, options);
+		if(options.opts.empty())
+			m_option_sets.opts.erase(target);
+	}
+
+	Module const *m_mod;
+	ModuleOptions m_option_sets;
+	bool m_accept_global_options = true;
+	optional<OptionTarget> m_previous_target;
+	TokenIdx m_next_token_to_process{0};
+};
+
+ModuleOptions gather_options(Module const &mod)
+{
+	OptionGatherer gatherer(mod);
+	return gatherer.release();
+}
+
+void print_options(OptionSet const &options, std::ostream &os)
+{
+	vector<string_view> keys;
+	keys.append_range(ranges::views::keys(options.opts));
+	ranges::sort(keys);
+
+	for(string_view key: keys)
+		os << key << ": " << options.opts.at(key) << std::endl;
+}
+
+string str(OptionTarget target)
+{
+	return target | match
+	{
+		[&](TopLevelTarget) { return "TopLevel"s; },
+		[&](Stmt const *stmt)
+		{
+			return *stmt | match
+			{
+				[&](LetStmt const&)
+				{
+					return "LetStmt"s;
+				},
+				[&](ExprStmt const&)
+				{
+					return "ExprStmt"s;
+				},
+				[&](BlockStmt const&)
+				{
+					return "BlockStmt"s;
+				},
+				[&](ReturnStmt const&)
+				{
+					return "ReturnStmt"s;
+				},
+				[&](IfStmt const&)
+				{
+					return "IfStmt"s;
+				},
+				[&](WhileStmt const&)
+				{
+					return "WhileStmt"s;
+				},
+				[&](MatchStmt const&)
+				{
+					return "MatchStmt"s;
+				},
+				[&](DeclStmt const&)
+				{
+					return "DeclStmt"s;
+				}
+			};
+		},
 	};
 }

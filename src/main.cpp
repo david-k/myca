@@ -3,13 +3,15 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sstream>
 
+#include "codegen/c_backend.hpp"
+#include "semantics/ast_traversal.hpp"
 #include "semantics/module.hpp"
 #include "semantics/passes.hpp"
-#include "codegen/c_backend.hpp"
 
 using std::string;
 using std::string_view;
@@ -21,7 +23,10 @@ using namespace std::string_view_literals;
 constexpr size_t MAX_MEMORY      = 50 * 1024*1024;
 constexpr size_t MAX_TEMP_MEMORY = 50 * 1024*1024;
 
-#define NEXT(args) (*++args)
+static optional<string_view> next_arg(char** &argv)
+{
+	return *argv ? optional(*argv++) : nullopt;
+}
 
 int main(int, char *argv[])
 {
@@ -31,33 +36,36 @@ int main(int, char *argv[])
 	bool arg_print_types = false;
 	bool arg_print_stats = false;
 
-	while(NEXT(argv))
+	next_arg(argv);
+	while(optional<string_view> arg = next_arg(argv))
 	{
-		if(*argv == "-o"sv)
+		if(arg == "-o"sv)
 		{
-			if(!NEXT(argv))
+			if(optional<string_view> filename = next_arg(argv))
+				arg_output_filename = *filename;
+			else
 			{
 				std::cerr << "Error: expected output filename" << std::endl;
 				return 1;
 			}
-			arg_output_filename = *argv;
 		}
-		else if(*argv == "--print-types"sv)
+		else if(arg == "--print-types"sv)
 		{
 			arg_print_types = true;
 		}
-		else if(*argv == "--print-stats"sv)
+		else if(arg == "--print-stats"sv)
 		{
 			arg_print_stats = true;
 		}
-		else if(*argv == "--log-file"sv)
+		else if(arg == "--log-file"sv)
 		{
-			if(!NEXT(argv))
+			if(optional<string_view> filename = next_arg(argv))
+				arg_event_log_filename = *filename;
+			else
 			{
 				std::cerr << "Error: expected event log filename" << std::endl;
 				return 1;
 			}
-			arg_event_log_filename = *argv;
 		}
 		else
 		{
@@ -65,7 +73,7 @@ int main(int, char *argv[])
 				std::cerr << "Error: input file already provided" << std::endl;
 				return 1;
 			}
-			arg_input_filename = *argv;
+			arg_input_filename = *arg;
 		}
 	}
 

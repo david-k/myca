@@ -103,7 +103,10 @@ std::expected<GenericArg, ErrorMsg> follow_arg(
 	};
 
 	if(result and env)
-		substitute_in_generic_arg(*result, *env, ctx->mod->sema->insts, {.mode = SubstitutionMode::BEST_EFFORT});
+		substitute_in_generic_arg(*result, *env, ctx->mod->sema->insts, {
+			SubstitutionPhase::DEDUCTION,
+			SubstitutionMode::BEST_EFFORT
+		});
 
 	return result;
 }

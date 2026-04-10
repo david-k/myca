@@ -82,29 +82,15 @@ string_view str(Lexeme tok)
 	UNREACHABLE;
 }
 
-
-// Locale-independent versions of std::isalpha etc
-
-static bool is_alphabetic(char ch)
-{
-	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
-}
-
-static bool is_digit(char ch)
-{
-	return ch >= '0' && ch <= '9';
-}
-
-static bool is_whitespace(char ch)
-{
-	return ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r';
-}
-
-
 void consume(Lexer &lexer, string_view expected_str)
 {
 	if(not try_consume(lexer, expected_str))
-		throw LexingError("Unexpected input");
+	{
+		if(optional<char> ch = lexer.peek())
+			throw LexingError("Expected \""s + expected_str + "\", got \"" + *ch + "\"");
+		else
+			throw LexingError("Expected \""s + expected_str + "\", got EOF");
+	}
 }
 
 bool try_consume(Lexer &lexer, string_view expected_str)
@@ -127,39 +113,110 @@ void skip_whitespace(Lexer &lexer)
 		lexer.advance();
 }
 
-bool skip_comment(Lexer &lexer)
+static size_t comment_start_marker_length(CommentKind kind)
 {
-	if(try_consume(lexer, "/*"))
+	switch(kind)
 	{
-		while(lexer.has_more())
-		{
-			if(try_consume(lexer, "*/"))
-				return true;
-
-			lexer.advance();
-		}
-
-		throw LexingError{"Unclosed multi-line comment"};
+		case CommentKind::NORMAL: return 2;  // "//" or "/*"
+		case CommentKind::DOC: return 3;     // "///" or "/**"
+		case CommentKind::SPECIAL: return 3; // "//!" or "/*!"
 	}
 
-	if(try_consume(lexer, "//"))
-	{
-		while(lexer.has_more())
-		{
-			if(try_consume(lexer, "\n"))
-				return true;
+	UNREACHABLE;
+}
 
-			lexer.advance();
+static optional<Comment> try_read_block_comment(Lexer &lexer)
+{
+	SourceLocation comment_start = lexer.location();
+	if(not try_consume(lexer, "/*"))
+		return nullopt;
+
+	// Determine the kind of comment (NORMAL, DOC, SPECIAL)
+	CommentKind kind = CommentKind::NORMAL;
+	if(lexer.peek() == '*' and lexer.peek(1) != '/')
+	{
+		kind = CommentKind::DOC;
+		lexer.advance();
+	}
+	else if(try_consume(lexer, "!"))
+		kind = CommentKind::SPECIAL;
+
+	while(lexer.has_more())
+	{
+		if(try_consume(lexer, "*/"))
+		{
+			string_view comment_text = lexer.substr_from(comment_start.pos);
+			comment_text.remove_prefix(comment_start_marker_length(kind));
+			comment_text.remove_suffix(2);
+			return Comment{
+				.start_loc = comment_start,
+				.end_loc = lexer.location(),
+				.text = comment_text,
+				.style = CommentStyle::BLOCK,
+				.kind = kind,
+				.target = CommentTarget::NONE, // Needs to be set by someone else
+			};
 		}
+
+		lexer.advance();
 	}
 
-	return false;
+	throw LexingError{"Unclosed block comment"};
+}
+
+static optional<Comment> try_read_line_comment(Lexer &lexer)
+{
+	SourceLocation comment_start = lexer.location();
+	if(not try_consume(lexer, "//"))
+		return nullopt;
+
+	// Determine the kind of comment (NORMAL, DOC, SPECIAL)
+	CommentKind kind = CommentKind::NORMAL;
+	if(try_consume(lexer, "/"))
+	{
+		kind = CommentKind::DOC;
+		lexer.advance();
+	}
+	else if(try_consume(lexer, "!"))
+		kind = CommentKind::SPECIAL;
+
+	SourceLocation comment_end = comment_start;
+	while(lexer.has_more())
+	{
+		if(lexer.get() == '\n')
+		{
+			comment_end = lexer.location();
+			lexer.advance();
+			break;
+		}
+		lexer.advance();
+	}
+
+	string_view comment_text = lexer.substr_from(comment_start.pos);
+	comment_text.remove_prefix(comment_start_marker_length(kind));
+
+	return Comment{
+		.start_loc = comment_start,
+		.end_loc = comment_end,
+		.text = comment_text,
+		.style = CommentStyle::BLOCK,
+		.kind = kind,
+		.target = CommentTarget::NONE, // Needs to be set by someone else
+	};
+}
+
+optional<Comment> try_read_comment(Lexer &lexer)
+{
+	if(optional<Comment> c = try_read_block_comment(lexer))
+		return c;
+
+	return try_read_line_comment(lexer);
 }
 
 void skip_whitespace_and_comments(Lexer &lexer)
 {
 	do skip_whitespace(lexer);
-	while(skip_comment(lexer));
+	while(try_read_comment(lexer));
 }
 
 optional<string_view> try_read_identifier(Lexer &lexer)

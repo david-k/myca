@@ -1,0 +1,89 @@
+//!test: negative_in_arg
+//!error: |4:14| error: Array count has invalid type: Incompatible types usize and $KnownInt(-2,-2)
+
+proc foo(a: [-2]i32) {}
+
+//!-------------------------------------------------------------------
+//!test: negative_in_let
+//!error: |8:10| error: Array count has invalid type: Incompatible types usize and $KnownInt(-3,-3)
+
+proc uninitialized'T() -> T {}
+
+proc foo()
+{
+	let a: [-3]i32 = uninitialized();
+}
+
+//!-------------------------------------------------------------------
+//!test: negative_in_union
+//!error: |4:22| error: Array count has invalid type: Incompatible types usize and $KnownInt(-1,-1)
+
+typealias U = i32 | [-1]i32;
+
+//!-------------------------------------------------------------------
+//!test: non_const_in_let
+//!error: |8:12| error: Expected constant expression
+
+proc uninitialized'T() -> T {}
+proc main() -> i32
+{
+	let c: usize = 5;
+	let arr: [c]usize = uninitialized();
+}
+
+//!-------------------------------------------------------------------
+//!test: zero_in_union
+//!error: |4:22| error: Array count must be strictly larger that zero
+
+typealias U = i32 | [0]i32;
+
+//!-------------------------------------------------------------------
+//!test: zero_in_member
+//!error: |6:6| error: Array count must be strictly larger that zero
+
+struct S
+{
+	m: [0]i32,
+}
+
+//!-------------------------------------------------------------------
+//!test: zero_in_arg
+//!error: |4:14| error: Array count must be strictly larger that zero
+
+proc bar(a: [0]i32) {}
+
+//!-------------------------------------------------------------------
+//!test: zero_in_return
+//!error: |4:16| error: Array count must be strictly larger that zero
+
+proc foo() -> [0]i32 {}
+
+//!-------------------------------------------------------------------
+//!test: zero_in_let
+//!error: |7:12| error: Array count must be strictly larger that zero
+
+proc uninitialized'T() -> T {}
+proc main() -> i32
+{
+	let arr: [0]i32 = uninitialized();
+}
+
+//!-------------------------------------------------------------------
+//!test: zero_in_generic_proc_arg
+//!error: |7:8| error: Array count must be strictly larger that zero
+
+proc foo'T() -> T {}
+proc main() -> i32
+{
+	foo'([0]i32)();
+}
+
+//!-------------------------------------------------------------------
+//!test: zero_in_generic_struct_arg
+//!error: |7:14| error: Array count must be strictly larger that zero
+
+struct S'T {}
+proc main() -> i32
+{
+	let s = S'([0]i32)();
+}

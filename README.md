@@ -80,7 +80,7 @@ Some more examples:
 ## Building
 
 The only dependencies are CMake and a C++23 compiler (tested with GCC and
-clang). Additionally, Python is needed to run the tests.
+clang).
 
 ```sh
 git clone https://github.com/david-k/myca/

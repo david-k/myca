@@ -572,7 +572,7 @@ struct Pattern : variant
 	{
 		return *this | match
 		{
-			[](VarPatternUnresolved const&) -> Type* { assert(!"Pattern::try_get_type(): VarPatternUnresolved"); },
+			[](VarPatternUnresolved const&) -> Type* { return nullptr; },
 			[](auto const &e) -> Type* { return e.type; },
 		};
 	}
@@ -672,6 +672,14 @@ struct Stmt : variant
 >
 {
 	using variant::variant;
+
+	TokenRange token_range() const
+	{
+		return *this | match
+		{
+			[](auto const &t) { return t.range; },
+		};
+	}
 };
 
 struct MatchArm
@@ -813,13 +821,13 @@ struct Module
 {
 	string_view name_of(Path const &path) const
 	{
-		Token const &tok = parser.token_at(path.range.first);
+		Token tok = parser.token_at(path.range.first);
 		return tok.text;
 	}
 
 	string_view name_of(Parameter const &param) const
 	{
-		Token const &tok = parser.token_at(param.range.first);
+		Token tok = parser.token_at(param.range.first);
 		assert(tok.kind == Lexeme::IDENTIFIER);
 		return tok.text;
 	}

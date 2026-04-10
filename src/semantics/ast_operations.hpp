@@ -63,6 +63,12 @@ struct std::hash<GenericArg>
 	size_t operator () (GenericArg const &arg) const;
 };
 
+template<>
+struct std::hash<FixedArray<GenericArg>>
+{
+	size_t operator () (FixedArray<GenericArg> const &arg) const;
+};
+
 struct TypeArgList;
 FixedArray<MatchArm>* clone(FixedArray<MatchArm> const *arms, Arena &arena);
 FixedArray<Stmt>* clone(FixedArray<Stmt> const *stmts, Arena &arena);
@@ -97,6 +103,7 @@ void print(Module const &mod, std::ostream &os);
 string_view str(BuiltinTypeDef t);
 string str(Type const &type, Module const &mod);
 string str(Expr const &expr, Module const &mod);
+string str(Stmt const &stmt, Module const &mod);
 string str(GenericArg const &a, Module const &mod);
 
 Type* mk_builtin_type(BuiltinTypeDef builtin, Arena &arena);
@@ -119,3 +126,44 @@ bool type_var_occurs_in(GenericVar var, GenericArg const &arg);
 
 void const_eval(Type &type, Module const &mod);
 void const_eval(Expr &expr, Module const &mod);
+
+struct TopLevelTarget
+{
+	friend bool operator == (TopLevelTarget, TopLevelTarget) = default;
+};
+template<>
+struct std::hash<TopLevelTarget>
+{
+	size_t operator () (TopLevelTarget) const { return 273654124; }
+};
+
+using OptionTarget = variant<TopLevelTarget, Stmt const*>;
+
+struct ModuleOptions
+{
+	bool empty() const { return opts.empty(); }
+
+	OptionSet const* try_get(OptionTarget target) const
+	{
+		auto target_it = opts.find(target);
+		if(target_it == opts.end())
+			return nullptr;
+
+		return &target_it->second;
+	}
+
+	optional<string_view> try_get(OptionTarget target, string_view option_name) const
+	{
+		if(OptionSet const *opts = try_get(target))
+			return opts->try_get(option_name);
+
+		return nullopt;
+	}
+
+	unordered_map<OptionTarget, OptionSet> opts;
+};
+
+// Extract options from special comments
+ModuleOptions gather_options(Module const &mod);
+void print_options(OptionSet const &options);
+string str(OptionTarget target);

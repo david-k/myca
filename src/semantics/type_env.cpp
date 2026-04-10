@@ -49,6 +49,7 @@ bool TypeEnv::update(GenericVar var, GenericArg const &new_type)
 	auto it = m_env.find(var);
 	if(it == m_env.end())
 	{
+		update_allowed_var_kind(var);
 		m_env.emplace(var, new_type);
 		return true;
 	}
@@ -64,15 +65,20 @@ void TypeEnv::add(GenericVar var, GenericArg const &type)
 	assert(not type_var_occurs_in(var, type));
 
 	auto res = m_env.emplace(var, type);
+	update_allowed_var_kind(var);
 	assert(res.second);
 }
 
 void TypeEnv::materialize(class InstanceRegistry &registry)
 {
+	assert(has_only_deduction_vars());
 	for(auto &[_, gen_arg]: m_env)
 	{
 		if(Type *t = std::get_if<Type>(&gen_arg))
-			substitute_in_type(*t, *this, registry, {.mode = SubstitutionMode::FULL_DEDUCTION});
+			substitute_in_type(*t, *this, registry, {
+				SubstitutionPhase::DEDUCTION,
+				SubstitutionMode::FULL,
+			});
 	}
 }
 
@@ -112,12 +118,34 @@ void TypeEnv::print(std::ostream &os, Module const &mod) const
 	}
 }
 
+void TypeEnv::update_allowed_var_kind(GenericVar const &var)
+{
+	if(m_allowed_var_kind)
+	{
+		if(*m_allowed_var_kind == AllowedVarKind::DEDUCTION) {
+			assert(is<GenericDeductionVar>(var));
+		}
+
+		if(*m_allowed_var_kind == AllowedVarKind::PARAMETER) {
+			assert(is<GenericParameterVar>(var));
+		}
+	}
+	else
+	{
+		if(is<GenericDeductionVar>(var))
+			m_allowed_var_kind = AllowedVarKind::DEDUCTION;
+		else
+			m_allowed_var_kind = AllowedVarKind::PARAMETER;
+	}
+}
+
 void add_type_args_to_env(
 	TypeEnv &result,
 	FixedArray<GenericParameter> const *type_params,
 	FixedArray<GenericArg> const *type_args,
 	InstanceRegistry &registry)
 {
+	assert(result.has_only_parameter_vars());
 	for(size_t i = 0; i < type_params->count; ++i)
 	{
 		GenericParameterVar type_param(&type_params->items[i]);
@@ -125,7 +153,10 @@ void add_type_args_to_env(
 
 		// See tests struct_recursive_type_param_<N> for why we call substitute() and perform the
 		// type_var_occurs_in() check
-		substitute_in_generic_arg(type_arg, result, registry, {.mode = SubstitutionMode::BEST_EFFORT});
+		substitute_in_generic_arg(type_arg, result, registry, {
+			SubstitutionPhase::INSTANTIATION,
+			SubstitutionMode::BEST_EFFORT,
+		});
 		if(not equiv(mk_generic_arg(type_param.def, UNKNOWN_TOKEN_RANGE), type_arg))
 		{
 			if(type_var_occurs_in(type_param, type_arg))

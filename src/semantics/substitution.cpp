@@ -15,34 +15,35 @@ static void validate_unsubstituted_var(
 	Module const &mod
 )
 {
-	assert(opts.mode != SubstitutionMode::FULL and "VarType has not been substituted");
-
-	if(opts.mode == SubstitutionMode::FULL_DEDUCTION)
+	if(opts.mode == SubstitutionMode::FULL)
 	{
-		if(is<GenericDeductionVar>(var))
-			throw_sem_error("Type parameter could not be deduced", opts.region_being_substituted.first, &mod);
+		switch(opts.phase)
+		{
+			case SubstitutionPhase::DEDUCTION:
+			{
+				if(is<GenericDeductionVar>(var))
+					throw_sem_error("Type parameter could not be deduced", opts.region_being_substituted.first, &mod);
+			} break;
+
+			case SubstitutionPhase::INSTANTIATION:
+				assert("VarType has not been substituted");
+				break;
+		}
 	}
 }
 
 // Make sure that the kinds of variables that must be substituted actually have been substituted
 static void validate_unsubstituted_vars(
 	unordered_set<GenericVar> const &vars,
-	bool has_type_deduction_vars,
 	TypeEnv const &env,
 	SubstitutionOptions opts,
 	Module const &mod
 )
 {
-	if(
-		(opts.mode == SubstitutionMode::FULL_DEDUCTION and has_type_deduction_vars)
-		or (opts.mode == SubstitutionMode::FULL and vars.size())
-	)
+	for(GenericVar var: vars)
 	{
-		for(GenericVar var: vars)
-		{
-			if(not env.try_lookup(var))
-				validate_unsubstituted_var(var, opts, mod);
-		}
+		if(not env.try_lookup(var))
+			validate_unsubstituted_var(var, opts, mod);
 	}
 }
 
@@ -105,7 +106,6 @@ StructInstance* substitute_in_struct(
 	{
 		validate_unsubstituted_vars(
 			inst->type_args().occurring_vars,
-			inst->type_args().has_type_deduction_vars,
 			env, opts, registry.mod()
 		);
 
@@ -135,7 +135,6 @@ ProcInstance* substitute_in_proc(
 	{
 		validate_unsubstituted_vars(
 			inst->type_args().occurring_vars,
-			inst->type_args().has_type_deduction_vars,
 			env, opts, registry.mod()
 		);
 		if(modified) *modified = false;
@@ -157,7 +156,6 @@ static ProcTypeInstance* substitute_in_proc_type(
 	{
 		validate_unsubstituted_vars(
 			inst->occurring_vars,
-			inst->has_type_deduction_vars,
 			env, opts, registry.mod()
 		);
 	}
@@ -190,7 +188,6 @@ static UnionInstance* substitute_in_union(
 	{
 		validate_unsubstituted_vars(
 			inst->occurring_vars(),
-			inst->has_type_deduction_vars(),
 			env, opts, registry.mod()
 		);
 	}
@@ -252,7 +249,7 @@ void substitute_in_type(
 		[&](BuiltinType&) {},
 		[&](KnownIntType &t)
 		{
-			if(opts.mode == SubstitutionMode::FULL_DEDUCTION)
+			if(opts.phase == SubstitutionPhase::DEDUCTION and opts.mode == SubstitutionMode::FULL)
 				type = materialize_known_int(t);
 		},
 		[&](PointerType &t)
@@ -390,7 +387,10 @@ void substitute_in_pattern(
 	{
 		[&](VarPattern &p)
 		{
-			substitute_in_type(*p.var->type, subst, registry, opts);
+			// We must only update the type of the referenced Var during type deduction.
+			// Once the type of the Var has been deduced, it is not supposed to change anymore.
+			if(opts.phase == SubstitutionPhase::DEDUCTION)
+				substitute_in_type(*p.var->type, subst, registry, opts);
 		},
 		[&](DerefPattern &p)
 		{

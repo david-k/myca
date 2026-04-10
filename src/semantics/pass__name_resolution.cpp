@@ -158,7 +158,7 @@ static variant<Expr, Type> resolve_path(
 			TypeEnv env = TypeEnv::from_type_args(alias->type_params, resolved_type_args, ctx.mod->sema->insts);
 
 			Type type = clone(*alias->aliased_type, ctx.arena);
-			substitute_in_type(type, env, ctx.mod->sema->insts, {.mode = SubstitutionMode::BEST_EFFORT});
+			substitute_in_type(type, env, ctx.mod->sema->insts, {SubstitutionPhase::DEDUCTION, SubstitutionMode::BEST_EFFORT});
 
 			if(path.child)
 			{

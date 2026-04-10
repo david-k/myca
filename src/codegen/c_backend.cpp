@@ -1309,7 +1309,7 @@ struct ConcreteProcInstance
 				*body,
 				proc->create_type_env(),
 				*proc->registry(),
-				{.mode = SubstitutionMode::FULL}
+				{SubstitutionPhase::INSTANTIATION, SubstitutionMode::FULL}
 			);
 		}
 	}

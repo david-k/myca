@@ -1,30 +1,17 @@
-#include <algorithm>
-#include <initializer_list>
-#include <iostream>
-#include <memory>
-#include <random>
-#include <stdexcept>
+#include "runner.hpp"
 
 #include "semantics/constraint_solver.hpp"
 #include "semantics/context.hpp"
 #include "semantics/module.hpp"
 #include "semantics/type_env.hpp"
 
-//==============================================================================
+#include <iostream>
+#include <random>
+
+//--------------------------------------------------------------------
 // Utils
-//==============================================================================
-class TestError : public std::runtime_error
-{
-public:
-	TestError() :
-		std::runtime_error("") {}
-
-	using std::runtime_error::runtime_error;
-};
-
-
-constexpr size_t ARENA_SIZE = 50 * 1024*1024;
-
+//--------------------------------------------------------------------
+static constexpr size_t ARENA_SIZE = 50 * 1024*1024;
 static std::pair<Arena, std::unique_ptr<char[]>> mk_arena()
 {
 	std::unique_ptr<char[]> memory(new char[ARENA_SIZE]);
@@ -242,7 +229,7 @@ static ConstraintSpec parse_constraint_spec(
 		if(not number_string)
 			throw std::runtime_error("Parsing ConstraintSpec failed: expected number");
 		consume(lexer, ")");
-		uint64_t n = parse_integer(*number_string);
+		uint64_t n = parse_valid_uint(*number_string);
 		type_right = KnownIntType(n, n);
 	}
 	else
@@ -309,7 +296,7 @@ struct VarSubst
 	string_view type_string;
 };
 
-TypeEnv parse_type_env(
+static TypeEnv parse_type_env(
 	std::initializer_list<VarSubst> expected_subst_strings,
 	UnorderedStringMap<GenericDeductionVar> vars,
 	SemaContext &ctx,
@@ -345,7 +332,7 @@ struct ExpectedError
 
 using ExpectedOutcome = variant<ExpectedSubst, ExpectedError>;
 
-void test_constraints_impl(
+static void test_constraints_impl(
 	vector<string_view> const &constraint_strings,
 	ExpectedOutcome expected_outcome
 )
@@ -438,9 +425,7 @@ void test_constraints_impl(
 	};
 }
 
-size_t RANDOM_SEED = 0;
-
-void test_constraints(
+static void test_constraints(
 	vector<string_view> constraint_strings,
 	ExpectedOutcome expected_outcome
 )
@@ -453,482 +438,466 @@ void test_constraints(
 	}
 }
 
-
-//==============================================================================
+//--------------------------------------------------------------------
 // Test cases
-//==============================================================================
-std::pair<char const*, void(*)()> TESTS[] = {
-
-	{"constraints.basic", []()
-	{
-		test_constraints(
-			{
-				"_a <<- i8"
-			},
-			ExpectedSubst{
-				{"_a", "i8"}
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- i8",
-				"_a <<- i32",
-			},
-			ExpectedSubst{
-				{"_a", "i32"}
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <- i8",
-				"_a <<- i32",
-			},
-			ExpectedError{"Incompatible types i8 and i32"}
-		);
-
-		// The final substitution should be [_a ↦ i8] because assignments (PUSH) weighs higher
-		// than PULL.
-		test_constraints(
-			{
-				"_a ->> i32",
-				"_a <<- i8",
-			},
-			ExpectedSubst{
-				{"_a", "i8"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a ->> i32",
-				"_a <<- i8",
-				"_a <<- _b",
-			},
-			ExpectedSubst{
-				{"_a", "i8"},
-				{"_b", "i8"},
-			}
-		);
-
-		// If _a is processed before _b, then _a receives no type from its push edges. Thus, its
-		// pull edges are merged together, and since we don't support intersection types, for
-		// simplicity, we require them to be equal. The result is then used as the type for _a.
-		// However, in this case this fails as i8 and i32 are not equal. However, once _b has been
-		// processed, constraint resolution should succeed.
-		test_constraints(
-			{
-				"_a ->> i32",
-				"_a ->> i8",
-				"_a <<- _b",
-				"_b <<- i8"
-			},
-			ExpectedSubst{
-				{"_a", "i8"},
-				{"_b", "i8"},
-			}
-		);
-
-		// Reducing _a will unify _b and i32
-		// 1. If _b <<- i8 has already been processed, then the type of _b will remain i8 and a
-		//    conversion to i32 is inserted
-		// 2. If _b <<- i8 has *not* already been processed, then the type of _b will be i32
-		// The first option is what should happen
-		test_constraints(
-			{
-				"_b <<- i8",
-				"_a <<- _b",
-				"_a <<- i32",
-			},
-			ExpectedSubst{
-				{"_a", "i32"},
-				{"_b", "i8"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_c -- isize",
-				"_c <<- _a",
-				"_a ->> i32",
-				"_a <<- _b",
-				"_a <<- i32",
-				"_b <<- i8",
-				"_b ->> i32",
-			},
-			ExpectedSubst{
-				{"_a", "i32"},
-				{"_b", "i8"},
-				{"_c", "isize"},
-			}
-		);
-
-		// Check that unification can handle the case where the right side contains the variable
-		// from the left (classical first-order unification does not allow this)
-		test_constraints(
-			{
-				"_a ->> Option'(_a)",
-				"_a <<- i32",
-			},
-			ExpectedSubst{
-				{"_a", "i32"},
-			}
-		);
-
-		// The constraint `_a <<- _b` is satisfiable by using the implicit Option.Some constructor
-		test_constraints(
-			{
-				"_a <<- _b",
-				"_a <<- Option'(_b)",
-				"_b <<- i8",
-			},
-			ExpectedSubst{
-				{"_a", "Option'i8"},
-				{"_b", "i8"},
-			}
-		);
-
-		// The constraint `_b -- i32` is not stated explicitly but will be automatically generated
-		// when unifying `Option'(i32)` and `Option'(_b)`
-		test_constraints(
-			{
-				"_a <<- Option'(i32)",
-				"_a <<- Option'(_b)",
-				"_b <<- _c",
-				"_c <<- i8",
-			},
-			ExpectedSubst{
-				{"_a", "Option'(i32)"},
-				{"_b", "i32"},
-				{"_c", "i8"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- Option'(_c)",
-				"_a <<- _b",
-				"_b <<- Option'(i32)",
-			},
-			ExpectedSubst{
-				{"_a", "Option'(i32)"},
-				{"_b", "Option'(i32)"},
-				{"_c", "i32"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a ->> Option'(_a)",
-			},
-			// Would be nice if we could directly refer to _a instead of ?_0
-			ExpectedError{"Insufficiently constrained type Option'(?_0)"}
-		);
-
-		test_constraints(
-			{
-				"_x -- Pair'(_a,i32)",
-				"_y -- Pair'(_b,_c)",
-				"_z -- Pair'(bool,_d)",
-
-				"_x <<- _y",
-				"_y <<- _z",
-			},
-			ExpectedSubst{
-				{"_a", "bool"},
-				{"_b", "bool"},
-				{"_c", "i32"},
-				{"_d", "i32"},
-				{"_x", "Pair'(bool,i32)"},
-				{"_y", "Pair'(bool,i32)"},
-				{"_z", "Pair'(bool,i32)"},
-			}
-		);
-
-		// The type for a type deduction variable is usually solely determined by its push
-		// constraints. However, if there are no push constraints, then we look at its pull
-		// constraints.
-		test_constraints(
-			{
-				"_a ->> i8",
-			},
-			ExpectedSubst{
-				{"_a", "i8"},
-			}
-		);
-
-		// We *could* infer a common integer type in many cases. However, I think it's too confusing
-		// to come up with an integer type that is not even mentioned in the code.
-		test_constraints(
-			{
-				"_a <<- u8",
-				"_a <<- i8",
-			},
-			ExpectedError{"Incompatible types i8 and u8"}
-		);
-
-		test_constraints(
-			{
-				"_a ->> i8",
-				"_b ->> _a",
-			},
-			ExpectedSubst{
-				{"_a", "i8"},
-				{"_b", "i8"},
-			}
-		);
-
-		// Only pull constraints
-		test_constraints(
-			{
-				"_a ->> _b",
-				"_a ->> _c",
-				"_b ->> _c",
-				"_c ->> i32",
-			},
-			ExpectedSubst{
-				{"_a", "i32"},
-				{"_b", "i32"},
-				{"_c", "i32"},
-			}
-		);
-
-		// If a type deduction variable is assigned to different types without being assigned a type
-		// itself we get an error. I believe coming up with a fitting type could be confusing in
-		// many cases (though I haven't even come across a scenario like this in practice)
-		test_constraints(
-			{
-				"_a ->> i8",
-				"_a ->> i32",
-			},
-		ExpectedError{"Incompatible types i8 and i32"}
-		);
-	}},
-	{"constraints.modifiers", []()
-	{
-		test_constraints(
-			{
-				"_a <<- Pair'(bool,i32) /member: first",
-			},
-			ExpectedSubst{
-				{"_a", "bool"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- Pair'(_x,_y) /member: first",
-				"_b <<- Pair'(_x,i32)",
-				"_b <<- _c",
-				"_c <<- Pair'(bool,_y)",
-			},
-			ExpectedSubst{
-				{"_a", "bool"},
-				{"_b", "Pair'(bool,i32)"},
-				{"_c", "Pair'(bool,i32)"},
-				{"_x", "bool"},
-				{"_y", "i32"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- _b /member: first",
-				"_b <<- Pair'(_x,i32)",
-				"_b <<- Pair'(bool,_y)",
-			},
-			ExpectedSubst{
-				{"_a", "bool"},
-				{"_b", "Pair'(bool,i32)"},
-				{"_x", "bool"},
-				{"_y", "i32"},
-			}
-		);
-
-		// If _a is processed before _x, then `_a <<- _x /member: first` won't have any effect and
-		// _a is assigned `Option'(bool)`. If `_z <<- _a /member: value` is processed next,
-		// accessing the member `value` on _a fails because `Option'(bool)` has no such member.
-		// However, this must not be a hard error, because eventually _a will be assigned
-		// `Option'(bool).Some` at which point the member access succeeds.
-		test_constraints(
-			{
-				"_z <<- _a /member: value",
-				"_a ->> Option'(bool)",
-				"_a <<- _x /member: first",
-				"_x <<- Pair'(Option'(_b).Some,i32)",
-			},
-			ExpectedSubst{
-				{"_z", "bool"},
-				{"_a", "Option'(bool).Some"},
-				{"_b", "bool"},
-				{"_x", "Pair'(Option'(bool).Some,i32)"},
-			}
-		);
-
-		// Making the previous test pass should not mean that we don't produce a proper error
-		// message in case we do access an invalid member.
-		test_constraints(
-			{
-				"_z <<- _a /member: valueeeeee",
-				"_a ->> Option'(bool)",
-				"_a <<- _x /member: first",
-				"_x <<- Pair'(Option'(_b).Some,i32)",
-			},
-			ExpectedError("`Some` has no field named `valueeeeee`")
-		);
-	}},
-	{"constraints.known_ints", []()
-	{
-		test_constraints(
-			{
-				"_a <<- $KnownInt(23)",
-			},
-			ExpectedSubst{
-				{"_a", "i32"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- $KnownInt(2147483648)",
-			},
-			ExpectedSubst{
-				{"_a", "u32"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- $KnownInt(23)",
-				"_a <<- i8",
-			},
-			ExpectedSubst{
-				{"_a", "i8"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- $KnownInt(23)",
-				"_a ->> i8",
-			},
-			ExpectedSubst{
-				{"_a", "i8"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- $KnownInt(23)",
-				"_b <<- _a",
-				"_b ->> i8",
-			},
-			ExpectedSubst{
-				{"_a", "i8"},
-				{"_b", "i8"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- $KnownInt(23)",
-				"_c <<- i8",
-				"_b <<- Option'(_a)",
-				"_b <<- Option'(_c)",
-			},
-			ExpectedSubst{
-				{"_a", "i8"},
-				{"_b", "Option'(i8)"},
-				{"_c", "i8"},
-			}
-		);
-
-		test_constraints(
-			{
-				"_a <<- $KnownInt(23)",
-				"_b <<- Option'(_a)",
-				"_b <<- Option'(_c)",
-			},
-			ExpectedSubst{
-				{"_a", "i32"},
-				{"_b", "Option'(i32)"},
-				{"_c", "i32"},
-			}
-		);
-
-		// It's unclear what type should be assigned to $KnownInt(23), hence the error
-		test_constraints(
-			{
-				"_a ->> i8",
-				"_a ->> i32",
-				"_a <<- $KnownInt(23)",
-			},
-			ExpectedError{"Incompatible types i8 and i32"}
-		);
-	}},
-	{"constraints.conversions", []()
-	{
-		test_constraints(
-			{
-				"_a <<- A",
-				"_b <<- Option'AorB",
-				"_b <<- _a",
-			},
-			ExpectedSubst{
-				{"_a", "A"},
-				{"_b", "Option'AorB"},
-			}
-		);
-	}},
-	{"constraints.cycles", []()
-	{
-		// Cyclic constraints seem like they could be useful (though I haven't seen them generated
-		// in practice).
-
-		// Here, _a and _b must be assignable to each other, and i32 should be assignable to _a.
-		// This can be achieved with [_a ↦ i32, _b ↦ i32].
-		test_constraints(
-			{
-				"_a <<- _b",
-				"_a ->> _b",
-				"_a <<- i32",
-			},
-			ExpectedSubst{
-				{"_a", "i32"},
-				{"_b", "i32"},
-			}
-		);
-
-		// Longer cycle
-		test_constraints(
-			{
-				"_a <<- _b",
-				"_c <<- _a",
-				"_b <<- _c",
-				"_a <<- i32",
-			},
-			ExpectedSubst{
-				{"_a", "i32"},
-				{"_b", "i32"},
-				{"_c", "i32"},
-			}
-		);
-	}},
-};
-
-int main()
+//--------------------------------------------------------------------
+TEST(Constraints, Basic)
 {
-	std::random_device rd;
-	RANDOM_SEED = rd();
-	std::cout << "RANDOM_SEED = " << RANDOM_SEED << std::endl;
+	test_constraints(
+		{
+			"_a <<- i8"
+		},
+		ExpectedSubst{
+			{"_a", "i8"}
+		}
+	);
 
-	for(auto [name, fn]: TESTS)
-	{
-		std::cout << "Testing \"" << name << "\"... " << std::flush;
-		fn();
-		std::cout << "ok" << std::endl;
-	}
+	test_constraints(
+		{
+			"_a <<- i8",
+			"_a <<- i32",
+		},
+		ExpectedSubst{
+			{"_a", "i32"}
+		}
+	);
 
-	return 0;
+	test_constraints(
+		{
+			"_a <- i8",
+			"_a <<- i32",
+		},
+		ExpectedError{"Incompatible types i8 and i32"}
+	);
+
+	// The final substitution should be [_a ↦ i8] because assignments (PUSH) weighs higher
+	// than PULL.
+	test_constraints(
+		{
+			"_a ->> i32",
+			"_a <<- i8",
+		},
+		ExpectedSubst{
+			{"_a", "i8"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a ->> i32",
+			"_a <<- i8",
+			"_a <<- _b",
+		},
+		ExpectedSubst{
+			{"_a", "i8"},
+			{"_b", "i8"},
+		}
+	);
+
+	// If _a is processed before _b, then _a receives no type from its push edges. Thus, its
+	// pull edges are merged together, and since we don't support intersection types, for
+	// simplicity, we require them to be equal. The result is then used as the type for _a.
+	// However, in this case this fails as i8 and i32 are not equal. However, once _b has been
+	// processed, constraint resolution should succeed.
+	test_constraints(
+		{
+			"_a ->> i32",
+			"_a ->> i8",
+			"_a <<- _b",
+			"_b <<- i8"
+		},
+		ExpectedSubst{
+			{"_a", "i8"},
+			{"_b", "i8"},
+		}
+	);
+
+	// Reducing _a will unify _b and i32
+	// 1. If _b <<- i8 has already been processed, then the type of _b will remain i8 and a
+	//    conversion to i32 is inserted
+	// 2. If _b <<- i8 has *not* already been processed, then the type of _b will be i32
+	// The first option is what should happen
+	test_constraints(
+		{
+			"_b <<- i8",
+			"_a <<- _b",
+			"_a <<- i32",
+		},
+		ExpectedSubst{
+			{"_a", "i32"},
+			{"_b", "i8"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_c -- isize",
+			"_c <<- _a",
+			"_a ->> i32",
+			"_a <<- _b",
+			"_a <<- i32",
+			"_b <<- i8",
+			"_b ->> i32",
+		},
+		ExpectedSubst{
+			{"_a", "i32"},
+			{"_b", "i8"},
+			{"_c", "isize"},
+		}
+	);
+
+	// Check that unification can handle the case where the right side contains the variable
+	// from the left (classical first-order unification does not allow this)
+	test_constraints(
+		{
+			"_a ->> Option'(_a)",
+			"_a <<- i32",
+		},
+		ExpectedSubst{
+			{"_a", "i32"},
+		}
+	);
+
+	// The constraint `_a <<- _b` is satisfiable by using the implicit Option.Some constructor
+	test_constraints(
+		{
+			"_a <<- _b",
+			"_a <<- Option'(_b)",
+			"_b <<- i8",
+		},
+		ExpectedSubst{
+			{"_a", "Option'i8"},
+			{"_b", "i8"},
+		}
+	);
+
+	// The constraint `_b -- i32` is not stated explicitly but will be automatically generated
+	// when unifying `Option'(i32)` and `Option'(_b)`
+	test_constraints(
+		{
+			"_a <<- Option'(i32)",
+			"_a <<- Option'(_b)",
+			"_b <<- _c",
+			"_c <<- i8",
+		},
+		ExpectedSubst{
+			{"_a", "Option'(i32)"},
+			{"_b", "i32"},
+			{"_c", "i8"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a <<- Option'(_c)",
+			"_a <<- _b",
+			"_b <<- Option'(i32)",
+		},
+		ExpectedSubst{
+			{"_a", "Option'(i32)"},
+			{"_b", "Option'(i32)"},
+			{"_c", "i32"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a ->> Option'(_a)",
+		},
+		// Would be nice if we could directly refer to _a instead of ?_0
+		ExpectedError{"Insufficiently constrained type Option'(?_0)"}
+	);
+
+	test_constraints(
+		{
+			"_x -- Pair'(_a,i32)",
+			"_y -- Pair'(_b,_c)",
+			"_z -- Pair'(bool,_d)",
+
+			"_x <<- _y",
+			"_y <<- _z",
+		},
+		ExpectedSubst{
+			{"_a", "bool"},
+			{"_b", "bool"},
+			{"_c", "i32"},
+			{"_d", "i32"},
+			{"_x", "Pair'(bool,i32)"},
+			{"_y", "Pair'(bool,i32)"},
+			{"_z", "Pair'(bool,i32)"},
+		}
+	);
+
+	// The type for a type deduction variable is usually solely determined by its push
+	// constraints. However, if there are no push constraints, then we look at its pull
+	// constraints.
+	test_constraints(
+		{
+			"_a ->> i8",
+		},
+		ExpectedSubst{
+			{"_a", "i8"},
+		}
+	);
+
+	// We *could* infer a common integer type in many cases. However, I think it's too confusing
+	// to come up with an integer type that is not even mentioned in the code.
+	test_constraints(
+		{
+			"_a <<- u8",
+			"_a <<- i8",
+		},
+		ExpectedError{"Incompatible types i8 and u8"}
+	);
+
+	test_constraints(
+		{
+			"_a ->> i8",
+			"_b ->> _a",
+		},
+		ExpectedSubst{
+			{"_a", "i8"},
+			{"_b", "i8"},
+		}
+	);
+
+	// Only pull constraints
+	test_constraints(
+		{
+			"_a ->> _b",
+			"_a ->> _c",
+			"_b ->> _c",
+			"_c ->> i32",
+		},
+		ExpectedSubst{
+			{"_a", "i32"},
+			{"_b", "i32"},
+			{"_c", "i32"},
+		}
+	);
+
+	// If a type deduction variable is assigned to different types without being assigned a type
+	// itself we get an error. I believe coming up with a fitting type could be confusing in
+	// many cases (though I haven't even come across a scenario like this in practice)
+	test_constraints(
+		{
+			"_a ->> i8",
+			"_a ->> i32",
+		},
+	ExpectedError{"Incompatible types i8 and i32"}
+	);
+}
+
+TEST(Constraints, Modifiers)
+{
+	test_constraints(
+		{
+			"_a <<- Pair'(bool,i32) /member: first",
+		},
+		ExpectedSubst{
+			{"_a", "bool"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a <<- Pair'(_x,_y) /member: first",
+			"_b <<- Pair'(_x,i32)",
+			"_b <<- _c",
+			"_c <<- Pair'(bool,_y)",
+		},
+		ExpectedSubst{
+			{"_a", "bool"},
+			{"_b", "Pair'(bool,i32)"},
+			{"_c", "Pair'(bool,i32)"},
+			{"_x", "bool"},
+			{"_y", "i32"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a <<- _b /member: first",
+			"_b <<- Pair'(_x,i32)",
+			"_b <<- Pair'(bool,_y)",
+		},
+		ExpectedSubst{
+			{"_a", "bool"},
+			{"_b", "Pair'(bool,i32)"},
+			{"_x", "bool"},
+			{"_y", "i32"},
+		}
+	);
+
+	// If _a is processed before _x, then `_a <<- _x /member: first` won't have any effect and
+	// _a is assigned `Option'(bool)`. If `_z <<- _a /member: value` is processed next,
+	// accessing the member `value` on _a fails because `Option'(bool)` has no such member.
+	// However, this must not be a hard error, because eventually _a will be assigned
+	// `Option'(bool).Some` at which point the member access succeeds.
+	test_constraints(
+		{
+			"_z <<- _a /member: value",
+			"_a ->> Option'(bool)",
+			"_a <<- _x /member: first",
+			"_x <<- Pair'(Option'(_b).Some,i32)",
+		},
+		ExpectedSubst{
+			{"_z", "bool"},
+			{"_a", "Option'(bool).Some"},
+			{"_b", "bool"},
+			{"_x", "Pair'(Option'(bool).Some,i32)"},
+		}
+	);
+
+	// Making the previous test pass should not mean that we don't produce a proper error
+	// message in case we do access an invalid member.
+	test_constraints(
+		{
+			"_z <<- _a /member: valueeeeee",
+			"_a ->> Option'(bool)",
+			"_a <<- _x /member: first",
+			"_x <<- Pair'(Option'(_b).Some,i32)",
+		},
+		ExpectedError("`Some` has no field named `valueeeeee`")
+	);
+}
+
+TEST(Constraints, KnownInts)
+{
+	test_constraints(
+		{
+			"_a <<- $KnownInt(23)",
+		},
+		ExpectedSubst{
+			{"_a", "i32"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a <<- $KnownInt(2147483648)",
+		},
+		ExpectedSubst{
+			{"_a", "u32"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a <<- $KnownInt(23)",
+			"_a <<- i8",
+		},
+		ExpectedSubst{
+			{"_a", "i8"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a <<- $KnownInt(23)",
+			"_a ->> i8",
+		},
+		ExpectedSubst{
+			{"_a", "i8"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a <<- $KnownInt(23)",
+			"_b <<- _a",
+			"_b ->> i8",
+		},
+		ExpectedSubst{
+			{"_a", "i8"},
+			{"_b", "i8"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a <<- $KnownInt(23)",
+			"_c <<- i8",
+			"_b <<- Option'(_a)",
+			"_b <<- Option'(_c)",
+		},
+		ExpectedSubst{
+			{"_a", "i8"},
+			{"_b", "Option'(i8)"},
+			{"_c", "i8"},
+		}
+	);
+
+	test_constraints(
+		{
+			"_a <<- $KnownInt(23)",
+			"_b <<- Option'(_a)",
+			"_b <<- Option'(_c)",
+		},
+		ExpectedSubst{
+			{"_a", "i32"},
+			{"_b", "Option'(i32)"},
+			{"_c", "i32"},
+		}
+	);
+
+	// It's unclear what type should be assigned to $KnownInt(23), hence the error
+	test_constraints(
+		{
+			"_a ->> i8",
+			"_a ->> i32",
+			"_a <<- $KnownInt(23)",
+		},
+		ExpectedError{"Incompatible types i8 and i32"}
+	);
+}
+
+TEST(Constraints, Conversions)
+{
+	test_constraints(
+		{
+			"_a <<- A",
+			"_b <<- Option'AorB",
+			"_b <<- _a",
+		},
+		ExpectedSubst{
+			{"_a", "A"},
+			{"_b", "Option'AorB"},
+		}
+	);
+}
+
+TEST(Constraints, Cycles)
+{
+	// Cyclic constraints seem like they could be useful (though I haven't seen them generated
+	// in practice).
+
+	// Here, _a and _b must be assignable to each other, and i32 should be assignable to _a.
+	// This can be achieved with [_a ↦ i32, _b ↦ i32].
+	test_constraints(
+		{
+			"_a <<- _b",
+			"_a ->> _b",
+			"_a <<- i32",
+		},
+		ExpectedSubst{
+			{"_a", "i32"},
+			{"_b", "i32"},
+		}
+	);
+
+	// Longer cycle
+	test_constraints(
+		{
+			"_a <<- _b",
+			"_c <<- _a",
+			"_b <<- _c",
+			"_a <<- i32",
+		},
+		ExpectedSubst{
+			{"_a", "i32"},
+			{"_b", "i32"},
+			{"_c", "i32"},
+		}
+	);
 }

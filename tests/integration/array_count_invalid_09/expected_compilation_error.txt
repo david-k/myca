@@ -1,1 +1,0 @@
-|4:12| error: Array count must be strictly larger that zero

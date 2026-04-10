@@ -52,33 +52,33 @@ public:
 		return 0;
 	}
 
-	Token const& get() const
+	Token get() const
 	{
 		if (m_token_pos < m_tokens.size())
 			return m_tokens[m_token_pos];
 
-		return m_end_token;
+		return end_token();
 	}
 
-	Token const& token_at(TokenIdx idx) const
+	Token token_at(TokenIdx idx) const
 	{
 		if (idx.value < m_tokens.size())
 			return m_tokens[idx.value];
 
-		return m_end_token;
+		return end_token();
 	}
 
-	string_view get_text(SourceSpan span) const
+	size_t token_count() const { return m_tokens.size() + 1; }
+
+	string_view get_text(size_t start, size_t end) const
 	{
-		size_t start = span.begin.pos;
-		size_t end = span.end.pos;
 		size_t current_offset = 0;
 
 		// Linear search is okay for now as this function is only used for
 		// diagnostics and there is usually only one source
-		for (string_view source: m_sources)
+		for(string_view source: m_sources)
 		{
-			if (start < current_offset + source.length())
+			if(start <= current_offset + source.length())
 			{
 				// SourceSpans cannot cross source boundaries
 				assert(end <= current_offset + source.length());
@@ -108,13 +108,13 @@ public:
 		fetch_tokens_until(m_token_pos);
 	}
 
-	Token const& next()
+	Token next()
 	{
 		fetch_tokens_until(m_token_pos + 1);
 		if (m_token_pos < m_tokens.size())
 			return m_tokens[m_token_pos++];
 
-		return m_end_token;
+		return end_token();
 	}
 
 	void rewind()
@@ -133,30 +133,27 @@ private:
 			else
 				break;
 		}
+	}
 
-		m_end_token.span.begin = m_end_token.span.end = m_lexer.location();
+	Token end_token() const
+	{
+		return Token{
+			.kind = Lexeme::END,
+			.text = "END",
+			.span = {m_lexer.location(), m_lexer.location()},
+		};
 	}
 
 	Lexer m_lexer = {""};
 	vector<string_view> m_sources;
 	vector<Token> m_tokens;
 	size_t m_token_pos = 0; // Index of the next token to be processed
-
-	// It's a member so we can return a reference to it
-	Token m_end_token{
-		.kind = Lexeme::END,
-		.text = "END",
-		.span = {
-			.begin = {.pos = 0, .line = 1, .col = 1},
-			.end = {.pos = 0, .line = 1, .col = 1},
-		},
-	};
 };
 
-Token const& consume(Parser &parser, Lexeme kind);
+Token consume(Parser &parser, Lexeme kind);
 optional<Token> try_consume(Parser &parser, Lexeme kind);
 
-uint64_t parse_integer(string_view integer_string);
+uint64_t parse_valid_uint(string_view integer_string);
 Type parse_type(Parser &parser, Memory M);
 Expr parse_expr(Parser &parser, Memory M);
 Pattern parse_pattern(Parser &parser, Memory M);
@@ -173,3 +170,31 @@ ProcItem parse_proc(Parser &parser, Memory M);
 TopLevelItem parse_top_level_item(Parser &parser, Memory M);
 
 Module parse_module(string_view source, Memory M);
+
+// Working comments
+struct PrecedingText
+{
+	SourceLocation start_loc;
+	SourceLocation end_loc;
+	string_view text;
+};
+// Get the text (whitespace and comments) preceding the Token at the given TokenIdx.
+// The PrecedingText starts immediatly after the Token preceding token_idx.
+PrecedingText get_preceding_text(TokenIdx token_idx, Parser const &parser);
+vector<Comment> parse_comments(PrecedingText text);
+vector<string_view> extract_clean_lines(Comment comment);
+
+struct OptionSet
+{
+	optional<string_view> try_get(string_view key) const
+	{
+		auto it = opts.find(key);
+		if(it == opts.end())
+			return nullopt;
+
+		return it->second;
+	}
+
+	unordered_map<string_view, string_view> opts;
+};
+void parse_options_from_comment(Comment const &comment, OptionSet &options);

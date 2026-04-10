@@ -26,13 +26,32 @@ namespace
 
 [[noreturn]] static void throw_parse_error(string const &msg, TokenIdx tok_idx, Parser &parser)
 {
-	Token const &tok = parser.token_at(tok_idx);
+	Token tok = parser.token_at(tok_idx);
 	throw ParseError("|" + str(tok.span.begin) + "| error: " + msg);
 }
 
-Token const& consume(Parser &parser, Lexeme kind)
+PrecedingText get_preceding_text(TokenIdx token_idx, Parser const &parser)
 {
-	Token const &actual_token = parser.get();
+	Token token = parser.token_at(token_idx);
+	SourceLocation preceding_text_begin{.pos = 0, .line = 1, .col = 1};
+	SourceLocation preceding_text_end = token.span.begin;
+	if(token_idx.value > 0)
+	{
+		Token prev_token = parser.token_at(TokenIdx(token_idx.value - 1));
+		preceding_text_begin = prev_token.span.end;
+	}
+
+	string_view preceding_text = parser.get_text(preceding_text_begin.pos, preceding_text_end.pos);
+	return PrecedingText(
+		preceding_text_begin,
+		preceding_text_end,
+		preceding_text
+	);
+}
+
+Token consume(Parser &parser, Lexeme kind)
+{
+	Token actual_token = parser.get();
 	if(actual_token.kind != kind)
 		throw ParseError(str(actual_token.span.begin) + ": Expected "s + str(kind) + ", got " + str(parser.get().kind));
 
@@ -47,7 +66,7 @@ optional<Token> try_consume(Parser &parser, Lexeme kind)
 	return parser.next();
 }
 
-uint64_t parse_integer(string_view integer_string)
+uint64_t parse_valid_uint(string_view integer_string)
 {
 	uint64_t integer;
 	std::from_chars_result result = std::from_chars(integer_string.begin(), integer_string.end(), integer);
@@ -132,7 +151,7 @@ static Path parse_path(Parser &parser, Memory M)
 static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 {
 	TokenRanger ranger(parser);
-	Token const &tok = parser.next();
+	Token tok = parser.next();
 	switch(tok.kind)
 	{
 		case Lexeme::TYPE_NEVER: return BuiltinType(ranger.get(), BuiltinTypeDef::NEVER);
@@ -414,7 +433,7 @@ static Expr parse_expr(Parser &parser, OperatorInfo prev_op, Memory M)
 static Expr parse_prefix_expr(Parser &parser, Memory M)
 {
 	TokenRanger ranger(parser);
-	Token const &tok = parser.next();
+	Token tok = parser.next();
 	switch(tok.kind)
 	{
 		case Lexeme::IDENTIFIER:
@@ -431,7 +450,7 @@ static Expr parse_prefix_expr(Parser &parser, Memory M)
 		}
 
 		case Lexeme::INT_LITERAL:
-			return IntLiteralExpr(ranger.get(), parse_integer(tok.text));
+			return IntLiteralExpr(ranger.get(), parse_valid_uint(tok.text));
 
 		case Lexeme::TRUE:
 			return BoolLiteralExpr(ranger.get(), true);
@@ -657,7 +676,7 @@ static Pattern parse_primary_pattern(Parser &parser, Memory M)
 
 		case Lexeme::IDENTIFIER:
 		{
-			Token const &ident_token = parser.get();
+			Token ident_token = parser.get();
 			if(ident_token.text == "_")
 			{
 				parser.next();
@@ -1134,4 +1153,195 @@ Module parse_module(string_view source, Memory M)
 	}
 
 	return mod;
+}
+
+//--------------------------------------------------------------------
+// Working with comments
+//--------------------------------------------------------------------
+static void update_comment_target(CommentTarget &current, CommentTarget new_)
+{
+	if(current == CommentTarget::NONE or current == new_)
+		current = new_;
+	else
+		current = CommentTarget::AMBIGUOUS;
+}
+
+static bool is_multiline_comment(Comment const &comment)
+{
+	return comment.start_loc.line < comment.end_loc.line;
+}
+
+vector<Comment> parse_comments(PrecedingText text)
+{
+	vector<Comment> comments;
+	Lexer lexer(text.text, text.start_loc);
+	skip_whitespace(lexer);
+	while(optional<Comment> comment = try_read_comment(lexer))
+	{
+		comments.push_back(*comment);
+		skip_whitespace(lexer);
+	}
+
+	Comment const *prev_comment = nullptr;
+	for(Comment &comment: comments)
+	{
+		comment.target = CommentTarget::NONE;
+		if(prev_comment)
+		{
+			if(comment.start_loc.line == prev_comment->end_loc.line)
+			{
+				if(prev_comment->target != CommentTarget::NONE)
+				{
+					if(is_multiline_comment(comment))
+						comment.target = CommentTarget::AMBIGUOUS;
+					else
+						comment.target = prev_comment->target;
+				}
+			}
+			else if(comment.start_loc.line == prev_comment->end_loc.line + 1)
+			{
+				if(prev_comment->target == CommentTarget::PREVIOUS_TOKEN)
+					comment.target = CommentTarget::AMBIGUOUS;
+				else
+					comment.target = prev_comment->target;
+			}
+		}
+		else if(comment.start_loc.line == text.start_loc.line)
+		{
+			// Comments that start on the same line as the PrecedingText are usually attached to the
+			// previous token.
+			//
+			//   let a = 0; // Attaches to the previous token
+			//
+			// Two exceptions:
+			// - Multi-line comments in this scenario are always AMBIGUOUS
+			// - If the PrecedingText starts at the beginning of the file, then there is no previous
+			//   token
+
+			bool comment_starts_at_beginning_of_file =
+				text.start_loc.line == 1 and text.start_loc.col == 1
+				and comment.start_loc.col == text.start_loc.col;
+
+			if(not comment_starts_at_beginning_of_file)
+			{
+				if(is_multiline_comment(comment))
+					comment.target = CommentTarget::AMBIGUOUS;
+				else
+					comment.target = CommentTarget::PREVIOUS_TOKEN;
+			}
+		}
+
+		prev_comment = &comment;
+	}
+
+	Comment const *next_comment = nullptr;
+	for(Comment &comment: comments | std::ranges::views::reverse)
+	{
+		if(next_comment)
+		{
+			if(next_comment->start_loc.line - comment.end_loc.line <= 1)
+			{
+				if(comment.target != CommentTarget::PREVIOUS_TOKEN)
+					update_comment_target(*comment.target, *next_comment->target);
+			}
+		}
+		else if(text.end_loc.line - comment.end_loc.line <= 1)
+		{
+			// If we get here, the comment is on the last line of the PrecedingText. Usually, this
+			// means it will be attached to the next Token.
+			// However, if the comment is also on the *first* line of the PrecedingText, then we
+			// keep it attached to the previous Token. This ensures that trailing comments are
+			// attached to the previous Token on the same line, and not the next Token on the
+			// following line.
+			//
+			//   let a = 0; // Attached to previous Token
+			//   let b = 0;
+			//
+			// Still, we only do this for single line comments.
+			//
+			//   let a = 0; /*
+			//      still ambiguous
+			//   */
+			//   let b = 0;
+			bool keep_attached_to_previous_token =
+				comment.start_loc.line == text.start_loc.line and
+				not is_multiline_comment(comment);
+
+			if(comment.target == CommentTarget::PREVIOUS_TOKEN and keep_attached_to_previous_token) {
+				// do nothing
+			}
+			else
+				update_comment_target(*comment.target, CommentTarget::NEXT_TOKEN);
+		}
+
+		next_comment = &comment;
+	}
+
+	return comments;
+}
+
+vector<string_view> extract_clean_lines(Comment comment)
+{
+	vector<string_view> lines;
+	switch(comment.style)
+	{
+		case CommentStyle::BLOCK:
+		{
+			for(string_view line: split_lines(comment.text))
+			{
+				/* In block comments like this,
+				 * remove any leading star from the
+				 * beginning of a line.
+				 */
+				size_t leading_star_pos = comment.start_loc.col;
+				if(leading_star_pos < line.length() and line[leading_star_pos] == '*')
+				{
+					string_view indent = line.substr(0, comment.start_loc.col - 1);
+					if(is_whitespace(indent))
+						line.remove_prefix(leading_star_pos + 1);
+				}
+				lines.push_back(trimmed(line));
+			}
+		} break;
+		case CommentStyle::LINE:
+		{
+			lines.push_back(trimmed(comment.text));
+		} break;
+	}
+
+	return lines;
+}
+
+//--------------------------------------------------------------------
+// OptionGatherer
+//--------------------------------------------------------------------
+static std::pair<string_view, string_view> parse_option(string_view line)
+{
+	Lexer lexer(line);
+	optional<string_view> name = try_read_identifier(lexer);
+	if(not name)
+		throw std::runtime_error("Expected the name of a directive");
+
+	skip_whitespace(lexer);
+	consume(lexer, ":");
+	string_view value = trimmed(lexer.remaining_string());
+	return std::pair(*name, value);
+}
+
+void parse_options_from_comment(Comment const &comment, OptionSet &options)
+{
+	if(comment.kind == CommentKind::SPECIAL)
+	{
+		vector<string_view> lines = extract_clean_lines(comment);
+		for(string_view line: lines)
+		{
+			if(not is_whitespace(line))
+			{
+
+				auto res = options.opts.insert(parse_option(line));
+				if(not res.second)
+					throw std::runtime_error("Option already defined: "s + res.first->first);
+			}
+		}
+	}
 }

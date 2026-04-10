@@ -1,6 +1,0 @@
-proc uninitialized'T() -> T {}
-
-proc foo()
-{
-	let a: [-3]i32 = uninitialized();
-}

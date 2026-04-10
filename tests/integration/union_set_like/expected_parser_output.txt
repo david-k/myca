@@ -7,16 +7,16 @@ struct Baz
     i: i32,
 }
 
-typealias A = Foo | Bar | Baz;
+typealias A = Bar | Foo | Baz;
 
-typealias BarOrFoo = Foo | Bar;
+typealias BarOrFoo = Bar | Foo;
 
-typealias B = Foo | Bar | Baz;
+typealias B = Bar | Foo | Baz;
 
 proc main() -> i32
 {
-    let a: Foo | Bar | Baz = $InitUnion'(Foo | Bar | Baz)(Baz(34));
-    let b: Foo | Bar | Baz = a;
+    let a: Bar | Foo | Baz = $InitUnion'(Bar | Foo | Baz)(Baz(34));
+    let b: Bar | Foo | Baz = a;
     match b
     {
         case f: Foo

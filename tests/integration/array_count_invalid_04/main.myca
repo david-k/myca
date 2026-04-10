@@ -1,6 +1,0 @@
-proc uninitialized'T() -> T {}
-proc main() -> i32
-{
-	let c: usize = 5;
-	let arr: [c]usize = uninitialized();
-}

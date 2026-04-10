@@ -5,15 +5,21 @@
 class InstanceRegistry;
 struct TypeArgList;
 
+enum class SubstitutionPhase
+{
+	DEDUCTION,
+	INSTANTIATION,
+};
+
 enum class SubstitutionMode
 {
 	BEST_EFFORT,
-	FULL_DEDUCTION,
 	FULL,
 };
 
 struct SubstitutionOptions
 {
+	SubstitutionPhase phase;
 	SubstitutionMode mode;
 	TokenRange region_being_substituted{};
 };

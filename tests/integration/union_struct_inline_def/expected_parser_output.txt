@@ -1,4 +1,4 @@
-proc get_error_code(err: DivisionByZero | Overflow | FileNotFound | NoPermission) -> i32
+proc get_error_code(err: FileNotFound | Overflow | NoPermission | DivisionByZero) -> i32
 {
     match err
     {
@@ -23,12 +23,12 @@ proc get_error_code(err: DivisionByZero | Overflow | FileNotFound | NoPermission
 
 proc main() -> i32
 {
-    let err: DivisionByZero | Overflow | FileNotFound | NoPermission = $InitUnion'(DivisionByZero | Overflow | FileNotFound | NoPermission)(FileNotFound());
+    let err: FileNotFound | Overflow | NoPermission | DivisionByZero = $InitUnion'(FileNotFound | Overflow | NoPermission | DivisionByZero)(FileNotFound());
     return get_error_code(err);
 }
 
-typealias Error = DivisionByZero | Overflow | FileNotFound | NoPermission;
+typealias Error = FileNotFound | Overflow | NoPermission | DivisionByZero;
 
-typealias ArithError = DivisionByZero | Overflow;
+typealias ArithError = Overflow | DivisionByZero;
 
 typealias IOError = FileNotFound | NoPermission;
