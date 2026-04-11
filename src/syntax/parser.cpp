@@ -1035,6 +1035,8 @@ StructItem parse_struct(Parser &parser, StructParseContext struct_context, Memor
 				);
 				case_member->is_implicit = is_implicit;
 				members.append(CaseMember(case_member, nullopt));
+				if(parser.get().kind != Lexeme::RIGHT_BRACE)
+					consume(parser, Lexeme::COMMA);
 			}
 			else if(try_consume(parser, Lexeme::STRUCT))
 			{
@@ -1042,6 +1044,8 @@ StructItem parse_struct(Parser &parser, StructParseContext struct_context, Memor
 					parse_struct(parser, StructParseContext::INLINE, M)
 				);
 				members.append(StructMember(struct_member));
+				if(parser.get().kind != Lexeme::RIGHT_BRACE)
+					consume(parser, Lexeme::COMMA);
 			}
 			else
 			{
@@ -1054,12 +1058,14 @@ StructItem parse_struct(Parser &parser, StructParseContext struct_context, Memor
 				if(try_consume(parser, Lexeme::EQ))
 					member.default_value = M.main->alloc<Expr>(parse_expr(parser, M));
 
+				// Comma needs to be part of the member's token range so that trailing comments are
+				// properly attached
+				if(parser.get().kind != Lexeme::RIGHT_BRACE)
+					consume(parser, Lexeme::COMMA);
+
 				member.range = member_ranger.get();
 				members.append(VarMember(member, nullopt));
 			}
-
-			if(parser.get().kind != Lexeme::RIGHT_BRACE)
-				consume(parser, Lexeme::COMMA);
 		}
 		consume(parser, Lexeme::RIGHT_BRACE);
 	}

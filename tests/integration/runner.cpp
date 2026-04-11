@@ -1,5 +1,6 @@
 #include <filesystem>
 #include <iostream>
+#include <string>
 
 #include "syntax/parser.hpp"
 #include "semantics/module.hpp"
@@ -426,47 +427,111 @@ static bool run_test_with_spec_files(
 //--------------------------------------------------------------------
 // Running tests with inline specs
 //--------------------------------------------------------------------
-static void validate_inline_spec(ModuleOptions const &opts)
+static string set_line_number_in_msg(string_view error_msg, int line_number)
 {
-	bool expect_error = false;
+	string result(trimmed(error_msg));
+	// Replace the underscore in "|_:COLUMN| error: ..." with `line_number`
+	if(error_msg.starts_with("|_"))
+		result.replace(1, 1, std::to_string(line_number));
+
+	return result;
+}
+
+static void ensure_valid_keys(
+	OptionSet const &opts,
+	std::span<string_view> valid_keys,
+	string_view error_context
+)
+{
+	for(string_view key: ranges::views::keys(opts.opts))
+	{
+		if(not ranges::contains(valid_keys, key))
+			throw std::runtime_error("Invalid "s + error_context + " option: "s + key);
+	}
+}
+
+// Returns the expected error message, if specified
+static optional<string> validate_inline_spec(ModuleOptions const &opts, Module const &mod)
+{
+	bool has_top_level_error = false;
+	bool has_local_error = false;
+	optional<string> expected_error;
 	if(OptionSet const *options = opts.try_get(TopLevelTarget()))
 	{
 		string_view valid_options[] = {"test", "return_code", "error"};
-		for(string_view key: ranges::views::keys(options->opts))
-		{
-			if(not ranges::contains(valid_options, key))
-				throw std::runtime_error("Invalid top-level option: "s + key);
-		}
+		ensure_valid_keys(*options, valid_options, "top-level");
 
 		if(not options->try_get("test"))
 			throw std::runtime_error("Top-level option \"test\" is missing");
 
-		if(options->try_get("error"))
-			expect_error = true;
+		if(optional<string_view> error = options->try_get("error"))
+		{
+			expected_error = string(*error);
+			has_top_level_error = true;
+		}
 
 		if(options->try_get("error") and options->try_get("return_code"))
 			throw std::runtime_error("Cannot use options \"error\" and \"return_code\" together");
 	}
+
+	auto check_local_error = [&](OptionSet const &options, TokenIdx item_token)
+	{
+		if(optional<string_view> error = options.try_get("error"))
+		{
+			if(has_top_level_error)
+				throw std::runtime_error("Local \"error\" cannot be used together with top-level \"error\"");
+
+			if(has_local_error)
+				throw std::runtime_error("Local \"error\" can only be used once");
+
+			int line = mod.parser.token_at(item_token).span.begin.line;
+			expected_error = set_line_number_in_msg(*error, line);
+			has_local_error = true;
+		}
+	};
 
 	for(auto const &[target, options]: opts.opts)
 	{
 		target | match
 		{
 			[&](TopLevelTarget) {},
-			[&](Stmt const*)
+			[&](StructItem const *item)
 			{
-				string_view valid_options[] = {"expect"};
-				for(string_view key: ranges::views::keys(options.opts))
-				{
-					if(not ranges::contains(valid_options, key))
-						throw std::runtime_error("Invalid statement option: "s + key);
-				}
-
-				if(options.try_get("expect") and expect_error)
+				string_view valid_options[] = {"error"};
+				ensure_valid_keys(options, valid_options, "struct");
+				check_local_error(options, item->range.first);
+			},
+			[&](pair<StructItem const*, VarMember const*> m)
+			{
+				string_view valid_options[] = {"error"};
+				ensure_valid_keys(options, valid_options, "struct member");
+				check_local_error(options, m.second->var.range.first);
+			},
+			[&](ProcItem const *item)
+			{
+				string_view valid_options[] = {"error"};
+				ensure_valid_keys(options, valid_options, "proc");
+				check_local_error(options, item->range.first);
+			},
+			[&](AliasItem const *item)
+			{
+				string_view valid_options[] = {"error"};
+				ensure_valid_keys(options, valid_options, "alias");
+				check_local_error(options, item->range.first);
+			},
+			[&](Stmt const *stmt)
+			{
+				string_view valid_options[] = {"expect", "error"};
+				ensure_valid_keys(options, valid_options, "statement");
+				if(options.try_get("expect") and has_top_level_error)
 					throw std::runtime_error("Statement-level \"expect\" cannot be used together with top-level \"error\"");
+
+				check_local_error(options, stmt->token_range().first);
 			},
 		};
 	}
+
+	return expected_error;
 }
 
 static bool run_test_with_inline_spec(
@@ -475,10 +540,10 @@ static bool run_test_with_inline_spec(
 )
 {
 	ModuleOptions const &opts = compilation_result.opts;
-	validate_inline_spec(opts);
+	optional<string> expected_error = validate_inline_spec(opts, compilation_result.mod);
 	if(compilation_result.outcome == Outcome::SUCCESS)
 	{
-		if(opts.try_get(TopLevelTarget(), "error"))
+		if(expected_error)
 		{
 			std::cout << "ERROR" << std::endl;
 			std::cout << "> Compilation should have failed but succeeded" << std::endl;
@@ -510,6 +575,10 @@ static bool run_test_with_inline_spec(
 
 					return true;
 				},
+				[&](StructItem const*) { return true; },
+				[&](pair<StructItem const*, VarMember const*>) { return true; },
+				[&](ProcItem const*) { return true; },
+				[&](AliasItem const*) { return true; },
 				[&](TopLevelTarget) { return true; },
 			};
 
@@ -522,7 +591,6 @@ static bool run_test_with_inline_spec(
 	}
 	else // Outcome::FAILURE
 	{
-		optional<string_view> expected_error = opts.try_get(TopLevelTarget(), "error");
 		if(not expected_error)
 		{
 			std::cout << "ERROR" << std::endl;

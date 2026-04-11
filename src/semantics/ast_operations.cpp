@@ -2001,16 +2001,80 @@ public:
 	explicit OptionGatherer(Module const &mod) :
 		m_mod(&mod)
 	{
-		process_tokens_until_before(TokenIdx(1));
 		for(TopLevelItem const &item: to_range(m_mod->items.list()))
-		{
-			if(ProcItem const *proc = std::get_if<ProcItem>(&item))
-			{
-				if(proc->body)
-					stmt_visit(*proc->body, *this);
-			}
-		}
+			std::visit(*this, item);
+
 		process_tokens_until_before(TokenIdx(m_mod->parser.token_count()));
+	}
+
+	void operator () (StructItem const &struct_)
+	{
+		TokenIdx first_token_idx = struct_.range.first;
+		process_tokens_until_before(first_token_idx);
+
+		PrecedingText preceding_text = get_preceding_text(first_token_idx, m_mod->parser);
+		for(Comment const &c: parse_comments(preceding_text))
+			process_comment(c, &struct_);
+
+		m_next_token_to_process = first_token_idx + 1;
+		for(Member const &member: *struct_.members)
+		{
+			member | match
+			{
+				[&](VarMember const &m)    { (*this)({&struct_, &m}); },
+				[&](CaseMember const &m)   { (*this)(*m.struct_); },
+				[&](StructMember const &m) { (*this)(*m.struct_); },
+			};
+		}
+
+		process_tokens_until_before(struct_.range.last + 1);
+		m_previous_target = &struct_;
+	}
+
+	void operator () (pair<StructItem const*, VarMember const*> m)
+	{
+		VarMember const *var_member = m.second;
+		TokenIdx first_token_idx = var_member->var.range.first;
+		process_tokens_until_before(first_token_idx);
+
+		PrecedingText preceding_text = get_preceding_text(first_token_idx, m_mod->parser);
+		for(Comment const &c: parse_comments(preceding_text))
+			process_comment(c, m);
+
+		m_next_token_to_process = first_token_idx + 1;
+		process_tokens_until_before(var_member->var.range.last + 1);
+		m_previous_target = m;
+	}
+
+	void operator () (ProcItem const &proc)
+	{
+		TokenIdx first_token_idx = proc.range.first;
+		process_tokens_until_before(first_token_idx);
+
+		PrecedingText preceding_text = get_preceding_text(first_token_idx, m_mod->parser);
+		for(Comment const &c: parse_comments(preceding_text))
+			process_comment(c, &proc);
+
+		m_next_token_to_process = first_token_idx + 1;
+		if(proc.body)
+			stmt_visit(*proc.body, *this);
+
+		process_tokens_until_before(proc.range.last + 1);
+		m_previous_target = &proc;
+	}
+
+	void operator () (AliasItem const &alias)
+	{
+		TokenIdx first_token_idx = alias.range.first;
+		process_tokens_until_before(first_token_idx);
+
+		PrecedingText preceding_text = get_preceding_text(first_token_idx, m_mod->parser);
+		for(Comment const &c: parse_comments(preceding_text))
+			process_comment(c, &alias);
+
+		m_next_token_to_process = first_token_idx + 1;
+		process_tokens_until_before(alias.range.last + 1);
+		m_previous_target = &alias;
 	}
 
 	void operator () (Stmt const &stmt)
@@ -2058,7 +2122,7 @@ private:
 		{
 			case CommentTarget::NONE:
 			{
-				if(not m_accept_global_options)
+				if(not accept_global_options())
 					throw std::runtime_error("Global options must appear at the beginning of the file");
 
 				add_options_to_target(comment, TopLevelTarget());
@@ -2093,9 +2157,13 @@ private:
 			m_option_sets.opts.erase(target);
 	}
 
+	bool accept_global_options() const
+	{
+		return m_next_token_to_process.value == 0;
+	}
+
 	Module const *m_mod;
 	ModuleOptions m_option_sets;
-	bool m_accept_global_options = true;
 	optional<OptionTarget> m_previous_target;
 	TokenIdx m_next_token_to_process{0};
 };
@@ -2113,14 +2181,30 @@ void print_options(OptionSet const &options, std::ostream &os)
 	ranges::sort(keys);
 
 	for(string_view key: keys)
-		os << key << ": " << options.opts.at(key) << std::endl;
+		os << "  " << key << ": " << options.opts.at(key) << std::endl;
 }
 
-string str(OptionTarget target)
+string str(OptionTarget target, Module const &mod)
 {
 	return target | match
 	{
 		[&](TopLevelTarget) { return "TopLevel"s; },
+		[&](StructItem const *item)
+		{
+			return "struct "s + item->name;
+		},
+		[&](pair<StructItem const*, VarMember const*> m)
+		{
+			return string(m.first->name) + "::" + mod.name_of(m.second->var);
+		},
+		[&](ProcItem const *item)
+		{
+			return "proc "s + item->name;
+		},
+		[&](AliasItem const *item)
+		{
+			return "typealias "s + item->name;
+		},
 		[&](Stmt const *stmt)
 		{
 			return *stmt | match

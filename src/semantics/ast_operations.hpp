@@ -137,7 +137,26 @@ struct std::hash<TopLevelTarget>
 	size_t operator () (TopLevelTarget) const { return 273654124; }
 };
 
-using OptionTarget = variant<TopLevelTarget, Stmt const*>;
+template<>
+struct std::hash<pair<StructItem const*, VarMember const*>>
+{
+	size_t operator () (pair<StructItem const*, VarMember const*> p) const
+	{
+		size_t h = 0;
+		combine_hashes(h, compute_hash(p.first));
+		combine_hashes(h, compute_hash(p.second));
+		return h;
+	}
+};
+
+using OptionTarget = variant<
+	TopLevelTarget,
+	StructItem const*,
+	pair<StructItem const*, VarMember const*>,
+	ProcItem const*,
+	AliasItem const*,
+	Stmt const*
+>;
 
 struct ModuleOptions
 {
@@ -165,5 +184,5 @@ struct ModuleOptions
 
 // Extract options from special comments
 ModuleOptions gather_options(Module const &mod);
-void print_options(OptionSet const &options);
-string str(OptionTarget target);
+void print_options(OptionSet const &options, std::ostream &os);
+string str(OptionTarget target, Module const &mod);

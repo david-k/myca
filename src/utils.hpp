@@ -150,20 +150,6 @@ inline string_view trimmed(string_view str)
 	return str;
 }
 
-inline std::generator<string_view> split_lines(string_view text)
-{
-	while(not text.empty())
-	{
-		size_t line_end = text.find('\n');
-		if(line_end != string_view::npos)
-			line_end += 1; // include \n
-
-		string_view line = text.substr(0, line_end);
-		text.remove_prefix(line.length());
-		co_yield line;
-	}
-}
-
 inline bool remove_prefix_if(string_view &text, string_view prefix)
 {
 	if(text.starts_with(prefix))
@@ -172,6 +158,24 @@ inline bool remove_prefix_if(string_view &text, string_view prefix)
 		return true;
 	}
 	return false;
+}
+
+inline string_view remove_prefix_until(string_view &text, char delimiter)
+{
+	size_t line_end = text.find(delimiter);
+	if(line_end != string_view::npos)
+		line_end += 1; // include delimiter
+
+	string_view prefix = text.substr(0, line_end);
+	text.remove_prefix(prefix.length());
+
+	return prefix;
+}
+
+inline std::generator<string_view> split_lines(string_view text)
+{
+	while(not text.empty())
+		co_yield remove_prefix_until(text, '\n');
 }
 
 inline bool is_whitespace(string_view str)

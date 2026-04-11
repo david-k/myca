@@ -1,8 +1,12 @@
 #include "runner.hpp"
 #include "semantics/module.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <ranges>
+#include <sstream>
+
+namespace ranges = std::ranges;
 
 //--------------------------------------------------------------------
 // Utils
@@ -119,6 +123,100 @@ static void test_comments(
 		if(actual_comment.target != expected_comment.target)
 		{
 			print_comment_error(expected_comment, actual_comment, actual_lines);
+			throw TestError();
+		}
+	}
+}
+
+static string module_options_to_string(ModuleOptions const &opts, Module const &mod)
+{
+	vector<pair<string, OptionSet const*>> options_by_target;
+	for(auto const &[target, options]: opts.opts)
+		options_by_target.emplace_back(str(target, mod), &options);
+
+	ranges::sort(options_by_target, {}, &pair<string,OptionSet const*>::first);
+
+	std::stringstream ss;
+	for(auto const &[target_str, options]: options_by_target)
+	{
+		ss << target_str << "\n";
+		print_options(*options, ss);
+	}
+
+	return std::move(ss).str();
+}
+
+struct OptionsResultSuccess
+{
+	string_view printed_options;
+};
+
+struct OptionsResultFailure
+{
+	string_view error;
+};
+using OptionsResult = variant<OptionsResultSuccess, OptionsResultFailure>;
+
+static bool eq_ignore_indent(string_view a, string_view b)
+{
+	trim(a);
+	trim(b);
+	while(a.length() and b.length())
+	{
+		string_view prefix_a = remove_prefix_until(a, '\n');
+		string_view prefix_b = remove_prefix_until(b, '\n');
+		if(trimmed(prefix_a) != trimmed(prefix_b))
+			return false;
+	}
+
+	return a.empty() and b.empty();
+}
+
+static void test_options(string_view source, OptionsResult expected)
+{
+	auto [arena, mem] = mk_arena();
+	auto [temp_arena, temp_mem] = mk_arena();
+	Module mod = parse_module(source, Memory(&arena, temp_arena));
+
+	try
+	{
+		ModuleOptions opts = gather_options(mod);
+		if(OptionsResultSuccess const *s = std::get_if<OptionsResultSuccess>(&expected))
+		{
+			string actual = module_options_to_string(opts, mod);
+			if(not eq_ignore_indent(actual, s->printed_options))
+			{
+				std::cout << "ERROR" << std::endl;
+				std::cout << "> Expected:" << std::endl;
+				std::cout << trimmed(s->printed_options) << std::endl;
+				std::cout << "> Actual:" << std::endl;
+				std::cout << actual << std::endl;
+				throw TestError();
+			}
+		}
+		else
+		{
+			std::cout << "ERROR" << std::endl;
+			std::cout << "> Expected failure, got success" << std::endl;
+			throw TestError();
+		}
+	}
+	catch(std::exception const &exc)
+	{
+		if(OptionsResultFailure const *s = std::get_if<OptionsResultFailure>(&expected))
+		{
+			if(exc.what() != s->error)
+			{
+				std::cout << "ERROR" << std::endl;
+				std::cout << "> Expected error: " << s->error << std::endl;
+				std::cout << "> Actual error: " << exc.what() << std::endl;
+				throw TestError();
+			}
+		}
+		else
+		{
+			std::cout << "ERROR" << std::endl;
+			std::cout << "> Expected success, got error: " << exc.what() << std::endl;
 			throw TestError();
 		}
 	}
@@ -429,30 +527,75 @@ proc main() {})";
 	test_comments(source, expected_comments);
 }
 
-// TODO Add actual tests
-//TEST(Comments, Options)
-//{
-//	string_view source =
-//R"(//!test: This is a test
-////!return_code: 2
-//proc main()
-//{
-//	//!opt: here we go
-//	let g = 0;
-//
-//	/*! yo: so */
-//	let h = 0; //!what: is this
-//})";
-//
-//	auto [arena, mem] = mk_arena();
-//	auto [temp_arena, temp_mem] = mk_arena();
-//	Module mod = parse_module(source, Memory(&arena, temp_arena));
-//	ModuleOptions opts = gather_options(mod);
-//
-//	for(auto const &[target, options]: opts.opts)
-//	{
-//		std::cout << "---------------------------" << std::endl;
-//		std::cout << str(target) << ":" << std::endl;
-//		print_options(options);
-//	}
-//}
+TEST(Comments, Options)
+{
+	test_options(
+		R"(//!test: This is a test
+		//!return_code: 2
+		proc main()
+		{
+			//!opt: here we go
+			let g = 0;
+
+			/*! yo: so */
+			let h = 0; //!what: is this
+		})",
+		OptionsResultSuccess(R"(
+			LetStmt
+			  opt: here we go
+			LetStmt
+			  what: is this
+			  yo: so
+			proc main
+			  return_code: 2
+			  test: This is a test
+		)")
+	);
+
+	test_options(
+		R"(//!test: This is a test
+
+		//!return_code: 2
+		proc main() { })",
+		OptionsResultSuccess(R"(
+			TopLevel
+			  test: This is a test
+			proc main
+			  return_code: 2
+		)")
+	);
+}
+
+TEST(Comments, Options_Struct)
+{
+	test_options(
+		R"(//!hello: ciao
+		struct S
+		{
+			//!member: a
+			a: i32, //!also: member a
+			b: i8 //!member: b
+		})",
+		OptionsResultSuccess(R"(
+			S::a
+			  also: member a
+			  member: a
+			S::b
+			  member: b
+			struct S
+			  hello: ciao
+		)")
+	);
+
+	test_options(
+		R"(//!hello: ciao
+		struct S
+		{
+			//!member: a
+
+			a: i32, //!also: member a
+			b: i8 //!member: b
+		})",
+		OptionsResultFailure("Global options must appear at the beginning of the file")
+	);
+}
