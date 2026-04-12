@@ -226,20 +226,14 @@ static CompilationResult compile_myca(string_view source, fs::path const &test_b
 	}
 }
 
-static bool check_compilation(CompilationSpec spec, CompilationResult const &result, bool print_success)
+static bool check_compilation(CompilationSpec spec, CompilationResult const &result)
 {
 	if(result.outcome == Outcome::SUCCESS)
 	{
 		if(spec.expected_outcome == Outcome::SUCCESS)
 		{
-			if(spec.expected_output)
+			if(spec.expected_output and trimmed(*spec.expected_output) != trimmed(result.output))
 			{
-				if(trimmed(*spec.expected_output) == trimmed(result.output))
-				{
-					if(print_success) std::cout << "ok" << std::endl;
-					return true;
-				}
-
 				std::cout << "ERROR" << std::endl;
 				std::cout << "> Expected output:" << std::endl;
 				std::cout << *spec.expected_output << std::endl;
@@ -247,42 +241,36 @@ static bool check_compilation(CompilationSpec spec, CompilationResult const &res
 				std::cout << result.output << std::endl;
 				return false;
 			}
-
-			if(print_success) std::cout << "ok" << std::endl;
-			return true;
 		}
-
-		std::cout << "ERROR" << std::endl;
-		std::cout << "> Compilation should have failed but succeeded" << std::endl;
-		return false;
+		else
+		{
+			std::cout << "ERROR" << std::endl;
+			std::cout << "> Compilation should have failed but succeeded" << std::endl;
+			return false;
+		}
 	}
 	else // result.outcome == Outcome::FAILURE
 	{
 		if(spec.expected_outcome == Outcome::FAILURE)
 		{
-			if(spec.expected_output)
+			if(spec.expected_output and trimmed(*spec.expected_output) != trimmed(result.output))
 			{
-				if(trimmed(*spec.expected_output) == result.output)
-				{
-					if(print_success) std::cout << "ok" << std::endl;
-					return true;
-				}
-
 				std::cout << "ERROR" << std::endl;
 				std::cout << "> Expected error: " << *spec.expected_output << std::endl;
 				std::cout << "> Actual error:   " << result.output << std::endl;
 				return false;
 			}
-
-			if(print_success) std::cout << "ok" << std::endl;
-			return true;
 		}
-
-		std::cout << "ERROR" << std::endl;
-		std::cout << "> Compilation failed with error:" << std::endl;
-		std::cout << "> " << result.output << std::endl;
-		return false;
+		else
+		{
+			std::cout << "ERROR" << std::endl;
+			std::cout << "> Compilation failed with error:" << std::endl;
+			std::cout << "> " << result.output << std::endl;
+			return false;
+		}
 	}
+
+	return true;
 }
 
 static ExecutionResult execute_myca(fs::path const &test_build_dir)
@@ -325,7 +313,6 @@ static bool check_execution(ExecutionSpec spec, ExecutionResult result)
 		return false;
 	}
 
-	std::cout << "ok" << std::endl;
 	return true;
 }
 
@@ -421,8 +408,7 @@ static bool run_test_with_spec_files(
 	if(execution_spec and not compilation_spec)
 		compilation_spec = CompilationSpec{.expected_outcome = Outcome::SUCCESS, .expected_output = nullopt};
 
-	bool print_success = not execution_spec;
-	bool ok = check_compilation(*compilation_spec, compilation_result, print_success);
+	bool ok = check_compilation(*compilation_spec, compilation_result);
 	if(not ok) return false;
 
 	if(execution_spec)
@@ -618,7 +604,6 @@ static bool run_test_with_inline_spec(
 		}
 	}
 
-	std::cout << "ok" << std::endl;
 	return true;
 }
 
@@ -631,7 +616,7 @@ static bool run_test(Test const &test, fs::path const &root_build_dir)
 	fs::path test_build_dir = root_build_dir / test.name();
 	fs::create_directories(test_build_dir);
 
-	return test | match
+	bool ok = test | match
 	{
 		[&](SeparateSpecTest const &t)
 		{
@@ -651,6 +636,9 @@ static bool run_test(Test const &test, fs::path const &root_build_dir)
 			return run_test_with_inline_spec(compilation_result, test_build_dir);
 		},
 	};
+
+	if(ok) std::cout << "ok" << std::endl;
+	return ok;
 }
 
 static string_view next_arg(char** &argv)
