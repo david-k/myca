@@ -45,7 +45,8 @@ PrecedingText get_preceding_text(TokenIdx token_idx, Parser const &parser)
 	return PrecedingText(
 		preceding_text_begin,
 		preceding_text_end,
-		preceding_text
+		preceding_text,
+		token.kind == Lexeme::END
 	);
 }
 
@@ -1230,7 +1231,7 @@ vector<Comment> parse_comments(PrecedingText text)
 
 			if(not comment_starts_at_beginning_of_file)
 			{
-				if(is_multiline_comment(comment))
+				if(is_multiline_comment(comment) or comment.end_loc.line == text.end_loc.line)
 					comment.target = CommentTarget::AMBIGUOUS;
 				else
 					comment.target = CommentTarget::PREVIOUS_TOKEN;
@@ -1276,7 +1277,7 @@ vector<Comment> parse_comments(PrecedingText text)
 			if(comment.target == CommentTarget::PREVIOUS_TOKEN and keep_attached_to_previous_token) {
 				// do nothing
 			}
-			else
+			else if(not text.until_eof)
 				update_comment_target(*comment.target, CommentTarget::NEXT_TOKEN);
 		}
 

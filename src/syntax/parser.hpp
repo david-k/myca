@@ -177,6 +177,7 @@ struct PrecedingText
 	SourceLocation start_loc;
 	SourceLocation end_loc;
 	string_view text;
+	bool until_eof;
 };
 // Get the text (whitespace and comments) preceding the Token at the given TokenIdx.
 // The PrecedingText starts immediatly after the Token preceding token_idx.

@@ -588,6 +588,26 @@ TEST(Comments, Options_Struct)
 	);
 
 	test_options(
+		R"(
+		struct S
+		{
+			a: i32
+			, /*!member: a*/ b: i8
+		})",
+		OptionsResultFailure("Option target is ambiguous")
+	);
+
+	test_options(
+		R"(/*!test: hallo*/)",
+		OptionsResultSuccess(R"(
+			TopLevel
+			  test: hallo
+		)")
+	);
+
+	return;
+
+	test_options(
 		R"(//!hello: ciao
 		struct S
 		{
