@@ -1,4 +1,5 @@
 #include <filesystem>
+#include <generator>
 #include <iostream>
 #include <string>
 
@@ -60,26 +61,36 @@ struct Test : variant<SeparateSpecTest, InlineSpecTest>
 	}
 };
 
-static vector<string_view> split_test_cases(string_view source)
+static size_t find_test_case_separator(string_view text)
 {
-	vector<string_view> test_case_sources;
-	const char *prev_test_case_end = source.begin();
-	for(string_view line: split_lines(source))
+	for(string_view line: split_lines(text))
 	{
-		if(line.starts_with("//!---"))
-		{
-			size_t test_case_length = line.begin() - prev_test_case_end;
-			string_view test_case_source(prev_test_case_end, test_case_length);
-			test_case_sources.push_back(test_case_source);
-			prev_test_case_end = line.end();
-		}
+		size_t separator_offset = line.find("//!---");
+		if(separator_offset == string_view::npos) continue;
+		if(not is_whitespace(line.substr(0, separator_offset))) continue;
+
+		return (line.begin() - text.begin()) + separator_offset;
 	}
+	return string_view::npos;
+}
 
-	size_t test_case_length = source.end() - prev_test_case_end;
-	string_view test_case_source(prev_test_case_end, test_case_length);
-	test_case_sources.push_back(test_case_source);
+static string_view next_test_case(string_view &source)
+{
+	size_t sep_begin_pos = find_test_case_separator(source);
+	size_t sep_end_pos = source.find('\n', sep_begin_pos);
+	string_view test_case = source.substr(0, sep_begin_pos);
+	source.remove_prefix(std::min(source.length(), sep_end_pos));
+	return test_case;
+}
 
-	return test_case_sources;
+static std::generator<string_view> split_test_cases(string_view source)
+{
+	while(not source.empty())
+	{
+		string_view test_case = next_test_case(source);
+		if(not is_whitespace(test_case))
+			co_yield test_case;
+	}
 }
 
 static optional<string_view> extract_test_case_name(string_view source)
