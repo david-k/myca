@@ -1,1 +1,1 @@
-|3:9| error: Expected single-element pointer type, got [bare]i32
+|3:9| error: Expected single-element pointer, got [bare]i32

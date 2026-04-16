@@ -38,6 +38,7 @@ enum class Lexeme
 	SLASH,
 	STAR,
 	EQ,
+	NE,
 	COLON_EQ,
 	DOUBLE_EQ,
 	LT,
@@ -45,6 +46,8 @@ enum class Lexeme
 	GT,
 	GE,
 	NOT,
+	AND,
+	OR,
 
 	TYPE_NEVER,
 	TYPE_BOOL,
@@ -58,6 +61,7 @@ enum class Lexeme
 
 	AS,
 	MUT,
+	REF,
 	BARE,
 
 	SIZE_OF,

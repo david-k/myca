@@ -450,8 +450,8 @@ static void ensure_valid_keys(
 // Returns the expected error message, if specified
 static optional<string> validate_inline_spec(ModuleOptions const &opts, Module const &mod)
 {
-	bool has_top_level_error = false;
-	bool has_local_error = false;
+	bool has_expect = false;
+	bool has_return_code = false;
 	optional<string> expected_error;
 	if(OptionSet const *options = opts.try_get(TopLevelTarget()))
 	{
@@ -462,28 +462,21 @@ static optional<string> validate_inline_spec(ModuleOptions const &opts, Module c
 			throw std::runtime_error("Top-level option \"test\" is missing");
 
 		if(optional<string_view> error = options->try_get("error"))
-		{
 			expected_error = string(*error);
-			has_top_level_error = true;
-		}
 
-		if(options->try_get("error") and options->try_get("return_code"))
-			throw std::runtime_error("Cannot use options \"error\" and \"return_code\" together");
+		if(options->try_get("return_code"))
+			has_return_code = true;
 	}
 
-	auto check_local_error = [&](OptionSet const &options, TokenIdx item_token)
+	auto process_local_error_spec = [&](OptionSet const &options, TokenIdx item_token)
 	{
 		if(optional<string_view> error = options.try_get("error"))
 		{
-			if(has_top_level_error)
-				throw std::runtime_error("Local \"error\" cannot be used together with top-level \"error\"");
-
-			if(has_local_error)
-				throw std::runtime_error("Local \"error\" can only be used once");
+			if(expected_error)
+				throw std::runtime_error("Only one \"error\" clause can be specified per test case");
 
 			int line = mod.parser.token_at(item_token).span.begin.line;
 			expected_error = set_line_number_in_msg(*error, line);
-			has_local_error = true;
 		}
 	};
 
@@ -496,37 +489,46 @@ static optional<string> validate_inline_spec(ModuleOptions const &opts, Module c
 			{
 				string_view valid_options[] = {"error"};
 				ensure_valid_keys(options, valid_options, "struct");
-				check_local_error(options, item->range.first);
+				process_local_error_spec(options, item->range.first);
 			},
 			[&](pair<StructItem const*, VarMember const*> m)
 			{
 				string_view valid_options[] = {"error"};
 				ensure_valid_keys(options, valid_options, "struct member");
-				check_local_error(options, m.second->var.range.first);
+				process_local_error_spec(options, m.second->var.range.first);
 			},
 			[&](ProcItem const *item)
 			{
 				string_view valid_options[] = {"error"};
 				ensure_valid_keys(options, valid_options, "proc");
-				check_local_error(options, item->range.first);
+				process_local_error_spec(options, item->range.first);
 			},
 			[&](AliasItem const *item)
 			{
 				string_view valid_options[] = {"error"};
 				ensure_valid_keys(options, valid_options, "alias");
-				check_local_error(options, item->range.first);
+				process_local_error_spec(options, item->range.first);
 			},
 			[&](Stmt const *stmt)
 			{
 				string_view valid_options[] = {"expect", "error"};
 				ensure_valid_keys(options, valid_options, "statement");
-				if(options.try_get("expect") and has_top_level_error)
-					throw std::runtime_error("Statement-level \"expect\" cannot be used together with top-level \"error\"");
+				if(options.try_get("expect"))
+					has_expect = true;
 
-				check_local_error(options, stmt->token_range().first);
+				process_local_error_spec(options, stmt->token_range().first);
 			},
 		};
 	}
+
+	if(not expected_error and not has_return_code and not has_expect)
+		throw std::runtime_error("Test case does not specify any test condition");
+
+	if(has_expect and expected_error)
+		throw std::runtime_error("Statement-level \"expect\" cannot be used together with \"error\"");
+
+	if(expected_error and has_return_code)
+		throw std::runtime_error("Cannot use options \"error\" and \"return_code\" together");
 
 	return expected_error;
 }

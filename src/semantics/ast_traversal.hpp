@@ -133,8 +133,8 @@ void type_visit_children(T &&t, Visitor &&visitor)
 template<typename Visitor>
 void type_visit_children(ProcType const &t, Visitor &&visitor)
 {
-	for(Type const &p: *t.inst->params)
-		type_visit(p, visitor);
+	for(ProcTypeParameter const &p: *t.inst->params)
+		type_visit(p.type, visitor);
 
 	type_visit(std::as_const(*t.inst->ret), visitor);
 }
@@ -147,8 +147,8 @@ void type_visit_children(T &&t, Visitor &&visitor)
 {
 	constexpr bool is_const = std::is_const_v<std::remove_reference_t<T>>;
 
-	for(FORWARD_CONST(Type) &p: *t.params)
-		type_visit(FORWARD_CONST_VAL(p), visitor);
+	for(FORWARD_CONST(ProcTypeParameter) &p: *t.params)
+		type_visit(FORWARD_CONST_VAL(p.type), visitor);
 
 	type_visit(FORWARD_CONST_VAL(*t.ret), visitor);
 }

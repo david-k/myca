@@ -98,7 +98,7 @@ struct ProcTypeUnresolved
 {
 	TokenRange range;
 	Type *ret;
-	FixedArray<Type> *params = nullptr;
+	FixedArray<struct ProcTypeParameter> *params = nullptr;
 };
 
 struct ProcType
@@ -186,6 +186,12 @@ struct Type : variant<
 	}
 };
 
+struct ProcTypeParameter
+{
+	Type type;
+	bool is_ref;
+};
+
 static_assert(sizeof(Type) == 48, "sizeof(Type) is getting larger...");
 
 //--------------------------------------------------------------------
@@ -242,10 +248,14 @@ enum class BinaryOp
 	DIV = int(Lexeme::SLASH),
 
 	EQ = int(Lexeme::DOUBLE_EQ),
+	NE = int(Lexeme::NE),
 	LT = int(Lexeme::LT),
 	LE = int(Lexeme::LE),
 	GT = int(Lexeme::GT),
 	GE = int(Lexeme::GE),
+
+	AND = int(Lexeme::AND),
+	OR = int(Lexeme::OR),
 };
 struct BinaryExpr
 {
@@ -462,6 +472,7 @@ struct Argument
 	TokenRange range;
 	Expr expr;
 	string_view name{}; // May be empty
+	bool preserve_mut = false;
 	int param_idx = 0; // Available after semantic analysis
 };
 
@@ -739,6 +750,7 @@ struct Parameter
 	TokenRange range;
 	Type *NULLABLE type = nullptr;
 	DefaultValueExpr default_value;
+	bool is_ref = false;
 };
 
 struct ProcItem

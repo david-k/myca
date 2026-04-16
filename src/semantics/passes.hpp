@@ -45,7 +45,7 @@ public:
 		ctx(ctx) {}
 
 	virtual GenericArg const * try_get(GenericDeductionVar var) override;
-	virtual void apply_conversion(TypeConversionEvent const &event, Expr *expr) override;
+	virtual void on_conversion_request(TypeConversionEvent const &event, Expr *expr) override;
 
 	virtual void set(
 		GenericDeductionVar var,

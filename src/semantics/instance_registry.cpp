@@ -389,6 +389,8 @@ void StructInstance::compute_dependent_properties()
 					//   default values of other structs, which may well end up in a cycle
 					.default_value = var_member.var.default_value ?
 						DefaultValueExpr(ExprPending()) : DefaultValueExpr(NoDefaultValue()),
+
+					.is_ref = var_member.var.is_ref,
 				};
 				substitute_in_type(*inst_var_member.type, env, *m_registry, {
 					SubstitutionPhase::INSTANTIATION,
@@ -419,12 +421,15 @@ void StructInstance::compute_dependent_properties()
 	if(m_struct->has_constructor())
 	{
 		size_t param_count = m_struct->sema->ctor_params->count;
-		FixedArray<Type> *ctor_param_types = alloc_fixed_array<Type>(param_count, m_registry->arena());
+		FixedArray<ProcTypeParameter> *ctor_param_types = alloc_fixed_array<ProcTypeParameter>(param_count, m_registry->arena());
 		m_ctor_params = alloc_fixed_array<Parameter const*>(param_count, m_registry->arena());
 
 		for(auto const &[idx, var_member]: all_var_members() | std::views::enumerate)
 		{
-			ctor_param_types->items[idx] = clone(*var_member.type, m_registry->arena());
+			ctor_param_types->items[idx] = ProcTypeParameter{
+				.type = clone(*var_member.type, m_registry->arena()),
+				.is_ref = false,
+			};
 			m_ctor_params->items[idx] = &var_member;
 		}
 
@@ -740,12 +745,15 @@ bool operator == (ProcInstanceKey const &a, ProcInstanceKey const &b)
 static Type* create_proc_type(ProcInstance *inst, TypeEnv const &env, InstanceRegistry &instances)
 {
 	ProcItem const *proc = inst->proc();
-	FixedArray<Type> *ctor_params = alloc_fixed_array<Type>(proc->params->count, instances.arena());
+	FixedArray<ProcTypeParameter> *ctor_params = alloc_fixed_array<ProcTypeParameter>(proc->params->count, instances.arena());
 	for(auto const &[idx, param]: *proc->params | std::views::enumerate)
 	{
 		Type param_type = clone(*param.type, instances.arena());
 		substitute_in_type(param_type, env, instances, {SubstitutionPhase::INSTANTIATION, SubstitutionMode::BEST_EFFORT});
-		ctor_params->items[idx] = param_type;
+		ctor_params->items[idx] = ProcTypeParameter{
+			.type = param_type,
+			.is_ref = param.is_ref,
+		};
 	}
 
 	Type *new_ret = clone_ptr(proc->ret_type, instances.arena());
@@ -813,8 +821,8 @@ void ProcTypeInstance::typecheck(ConstraintGatheringSubst &subst, SemaContext &c
 	if(has_been_typechecked)
 		return;
 
-	for(Type &param: *params)
-		generate_constraints_for_type(param, subst, ctx);
+	for(ProcTypeParameter &param: *params)
+		generate_constraints_for_type(param.type, subst, ctx);
 
 	generate_constraints_for_type(*ret, subst, ctx);
 
@@ -831,8 +839,11 @@ bool operator == (ProcTypeInstanceKey const &a, ProcTypeInstanceKey const &b)
 
 	for(size_t i = 0; i < a.params->count; ++i)
 	{
-		if(not equiv(a.params->items[i], b.params->items[i]))
-			return false;
+		ProcTypeParameter const &param_a = a.params->items[i];
+		ProcTypeParameter const &param_b = b.params->items[i];
+
+		if(param_a.is_ref != param_b.is_ref) return false;
+		if(not equiv(param_a.type, param_b.type)) return false;
 	}
 
 	return true;
@@ -1087,7 +1098,7 @@ ProcInstance* InstanceRegistry::add_proc_instance(ProcInstance &&new_inst)
 
 
 // `type_args` must already be resolved
-ProcTypeInstance* InstanceRegistry::get_proc_type_instance(FixedArray<Type> *params, Type *ret)
+ProcTypeInstance* InstanceRegistry::get_proc_type_instance(FixedArray<ProcTypeParameter> *params, Type *ret)
 {
 	ProcTypeInstanceKey key{params, ret};
 	auto it = m_proc_type_instances.find(key);
@@ -1098,7 +1109,7 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(FixedArray<Type> *par
 }
 
 ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
-	FixedArray<Type> *params,
+	FixedArray<ProcTypeParameter> *params,
 	Type *ret,
 	TypeEnv const &subst,
 	SubstitutionOptions mode
@@ -1107,9 +1118,9 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
 	void *original_mem_pos = m_arena.current_ptr();
 
 	// Substitute params
-	FixedArray<Type> *new_params = clone(params, m_arena);
-	for(Type &new_param: *new_params)
-		substitute_in_type(new_param, subst, *this, mode);
+	FixedArray<ProcTypeParameter> *new_params = clone(params, m_arena);
+	for(ProcTypeParameter &new_param: *new_params)
+		substitute_in_type(new_param.type, subst, *this, mode);
 
 	// Substitute return type
 	Type *new_ret = clone_ptr(ret, m_arena);
@@ -1126,12 +1137,12 @@ ProcTypeInstance* InstanceRegistry::get_proc_type_instance(
 	return add_proc_type_instance(new_params, new_ret);
 }
 
-ProcTypeInstance* InstanceRegistry::add_proc_type_instance(FixedArray<Type> *params, Type *ret)
+ProcTypeInstance* InstanceRegistry::add_proc_type_instance(FixedArray<ProcTypeParameter> *params, Type *ret)
 {
 	unordered_set<GenericVar> occurring_vars;
 	TermInfo info = gather_type_vars(*ret, occurring_vars);
-	for(Type const &type: *params)
-		info.merge(gather_type_vars(type, occurring_vars));
+	for(ProcTypeParameter const &p: *params)
+		info.merge(gather_type_vars(p.type, occurring_vars));
 
 	ProcTypeInstance *inst = &m_proc_type_instances.emplace(
 		ProcTypeInstanceKey(params, ret), 

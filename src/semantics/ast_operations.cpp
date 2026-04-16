@@ -501,13 +501,12 @@ static DefaultValueExpr clone(DefaultValueExpr const &default_val_expr, Arena &a
 	};
 }
 
-FixedArray<Type>* clone(FixedArray<Type> const *types, Arena &arena)
+ProcTypeParameter clone(ProcTypeParameter const &param, Arena &arena)
 {
-	FixedArray<Type> *result = alloc_fixed_array<Type>(types->count, arena);
-	for(size_t i = 0; i < types->count; ++i)
-		result->items[i] = clone(types->items[i], arena);
-
-	return result;
+	return ProcTypeParameter{
+		.type = clone(param.type, arena),
+		.is_ref = param.is_ref,
+	};
 }
 
 GenericArg clone(GenericArg const &arg, Arena &arena)
@@ -592,15 +591,6 @@ TypeArgList clone(TypeArgList const &args, Arena &arena)
 		.occurring_vars = args.occurring_vars,
 		.has_type_deduction_vars = args.has_type_deduction_vars,
 	};
-}
-
-FixedArray<Argument>* clone(FixedArray<Argument> const *args, Arena &arena)
-{
-	FixedArray<Argument> *result = alloc_fixed_array<Argument>(args->count, arena);
-	for(size_t i = 0; i < args->count; ++i)
-		result->items[i] = clone(args->items[i], arena);
-
-	return result;
 }
 
 Expr clone(Expr const &expr, Arena &arena)
@@ -794,10 +784,9 @@ Parameter clone(Parameter const &param, Arena &arena)
 		.range = param.range,
 		.type = clone_ptr(param.type, arena),
 		.default_value = clone(param.default_value, arena),
+		.is_ref = param.is_ref,
 	};
 }
-
-FixedArray<PatternArgument>* clone(FixedArray<PatternArgument> const *args, Arena &arena);
 
 Pattern clone(Pattern const &pattern, Arena &arena)
 {
@@ -868,15 +857,6 @@ PatternArgument clone(PatternArgument const &pat_arg, Arena &arena)
 	};
 }
 
-FixedArray<PatternArgument>* clone(FixedArray<PatternArgument> const *args, Arena &arena)
-{
-	FixedArray<PatternArgument> *result = alloc_fixed_array<PatternArgument>(args->count, arena);
-	for(size_t i = 0; i < args->count; ++i)
-		result->items[i] = clone(args->items[i], arena);
-
-	return result;
-}
-
 Stmt clone(Stmt const &stmt, Arena &arena)
 {
 	return stmt | match
@@ -933,15 +913,6 @@ Stmt clone(Stmt const &stmt, Arena &arena)
 	};
 }
 
-FixedArray<Stmt>* clone(FixedArray<Stmt> const *stmts, Arena &arena)
-{
-	FixedArray<Stmt> *result = alloc_fixed_array<Stmt>(stmts->count, arena);
-	for(size_t i = 0; i < stmts->count; ++i)
-		result->items[i] = clone(stmts->items[i], arena);
-
-	return result;
-}
-
 MatchArm clone(MatchArm const &arm, Arena &arena)
 {
 	return MatchArm{
@@ -949,15 +920,6 @@ MatchArm clone(MatchArm const &arm, Arena &arena)
 		.stmt = clone(arm.stmt, arena),
 		.discr = arm.discr,
 	};
-}
-
-FixedArray<MatchArm>* clone(FixedArray<MatchArm> const *arms, Arena &arena)
-{
-	FixedArray<MatchArm> *result = alloc_fixed_array<MatchArm>(arms->count, arena);
-	for(size_t i = 0; i < arms->count; ++i)
-		result->items[i] = clone(arms->items[i], arena);
-
-	return result;
 }
 
 //--------------------------------------------------------------------
@@ -1010,13 +972,28 @@ void print(Path const &path, Module const &mod, std::ostream &os)
 	}
 }
 
-static void print_proc_type(FixedArray<Type> const *params, Type const *ret_type, Module const &mod, std::ostream &os)
+static void print(ProcTypeParameter const &param, Module const &mod, std::ostream &os)
+{
+	if(param.is_ref)
+	{
+		os << "ref ";
+		PointerType const &pt = std::get<PointerType>(param.type);
+		if(pt.mutability == IsMutable::YES)
+			os << "mut ";
+
+		print(*pt.pointee, mod, os);
+	}
+	else
+		print(param.type, mod, os);
+}
+
+static void print_proc_type(FixedArray<ProcTypeParameter> const *params, Type const *ret_type, Module const &mod, std::ostream &os)
 {
 	os << "proc(";
 	if(params->count)
 	{
 		print(params->head(), mod, os);
-		for(Type const &param: params->tail())
+		for(ProcTypeParameter const &param: params->tail())
 		{
 			os << ", ";
 			print(param, mod, os);
@@ -1078,10 +1055,11 @@ void print(Type const &type, Module const &mod, std::ostream &os)
 		},
 		[&](PointerType const &t)
 		{
-			if(t.kind == PointerType::SINGLE)
-				os << "^";
-			else
-				os << "[bare]";
+			switch(t.kind)
+			{
+				case PointerType::SINGLE: os << "^"; break;
+				case PointerType::MANY: os << "[bare]"; break;
+			}
 
 			if(t.mutability == IsMutable::YES)
 				os << "mut ";
@@ -1550,7 +1528,17 @@ void print(Parameter const &param, Module const &mod, std::ostream &os)
 	if(param.type)
 	{
 		os << ": ";
-		print(*param.type, mod, os);
+		if(param.is_ref)
+		{
+			os << "ref ";
+			PointerType const &pt = std::get<PointerType>(*param.type);
+			if(pt.mutability == IsMutable::YES)
+				os << "mut ";
+
+			print(*pt.pointee, mod, os);
+		}
+		else
+			print(*param.type, mod, os);
 	}
 	if(param.default_value)
 	{

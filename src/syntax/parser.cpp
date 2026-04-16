@@ -241,11 +241,14 @@ static Type parse_prefix_type(Parser &parser, Memory M, bool parse_full_path)
 
 		case Lexeme::PROC:
 		{
-			ListBuilder<Type> params(M.temp);
+			ListBuilder<ProcTypeParameter> params(M.temp);
 			consume(parser, Lexeme::LEFT_PAREN);
 			while(parser.get().kind != Lexeme::RIGHT_PAREN)
 			{
-				params.append(parse_type(parser, M));
+				params.append(ProcTypeParameter{
+					.type = parse_type(parser, M),
+					.is_ref = false,
+				});
 				if(parser.get().kind != Lexeme::RIGHT_PAREN)
 					consume(parser, Lexeme::COMMA);
 			}
@@ -393,15 +396,23 @@ static optional<OperatorInfo> get_operator_info(Lexeme tok, IsPrefix is_prefix =
 
 		// Comparison
 		case Lexeme::DOUBLE_EQ:
+		case Lexeme::NE:
 		case Lexeme::LT:
 		case Lexeme::LE:
 		case Lexeme::GT:
 		case Lexeme::GE:
 			return OperatorInfo{.precedence = 8, .assoc = Associativity::LEFT};
 
+		// Logical connectives
+		case Lexeme::AND:
+			return OperatorInfo{.precedence = 9, .assoc = Associativity::LEFT};
+
+		case Lexeme::OR:
+			return OperatorInfo{.precedence = 10, .assoc = Associativity::LEFT};
+
 		// Assignment
 		case Lexeme::COLON_EQ:
-			return OperatorInfo{.precedence = 9, .assoc = Associativity::RIGHT};
+			return OperatorInfo{.precedence = 11, .assoc = Associativity::RIGHT};
 
 		default:
 			return nullopt;
@@ -540,10 +551,13 @@ static Expr parse_infix_expr(Parser &parser, Expr left, Memory M)
 		case Lexeme::STAR:
 		case Lexeme::SLASH:
 		case Lexeme::DOUBLE_EQ:
+		case Lexeme::NE:
 		case Lexeme::LT:
 		case Lexeme::LE:
 		case Lexeme::GT:
 		case Lexeme::GE:
+		case Lexeme::AND:
+		case Lexeme::OR:
 		{
 			Expr right = parse_expr(parser, *get_operator_info(tok.kind), M);
 			return BinaryExpr(
@@ -579,6 +593,7 @@ static Expr parse_infix_expr(Parser &parser, Expr left, Memory M)
 					consume(parser, Lexeme::EQ);
 				}
 
+				arg.preserve_mut = try_consume(parser, Lexeme::MUT).has_value();
 				arg.expr = parse_expr(parser, NO_PREVIOUS_OP, M);
 				arg.range = arg_ranger.get();
 				args.append(arg);
@@ -939,7 +954,25 @@ ProcItem parse_proc(Parser &parser, Memory M)
 		else
 		{
 			consume(parser, Lexeme::COLON);
+
+			TokenIdx potential_ref_tok_idx = parser.token_idx();
+			if(try_consume(parser, Lexeme::REF))
+				param.is_ref = true;
+
+			IsMutable ref_param_mutability = IsMutable::NO;
+			if(param.is_ref and try_consume(parser, Lexeme::MUT))
+				ref_param_mutability = IsMutable::YES;
+
 			param.type = M.main->alloc<Type>(parse_type(parser, M));
+			if(param.is_ref)
+			{
+				param.type = M.main->alloc<Type>(PointerType{
+					.range = TokenRange(potential_ref_tok_idx, param.type->token_range().last),
+					.pointee = param.type,
+					.kind = PointerType::SINGLE,
+					.mutability = ref_param_mutability
+				});
+			}
 
 			if(try_consume(parser, Lexeme::EQ))
 				param.default_value = M.main->alloc<Expr>(parse_expr(parser, M));

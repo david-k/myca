@@ -35,6 +35,7 @@ string_view str(Lexeme tok)
 		case Lexeme::SLASH: return "SLASH";
 		case Lexeme::STAR: return "STAR";
 		case Lexeme::EQ: return "EQ";
+		case Lexeme::NE: return "NE";
 		case Lexeme::COLON_EQ: return "COLON_EQ";
 		case Lexeme::DOUBLE_EQ: return "DOUBLE_EQ";
 		case Lexeme::LT: return "LT";
@@ -43,6 +44,8 @@ string_view str(Lexeme tok)
 		case Lexeme::GE: return "GE";
 
 		case Lexeme::NOT: return "NOT";
+		case Lexeme::AND: return "AND";
+		case Lexeme::OR: return "OR";
 
 		case Lexeme::LET: return "LET";
 		case Lexeme::PROC: return "PROC";
@@ -68,6 +71,7 @@ string_view str(Lexeme tok)
 
 		case Lexeme::AS: return "AS";
 		case Lexeme::MUT: return "MUT";
+		case Lexeme::REF: return "REF";
 		case Lexeme::BARE: return "BARE";
 
 		case Lexeme::TYPEALIAS: return "TYPEALIAS";
@@ -272,7 +276,14 @@ optional<Lexeme> try_read_punctuation(Lexer &lexer)
 		case '^': lexer.advance(); return Lexeme::CIRCUMFLEX;
 		case '&': lexer.advance(); return Lexeme::AMPERSAND;
 		case '?': lexer.advance(); return Lexeme::QUESTIONMARK;
-		case '!': lexer.advance(); return Lexeme::BANG;
+		case '!':
+		{
+			lexer.advance();
+			if(try_consume(lexer, "="))
+				return Lexeme::NE;
+
+			return Lexeme::BANG;
+		}
 		case '\'': lexer.advance(); return Lexeme::SINGLE_QUOTE;
 		case '@': lexer.advance(); return Lexeme::AT;
 		case '|': lexer.advance(); return Lexeme::BAR;
@@ -336,8 +347,11 @@ static unordered_map<string_view, Lexeme> const KEYWORDS = {
 	{"match", Lexeme::MATCH},
 	{"return", Lexeme::RETURN},
 	{"not", Lexeme::NOT},
+	{"and", Lexeme::AND},
+	{"or", Lexeme::OR},
 	{"as", Lexeme::AS},
 	{"mut", Lexeme::MUT},
+	{"ref", Lexeme::REF},
 	{"bare", Lexeme::BARE},
 	{"typealias", Lexeme::TYPEALIAS},
 	{"extern", Lexeme::EXTERN},

@@ -4,6 +4,7 @@
 #include "semantics/module.hpp"
 
 #include <expected>
+#include <stdexcept>
 
 size_t std::hash<ConstraintModifier>::operator () (ConstraintModifier m) const
 {
@@ -236,7 +237,7 @@ public:
 		return nullptr;
 	}
 
-	virtual void apply_conversion(TypeConversionEvent const &event, Expr *expr) override
+	virtual void on_conversion_request(TypeConversionEvent const &event, Expr *expr) override
 	{
 		if(not conversions)
 			return;
@@ -379,16 +380,13 @@ void reduction_step(
 		subst->right_expr = edge.arg_expr;
 
 		GenericArg result;
-		Unifier u(*ctx);
-		u.left(state->result->arg, state->result->conv, left_expr);
-		u.right(*edge_type, edge_conv, edge.arg_expr);
-		u.set(subst);
-		u.set(edge.error_msg);
-		u.result(&result);
-
-		try {
-			u.go();
-
+		try
+		{
+			unify(
+				UnifierOperand(state->result->arg, state->result->conv, left_expr),
+				UnifierOperand(*edge_type, edge_conv, edge.arg_expr),
+				UnifierState(*ctx, subst, edge.error_msg, &result)
+			);
 			if(behavior != ReductionBehavior::NO_MERGE)
 			{
 				state->result->arg = result;

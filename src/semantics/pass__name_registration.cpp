@@ -20,8 +20,8 @@ static void register_types(Type const &type, Scope *scope, optional<DeclContaine
 		},
 		[&](ProcTypeUnresolved const &t)
 		{
-			for(Type const &param: *t.params)
-				register_types(param, scope, decl_parent, ctx);
+			for(ProcTypeParameter const &param: *t.params)
+				register_types(param.type, scope, decl_parent, ctx);
 
 			register_types(*t.ret, scope, decl_parent, ctx);
 		},

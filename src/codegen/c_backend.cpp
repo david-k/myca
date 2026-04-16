@@ -293,7 +293,12 @@ static string mangle_type_segment(Type const &type)
 		[&](VarType const&) -> string { assert(!"mangle_type_segment: VarType"); },
 		[&](PointerType const &t)
 		{
-			string mangled = t.kind == PointerType::SINGLE ? "P" : "M";
+			string mangled;
+			switch(t.kind)
+			{
+				case PointerType::SINGLE: mangled = "P"; break;
+				case PointerType::MANY: mangled = "M"; break;
+			}
 			if(t.mutability == IsMutable::YES) mangled += "m";
 			else mangled += "c";
 
@@ -529,21 +534,26 @@ string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
 		{
 			string left_val = generate_c(*e.left, backend);
 			string right_val = generate_c(*e.right, backend);
+			string_view op;
 			switch(e.op)
 			{
-				case BinaryOp::ADD: return "(" + left_val + " + " + right_val + ")";
-				case BinaryOp::SUB: return "(" + left_val + " - " + right_val + ")";
-				case BinaryOp::MUL: return "(" + left_val + " * " + right_val + ")";
-				case BinaryOp::DIV: return "(" + left_val + " / " + right_val + ")";
+				case BinaryOp::ADD: op = "+"; break;
+				case BinaryOp::SUB: op = "-"; break;
+				case BinaryOp::MUL: op = "*"; break;
+				case BinaryOp::DIV: op = "/"; break;
 
-				case BinaryOp::EQ: return "(" + left_val + " == " + right_val + ")";
-				case BinaryOp::LT: return "(" + left_val + " < "  + right_val + ")";
-				case BinaryOp::LE: return "(" + left_val + " <= " + right_val + ")";
-				case BinaryOp::GT: return "(" + left_val + " > "  + right_val + ")";
-				case BinaryOp::GE: return "(" + left_val + " >= " + right_val + ")";
+				case BinaryOp::EQ: op = "=="; break;
+				case BinaryOp::NE: op = "!="; break;
+				case BinaryOp::LT: op = "<"; break;
+				case BinaryOp::LE: op = "<="; break;
+				case BinaryOp::GT: op = ">"; break;
+				case BinaryOp::GE: op = ">="; break;
+
+				case BinaryOp::AND: op = "&&"; break;
+				case BinaryOp::OR: op = "||"; break;
 			}
 
-			UNREACHABLE;
+			return "(" + left_val + " " + op + " " + right_val + ")";
 		},
 		[&](AddressOfExpr const &e)
 		{
@@ -600,14 +610,14 @@ string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
 			}
 
 			ProcType const &proc_type = std::get<ProcType>(e.callable->type());
-			FixedArray<Type> const *param_types = proc_type.inst->params;
+			FixedArray<ProcTypeParameter> const *params = proc_type.inst->params;
 
 			// Evaluate arguments in the order they were provided
-			vector<string> arg_vals(param_types->count);
+			vector<string> arg_vals(params->count);
 			for(Argument const &arg: *e.args)
 			{
-				Type const &param_type = param_types->items[arg.param_idx];
-				arg_vals[arg.param_idx] = generate_c_cast(param_type, arg.expr, backend);
+				ProcTypeParameter const &param = params->items[arg.param_idx];
+				arg_vals[arg.param_idx] = generate_c_cast(param.type, arg.expr, backend);
 			}
 
 			// Evaluate a parameter's default value if an argument is missing
@@ -619,7 +629,7 @@ string generate_c(Expr const &expr, CBackend &backend, IsExprUsed usage)
 				{
 					assert(callable->param_default_value_at(i));
 					Expr const &default_value = callable->param_default_value_at(i).get_expr();
-					arg_vals[i] = generate_c_cast(param_types->items[i], default_value, backend);
+					arg_vals[i] = generate_c_cast(params->items[i].type, default_value, backend);
 				}
 			}
 
@@ -717,12 +727,12 @@ void generate_c_pattern(Pattern const &lhs_pattern, string const &rhs_expr, Type
 				for(PatternArgument const &arg: *p.args)
 				{
 					string object_str = generate_c_cast(*p.ctor, rhs_expr, rhs_type);
-					Type const &param_type = ctor_type.inst->params->items[arg.param_idx];
+					ProcTypeParameter const &param = ctor_type.inst->params->items[arg.param_idx];
 
 					if(is_optional_ptr(*p.ctor) && ctor_type.callable->param_name_at(arg.param_idx) == "value")
-						generate_c_pattern(arg.pattern, object_str, param_type, backend);
+						generate_c_pattern(arg.pattern, object_str, param.type, backend);
 					else
-						generate_c_pattern(arg.pattern, object_str + "." + ctor_type.callable->param_name_at(arg.param_idx), param_type, backend);
+						generate_c_pattern(arg.pattern, object_str + "." + ctor_type.callable->param_name_at(arg.param_idx), param.type, backend);
 				}
 			}
 		},
@@ -1077,7 +1087,8 @@ void generate_c_proc_sig(ProcInstance *proc, CBackend &backend)
 		if(i != 0) backend << ", ";
 
 		string_view param_name = proc->get_proc_type().callable->param_name_at(i);
-		backend << generate_c_type(proc_type->params->items[i]) << " " << param_name;
+		ProcTypeParameter const &param = proc_type->params->items[i];
+		backend << generate_c_type(param.type) << " " << param_name;
 	}
 	backend << ")";
 }

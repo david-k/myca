@@ -15,7 +15,7 @@ GenericArg const* ConstraintGatheringSubst::try_get(GenericDeductionVar var)
 	return nullptr;
 }
 
-void ConstraintGatheringSubst::apply_conversion(TypeConversionEvent const &event, Expr *expr)
+void ConstraintGatheringSubst::on_conversion_request(TypeConversionEvent const &event, Expr *expr)
 {
 	::apply_conversion(event, expr, ctx->arena);
 }
@@ -59,7 +59,6 @@ static optional<size_t> find_by_name(Callable *callable, string_view name)
 static Parameter const* find_var_member(StructInstance *inst, string_view field)
 {
 	Module *mod = inst->struct_()->sema->type_scope->mod; // This looks disgusting
-
 	for(Parameter const &var_member: inst->own_var_members())
 	{
 		if(mod->name_of(var_member) == field)
@@ -108,19 +107,16 @@ std::expected<Type, ErrorMsg> get_pointee_type(
 {
 	if(PointerType const *pointer_type = get_if_pointer_type(type, pointer_kind))
 		return *pointer_type->pointee;
-	else
-	{
-		char const *pointer_kind_str = nullptr;
-		switch(pointer_kind)
-		{
-			case PointerType::SINGLE: pointer_kind_str = "single-element"; break;
-			case PointerType::MANY: pointer_kind_str = "multi-element"; break;
-		}
 
-		return std::unexpected(
-			ErrorMsg(mk_error_msg("Expected "s + pointer_kind_str + " pointer type, got " + str(*type, mod), range.first, &mod))
-		);
+	char const *pointer_kind_str = nullptr;
+	switch(pointer_kind)
+	{
+		case PointerType::SINGLE: pointer_kind_str = "single-element"; break;
+		case PointerType::MANY: pointer_kind_str = "multi-element"; break;
 	}
+	return std::unexpected(
+		ErrorMsg(mk_error_msg("Expected "s + pointer_kind_str + " pointer, got " + str(*type, mod), range.first, &mod))
+	);
 }
 
 std::expected<Type, ErrorMsg> get_member_type(
@@ -130,9 +126,6 @@ std::expected<Type, ErrorMsg> get_member_type(
 	Module const &mod
 )
 {
-	(void)range;
-	(void)mod;
-
 	StructType const *struct_type = std::get_if<StructType>(type);
 	if(not struct_type)
 	{
@@ -165,12 +158,11 @@ void generate_constraints_for_type(Type &type, ConstraintGatheringSubst &subst, 
 				{
 					throw_sem_error("Array count has invalid type: " + reason, expr.token_range().first, &mod);
 				};
-				Unifier(ctx)
-					.left(*count_type, TypeConversion::NONE)
-					.right(BuiltinType(UNKNOWN_TOKEN_RANGE, BuiltinTypeDef::USIZE), TypeConversion::NONE)
-					.set(&subst)
-					.set(LazyErrorMsg(t.count_arg, error_msg))
-					.go();
+				unify(
+					UnifierOperand(BuiltinType(UNKNOWN_TOKEN_RANGE, BuiltinTypeDef::USIZE), TypeConversion::NONE),
+					UnifierOperand(*count_type, TypeConversion::NONE),
+					UnifierState(ctx, &subst, LazyErrorMsg(t.count_arg, error_msg))
+				);
 
 				type_visit_children(t, self);
 			},
@@ -190,7 +182,7 @@ void generate_constraints_for_type(Type &type, ConstraintGatheringSubst &subst, 
 			[&](auto &t) { type_visit_children(t, self); },
 		};
 	};
-	visitor(type);
+	type_visit(type, visitor);
 }
 
 void generate_constraints_for_generic_args(
@@ -225,12 +217,11 @@ void generate_constraints_for_generic_args(
 				{
 					throw_sem_error("Invalid generic value: " + reason, ret_expr.token_range().first, &mod);
 				};
-				Unifier(ctx)
-					.left(*type, TypeConversion::NONE)
-					.right(*value_param.type, TypeConversion::NONE)
-					.set(&subst)
-					.set(LazyErrorMsg(expr_arg, error_msg))
-					.go();
+				unify(
+					UnifierOperand(*type, TypeConversion::NONE),
+					UnifierOperand(*value_param.type, TypeConversion::NONE),
+					UnifierState(ctx, &subst, LazyErrorMsg(expr_arg, error_msg))
+				);
 			},
 		};
 	}
@@ -273,12 +264,11 @@ Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst,
 					{
 						throw_sem_error("Invalid operand for not operator: " + reason, expr.token_range().first, &mod);
 					};
-					Unifier(ctx)
-						.left(*e.type, TypeConversion::NONE)
-						.right(*sub_type, TypeConversion::NONE)
-						.set(&subst)
-						.set(LazyErrorMsg(e.sub, error_msg))
-						.go();
+					unify(
+						UnifierOperand(*e.type, TypeConversion::NONE),
+						UnifierOperand(*sub_type, TypeConversion::NONE),
+						UnifierState(ctx, &subst, LazyErrorMsg(e.sub, error_msg))
+					);
 				} break;
 
 				case UnaryOp::NEG:
@@ -321,13 +311,11 @@ Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst,
 						throw_sem_error("Invalid operands for binary operator: " + reason, expr.token_range().first, &mod);
 					};
 					GenericArg result;
-					Unifier(ctx)
-						.left(*left_type, TypeConversion::IMPLICIT_CTOR, e.left)
-						.right(*right_type, TypeConversion::IMPLICIT_CTOR, e.right)
-						.set(&subst)
-						.set(LazyErrorMsg(&expr, uni_error_msg))
-						.result(&result)
-						.go();
+					unify(
+						UnifierOperand(*left_type, TypeConversion::IMPLICIT_CTOR, e.left),
+						UnifierOperand(*right_type, TypeConversion::IMPLICIT_CTOR, e.right),
+						UnifierState(ctx, &subst, LazyErrorMsg(&expr, uni_error_msg), &result)
+					);
 
 					KnownIntType const *left_known_int = std::get_if<KnownIntType>(left_type);
 					KnownIntType const *right_known_int = std::get_if<KnownIntType>(right_type);
@@ -373,20 +361,20 @@ Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst,
 				} break;
 
 				case BinaryOp::EQ:
+				case BinaryOp::NE:
 				{
 					Type const *left_type = generate_constraints_for_expr(*e.left, subst, ctx);
 					Type const *right_type = generate_constraints_for_expr(*e.right, subst, ctx);
 
 					auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
 					{
-						throw_sem_error("Equality operator requires equal types: " + reason, expr.token_range().first, &mod);
+						throw_sem_error("(In-)Equality operator requires equal types: " + reason, expr.token_range().first, &mod);
 					};
-					Unifier(ctx)
-						.left(*left_type, TypeConversion::NONE)
-						.right(*right_type, TypeConversion::NONE)
-						.set(&subst)
-						.set(LazyErrorMsg(&expr, error_msg))
-						.go();
+					unify(
+						UnifierOperand(*left_type, TypeConversion::NONE),
+						UnifierOperand(*right_type, TypeConversion::NONE),
+						UnifierState(ctx, &subst, LazyErrorMsg(&expr, error_msg))
+					);
 
 					e.type = mk_builtin_type(BuiltinTypeDef::BOOL, ctx.arena);
 				} break;
@@ -403,14 +391,36 @@ Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst,
 					{
 						throw_sem_error("Invalid operands for comparison operator: " + reason, expr.token_range().first, &mod);
 					};
-					Unifier(ctx)
-						.left(*left_type, TypeConversion::NONE)
-						.right(*right_type, TypeConversion::NONE)
-						.set(&subst)
-						.set(LazyErrorMsg(&expr, uni_error_msg))
-						.go();
+					unify(
+						UnifierOperand(*left_type, TypeConversion::NONE),
+						UnifierOperand(*right_type, TypeConversion::NONE),
+						UnifierState(ctx, &subst, LazyErrorMsg(&expr, uni_error_msg))
+					);
 
 					e.type = mk_builtin_type(BuiltinTypeDef::BOOL, ctx.arena);
+				} break;
+
+				case BinaryOp::AND:
+				case BinaryOp::OR:
+				{
+					e.type = mk_builtin_type(BuiltinTypeDef::BOOL, ctx.arena);
+					Type const *left_type = generate_constraints_for_expr(*e.left, subst, ctx);
+					Type const *right_type = generate_constraints_for_expr(*e.right, subst, ctx);
+
+					auto error_msg = [](Expr const &expr, string const &reason, Module const &mod)
+					{
+						throw_sem_error("Invalid operand for logical operator: " + reason, expr.token_range().first, &mod);
+					};
+					unify(
+						UnifierOperand(*e.type, TypeConversion::NONE),
+						UnifierOperand(*left_type, TypeConversion::NONE),
+						UnifierState(ctx, &subst, LazyErrorMsg(e.left, error_msg))
+					);
+					unify(
+						UnifierOperand(*e.type, TypeConversion::NONE),
+						UnifierOperand(*right_type, TypeConversion::NONE),
+						UnifierState(ctx, &subst, LazyErrorMsg(e.right, error_msg))
+					);
 				} break;
 			}
 
@@ -424,7 +434,6 @@ Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst,
 		[&](DerefExpr &e) -> Type*
 		{
 			Type const *addr_type = generate_constraints_for_expr(*e.addr, subst, ctx);
-
 			if(optional<GenericDeductionVar> pointer_var = addr_type->try_get_deduction_var())
 			{
 				GenericDeductionVar var = ctx.new_deduction_var(TypeDeductionVar());
@@ -511,12 +520,11 @@ Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst,
 			{
 				throw_sem_error("Invalid operands for assignment operator: " + reason, expr.token_range().first, &mod);
 			};
-			Unifier(ctx)
-				.left(*lhs_type, TypeConversion::NONE)
-				.right(*rhs_type, TypeConversion::IMPLICIT_CTOR, e.rhs)
-				.set(&subst)
-				.set(LazyErrorMsg(&expr, error_msg))
-				.go();
+			unify(
+				UnifierOperand(*lhs_type, TypeConversion::NONE),
+				UnifierOperand(*rhs_type, TypeConversion::IMPLICIT_CTOR, e.rhs),
+				UnifierState(ctx, &subst, LazyErrorMsg(&expr, error_msg))
+			);
 
 			return e.type = clone_ptr(lhs_type, ctx.arena);
 		},
@@ -552,8 +560,8 @@ Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst,
 			proc_type->inst->typecheck(subst, ctx);
 			proc_type->callable->typecheck_generic_args(subst, ctx);
 
-			FixedArray<Type> const *param_types = proc_type->inst->params;
-			if(e.args->count > param_types->count)
+			FixedArray<ProcTypeParameter> const *params = proc_type->inst->params;
+			if(e.args->count > params->count)
 				throw_sem_error("Too many arguments", e.range.first, ctx.mod);
 
 			auto arg_error_msg = [](Expr const &arg, string const &reason, Module const &mod)
@@ -592,17 +600,48 @@ Type* generate_constraints_for_expr(Expr &expr, ConstraintGatheringSubst &subst,
 				if(!res.second)
 					throw_sem_error("Multiple arguments for same parameter", arg.range.first, ctx.mod);
 
-				Type const &param_type = param_types->items[arg.param_idx];
+				ProcTypeParameter const &param = params->items[arg.param_idx];
+				if(param.is_ref)
+				{
+					PointerType const &pt = std::get<PointerType>(param.type);
+					if(pt.mutability == IsMutable::YES and not arg.preserve_mut)
+					{
+						throw_sem_error(
+							"Argument is passed to mutable reference parameter (`ref mut`) but is not itself marked as `mut`",
+							arg.range.first,
+							ctx.mod
+						);
+					}
+					if(pt.mutability == IsMutable::NO and arg.preserve_mut)
+					{
+						throw_sem_error(
+							"Argument is passed to immutable reference parameter but is marked `mut`",
+							arg.range.first,
+							ctx.mod
+						);
+					}
+				}
+				else
+				{
+					if(arg.preserve_mut)
+					{
+						throw_sem_error(
+							"Argument is passed to non-reference parameter but is marked `mut`",
+							arg.range.first,
+							ctx.mod
+						);
+					}
+				}
+
 				Type *arg_type = generate_constraints_for_expr(arg.expr, subst, ctx);
-				Unifier(ctx)
-					.left(param_type, TypeConversion::NONE)
-					.right(*arg_type, TypeConversion::IMPLICIT_CTOR, &arg.expr)
-					.set(&subst)
-					.set(LazyErrorMsg(&arg.expr, arg_error_msg))
-					.go();
+				unify(
+					UnifierOperand{.arg = param.type, .conv = TypeConversion::NONE, .is_ref_param = param.is_ref},
+					UnifierOperand(*arg_type, TypeConversion::IMPLICIT_CTOR, &arg.expr),
+					UnifierState(ctx, &subst, LazyErrorMsg(&arg.expr, arg_error_msg))
+				);
 			}
 
-			for(size_t param_idx = 0; param_idx < param_types->count; ++param_idx)
+			for(size_t param_idx = 0; param_idx < params->count; ++param_idx)
 			{
 				if(!assigned_params.contains(param_idx))
 				{
@@ -736,12 +775,11 @@ static Type const* unify_pattern(
 				throw_sem_error("Invalid constructor pattern: " + reason, pattern.token_range().first, &mod);
 			});
 			ConstraintGatheringSubst subst(&solver, &ctx);
-			Unifier(ctx)
-				.left(*p.ctor, lhs_conv)
-				.right(rhs_type, rhs_conv)
-				.set(&subst)
-				.set(error_msg)
-				.go();
+			unify(
+				UnifierOperand(*p.ctor, lhs_conv),
+				UnifierOperand(rhs_type, rhs_conv),
+				UnifierState(ctx, &subst, error_msg)
+			);
 
 			// Make sure the constructor is not a type variable
 			if(VarType const *var = std::get_if<VarType>(p.ctor))
@@ -779,8 +817,8 @@ static Type const* unify_pattern(
 					for(size_t i = 0; i < p.args->count; ++i)
 					{
 						PatternArgument &arg = p.args->items[i];
-
-						Type param_type = clone(ctor_proc_type.inst->params->items[i], ctx.arena);
+						FixedArray<ProcTypeParameter> const *ctor_params = ctor_proc_type.inst->params;
+						Type param_type = clone(ctor_params->items[i].type, ctx.arena);
 
 						if(arg.param_name.size())
 							throw_sem_error("TODO: Support named arguments in constructor pattern", p.range.first, ctx.mod);
@@ -840,21 +878,19 @@ static Type const* generate_constraints_for_pattern(
 
 		if(irrefutable_pattern_required)
 		{
-			Unifier(ctx)
-				.left(*lhs_pattern.provided_type, TypeConversion::NONE)
-				.right(rhs_type, TypeConversion::IMPLICIT_CTOR, root_rhs_expr)
-				.set(&subst)
-				.set(LazyErrorMsg(&lhs_pattern, error_msg))
-				.go();
+			unify(
+				UnifierOperand(*lhs_pattern.provided_type, TypeConversion::NONE),
+				UnifierOperand(rhs_type, TypeConversion::IMPLICIT_CTOR, root_rhs_expr),
+				UnifierState(ctx, &subst, LazyErrorMsg(&lhs_pattern, error_msg))
+			);
 		}
 		else
 		{
-			Unifier(ctx)
-				.left(rhs_type, TypeConversion::NONE)
-				.right(*lhs_pattern.provided_type, TypeConversion::IMPLICIT_CTOR)
-				.set(&subst)
-				.set(LazyErrorMsg(&lhs_pattern, error_msg))
-				.go();
+			unify(
+				UnifierOperand(rhs_type, TypeConversion::NONE),
+				UnifierOperand(*lhs_pattern.provided_type, TypeConversion::IMPLICIT_CTOR),
+				UnifierState(ctx, &subst, LazyErrorMsg(&lhs_pattern, error_msg))
+			);
 		}
 
 		return unify_pattern(
@@ -933,6 +969,9 @@ struct DeferredTypechecker
 				switch(e.op)
 				{
 					case BinaryOp::EQ:
+					case BinaryOp::NE:
+					case BinaryOp::AND:
+					case BinaryOp::OR:
 						break;
 
 					case BinaryOp::ADD:
@@ -1089,14 +1128,11 @@ static void typecheck_param(Parameter &param, SemaContext &ctx)
 		{
 			throw_sem_error("Invalid default value: " + reason, init_expr.token_range().first, &mod);
 		};
-
-		Unifier(ctx)
-			.left(*param.type, TypeConversion::NONE)
-			.right(*default_value_type, TypeConversion::IMPLICIT_CTOR, default_value)
-			.set(&subst)
-			.set(LazyErrorMsg(default_value, error_msg))
-			.go();
-
+		unify(
+			UnifierOperand(*param.type, TypeConversion::NONE),
+			UnifierOperand(*default_value_type, TypeConversion::IMPLICIT_CTOR, default_value),
+			UnifierState(ctx, &subst, LazyErrorMsg(default_value, error_msg))
+		);
 		solve_and_check(solver, {param.type, default_value});
 
 		LOGGER(ctx.logger(), on_expr_end);
@@ -1169,13 +1205,11 @@ static void typecheck_stmt(Stmt &stmt, SemaContext &ctx)
 				ConstraintSolver solver(ctx);
 				ConstraintGatheringSubst constraint_gatherer(&solver, &ctx);
 				Type const *ret_expr_type = generate_constraints_for_expr(*s.ret_expr, constraint_gatherer, ctx);
-				Unifier(ctx)
-					.left(*ctx.proc->ret_type, TypeConversion::NONE)
-					.right(*ret_expr_type, TypeConversion::IMPLICIT_CTOR, s.ret_expr)
-					.set(&constraint_gatherer)
-					.set(LazyErrorMsg(s.ret_expr, error_msg))
-					.go();
-
+				unify(
+					UnifierOperand(*ctx.proc->ret_type, TypeConversion::NONE),
+					UnifierOperand(*ret_expr_type, TypeConversion::IMPLICIT_CTOR, s.ret_expr),
+					UnifierState(ctx, &constraint_gatherer, LazyErrorMsg(s.ret_expr, error_msg))
+				);
 				solve_and_check(solver, {s.ret_expr});
 
 				LOGGER(ctx.logger(), on_expr_end);

@@ -400,16 +400,16 @@ private:
 bool operator == (ProcInstanceKey const &a, ProcInstanceKey const &b);
 
 template<>
-struct std::hash<::ProcInstanceKey>
+struct std::hash<ProcInstanceKey>
 {
-	size_t operator () (::ProcInstanceKey const &key) const
+	size_t operator () (ProcInstanceKey const &key) const
 	{
-		size_t h = ::compute_hash(key.proc);
+		size_t h = compute_hash(key.proc);
 
 		if(key.type_args)
 		{
 			for(GenericArg const &t: *key.type_args)
-				::combine_hashes(h, ::compute_hash(t));
+				combine_hashes(h, compute_hash(t));
 		}
 
 		return h;
@@ -421,7 +421,7 @@ struct std::hash<::ProcInstanceKey>
 //--------------------------------------------------------------------
 struct ProcTypeInstanceKey
 {
-	FixedArray<Type> *params;
+	FixedArray<ProcTypeParameter> *params;
 	Type *ret;
 };
 
@@ -435,7 +435,7 @@ struct ProcTypeInstance
 	bool is_deduction_complete() const { return not has_type_deduction_vars and not has_known_ints; }
 	void typecheck(ConstraintGatheringSubst &subst, SemaContext &ctx);
 
-	FixedArray<Type> *params;
+	FixedArray<ProcTypeParameter> *params;
 	Type *ret;
 	unordered_set<GenericVar> occurring_vars;
 	bool has_type_deduction_vars;
@@ -452,8 +452,11 @@ struct std::hash<ProcTypeInstanceKey>
 	{
 		size_t h = compute_hash(*key.ret);
 
-		for(Type const &t: *key.params)
-			combine_hashes(h, compute_hash(t));
+		for(ProcTypeParameter const &p: *key.params)
+		{
+			combine_hashes(h, compute_hash(p.type));
+			combine_hashes(h, compute_hash(p.is_ref));
+		}
 
 		return h;
 	}
@@ -649,9 +652,9 @@ public:
 		SubstitutionOptions mode
 	);
 
-	ProcTypeInstance* get_proc_type_instance(FixedArray<Type> *params, Type *ret);
+	ProcTypeInstance* get_proc_type_instance(FixedArray<ProcTypeParameter> *params, Type *ret);
 	ProcTypeInstance* get_proc_type_instance(
-		FixedArray<Type> *params,
+		FixedArray<ProcTypeParameter> *params,
 		Type *ret,
 		TypeEnv const &subst,
 		SubstitutionOptions mode
@@ -676,7 +679,7 @@ private:
 	size_t next_struct_id() const { return m_struct_instances.size(); }
 	StructInstance* add_struct_instance(StructInstance &&new_inst);
 	ProcInstance* add_proc_instance(ProcInstance &&new_inst);
-	ProcTypeInstance* add_proc_type_instance(FixedArray<Type> *params, Type *ret);
+	ProcTypeInstance* add_proc_type_instance(FixedArray<ProcTypeParameter> *params, Type *ret);
 	UnionInstance* add_union_instance(vector<Type*> &&alternatives);
 
 	Arena &m_arena;

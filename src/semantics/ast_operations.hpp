@@ -70,10 +70,8 @@ struct std::hash<FixedArray<GenericArg>>
 };
 
 struct TypeArgList;
-FixedArray<MatchArm>* clone(FixedArray<MatchArm> const *arms, Arena &arena);
-FixedArray<Stmt>* clone(FixedArray<Stmt> const *stmts, Arena &arena);
-FixedArray<Type>* clone(FixedArray<Type> const *types, Arena &arena);
 TypeArgList clone(TypeArgList const &args, Arena &arena);
+ProcTypeParameter clone(ProcTypeParameter const &param, Arena &arena);
 GenericArg clone(GenericArg const &arg, Arena &arena);
 Argument clone(Argument const &arg, Arena &arena);
 Type clone(Type const &type, Arena &arena);

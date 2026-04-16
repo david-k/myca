@@ -347,8 +347,8 @@ void resolve_type(Type &type, Scope *scope, ResolutionContext res_ctx, SemaConte
 		},
 		[&](ProcTypeUnresolved &t)
 		{
-			for(Type &param: *t.params)
-				resolve_type(param, scope, res_ctx, ctx);
+			for(ProcTypeParameter &param: *t.params)
+				resolve_type(param.type, scope, res_ctx, ctx);
 
 			resolve_type(*t.ret, scope, res_ctx, ctx);
 			assert(!"[TODO] resolve_type: ProcTypeUnresolved");

@@ -1,0 +1,114 @@
+//!test: sanity_non_ref_doesnt_accept_ptr
+// Just making sure that non-reference parameters do not accept pointers
+
+proc foo(i: i32) {}
+proc bar(p: ^i32)
+{
+	//!error: |_:6| error: Invalid argument: Incompatible types i32 and ^i32
+	foo(p);
+}
+
+//!-------------------------------------------------------------------
+//!test: sanity_no_ptr_promotion_for_non_ref_param
+// Making sure that arguments are not promoted to pointers for non-reference parameters
+
+proc foo(p: ^i32) {}
+proc bar(i: i32)
+{
+	//!error: |_:6| error: Invalid argument: Incompatible types i32 and ^i32
+	foo(i);
+}
+
+//!-------------------------------------------------------------------
+//!test: simple_immutable_ref
+//!return_code: 4
+
+proc add_one(p: ref i32) -> i32 {
+	return p^ + 1;
+}
+
+proc main() -> i32
+{
+	let i = 3;
+	return add_one(i);
+}
+
+//!-------------------------------------------------------------------
+//!test: lvalue_required
+
+proc add_one(p: ref i32) -> i32 {
+	return p^ + 1;
+}
+
+proc main() -> i32
+{
+	//!error: |11:17| error: Address-of expression requires lvalue
+	return add_one(3);
+}
+
+//!-------------------------------------------------------------------
+//!test: simple_mutable_ref
+//!return_code: 4
+
+proc inc(p: ref mut i32) {
+	p^ := p^ + 1;
+}
+
+proc main() -> i32
+{
+	let mut i = 2;
+	inc(mut i);
+
+	let p = &mut i;
+	inc(mut p);
+
+	return i;
+}
+
+//!-------------------------------------------------------------------
+//!test: mutable_ref_requires_mutable_arg
+
+proc inc(p: ref mut i32) {
+	p^ := p^ + 1;
+}
+
+proc main() -> i32
+{
+	let mut i = 2;
+	//!error: |_:6| error: Argument is passed to mutable reference parameter (`ref mut`) but is not itself marked as `mut`
+	inc(i);
+	return i;
+}
+
+//!-------------------------------------------------------------------
+//!test: generic_swap
+//!return_code: 0
+
+proc swap'T(a: ref mut T, b: ref mut T)
+{
+	let tmp = a^;
+	a^ := b^;
+	b^ := tmp;
+}
+
+proc main() -> i32
+{
+	let mut a = 2;
+	let mut b = 5;
+
+	//!expect: swap'(i32)(&mut (a), &mut (b));
+	swap(mut a, mut b);
+	if a != 5 or b != 2 {
+		return 1; // failure
+	}
+
+	let pa = &mut a;
+	let pb = &mut b;
+	//!expect: swap'(i32)(pa, pb);
+	swap(mut pa, mut pb);
+	if a != 2 or b != 5 {
+		return 1; // failure
+	}
+
+	return 0;
+}

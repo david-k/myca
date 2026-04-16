@@ -51,12 +51,11 @@ bool is_cast_ok(Type const &target_type, Expr &src_expr, SemaContext &ctx)
 	try
 	{
 		TypeEnvReadonlySubst subst({}, ctx.arena);
-		Unifier(ctx)
-			.left(target_type, TypeConversion::NONE)
-			.right(src_type, TypeConversion::IMPLICIT_CTOR, &src_expr)
-			.set(&subst)
-			.go();
-
+		unify(
+			UnifierOperand(target_type, TypeConversion::NONE),
+			UnifierOperand(src_type, TypeConversion::IMPLICIT_CTOR, &src_expr),
+			UnifierState(ctx, &subst)
+		);
 		return true;
 	}
 	catch(ParseError const&) {}
