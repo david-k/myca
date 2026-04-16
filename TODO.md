@@ -4,6 +4,19 @@
     https://www.chiark.greenend.org.uk/~sgtatham/quasiblog/parsing/
 
 - **Language:**
+  - The following should not be allowed:
+    ```myca
+    struct S
+    {
+        case T {},
+        case U {},
+    }
+
+    let mut t = S.T();
+    let p: ^mut S = &mut t;
+    p^ := S.U(); // violates type safety: `t` is of type `S.T` but now contains a value of type `S.U`
+    ```
+
   - If `foo` is a proc, then `proc.PARAMS` should refer to a struct representing
     the procs parameters. If we also support struct splatting, the following
     becomes possible:

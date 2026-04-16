@@ -3,6 +3,7 @@
 #include "semantics/instance_registry.hpp"
 #include "semantics/type_properties.hpp"
 #include "semantics/type_env.hpp"
+#include <expected>
 #include "semantics/unification.hpp"
 
 [[noreturn]] static void throw_unification_error(
@@ -734,11 +735,13 @@ static bool try_unify_pointers(
 			.arg = *left_pointer->pointee,
 			.conv = left.conv == TypeConversion::IMPLICIT_CTOR ? TypeConversion::TRIVIAL : left.conv,
 			.expr = left.expr,
+			.is_ref_param = left.is_ref_param,
 		},
 		UnifierOperand{
 			.arg = *right_pointer->pointee,
 			.conv = right.conv == TypeConversion::IMPLICIT_CTOR ? TypeConversion::TRIVIAL : right.conv,
 			.expr = right.expr,
+			.is_ref_param = right.is_ref_param,
 		},
 		state.with_result(&common_pointee)
 	);
@@ -771,57 +774,46 @@ static bool try_unify_ref_param(
 	UnifierState const &state
 )
 {
-	Type const &left_type = std::get<Type>(left.arg);
-	Type const &right_type = std::get<Type>(right.arg);
-	if(not is<PointerType>(left_type) and not is<PointerType>(right_type))
+	// Unifying two reference parameters should never happen
+	assert(not left.is_ref_param or not right.is_ref_param);
+
+	if(not left.is_ref_param and not right.is_ref_param)
 		return false;
 
-	if(is<PointerType>(left_type) and is<PointerType>(right_type))
-		return false;
-
-	if(not is<PointerType>(left_type) and is<PointerType>(right_type))
+	if(right.is_ref_param)
 		return try_unify_ref_param(right, left, state.with_sides_swapped());
 
-	assert(is<PointerType>(left_type) and not is<PointerType>(right_type));
-	if(not left.is_ref_param)
-		return false;
+	// If we get here, `left` is the reference parameter and `right` is the argument
 
-	// Unifying two reference parameters should never happen
-	assert(not right.is_ref_param);
-
-	// We need to convert the right side to a pointer by taking its address, which requires
-	// IMPLICIT_CTOR
-	if(right.conv != TypeConversion::IMPLICIT_CTOR)
-		return false;
-
-	// Since the left is a function parameter we shouln't be allowed to convert its type
+	// Function parameters shouln't be allowed to convert their types
 	assert(left.conv == TypeConversion::NONE);
 	assert(not left.expr);
-	PointerType const &ref_param = std::get<PointerType>(left_type);
-	assert(ref_param.kind == PointerType::SINGLE);
+
+	Type const &left_type = std::get<Type>(left.arg);
+	PointerType const &left_ptr = std::get<PointerType>(left_type);
+	assert(left_ptr.kind == PointerType::SINGLE);
 
 	GenericArg common_pointee;
-	unify(
-		UnifierOperand{.arg = *ref_param.pointee, .conv = TypeConversion::NONE},
-		UnifierOperand{
-			.arg = right_type,
-			.conv = TypeConversion::IMPLICIT_CTOR,
-			.expr = right.expr,
-		},
+	std::expected<void, string> unify_result = try_unify(
+		UnifierOperand{.arg = *left_ptr.pointee, .conv = TypeConversion::NONE},
+		right,
 		state.with_result(&common_pointee)
 	);
 
-	if(state.result)
+	if(unify_result)
+		state.emit_conversion(ToPointerConversion(left_ptr.mutability), right.expr);
+	else
 	{
-		*state.result = PointerType{
-			.range = UNKNOWN_TOKEN_RANGE,
-			.pointee = clone_ptr(&common_pointee.as_type(), state.ctx.arena),
-			.kind = PointerType::SINGLE,
-			.mutability = ref_param.mutability,
-		};
+		unify(
+			UnifierOperand{.arg = left.arg, .conv = TypeConversion::NONE},
+			right,
+			state.with_result(&common_pointee)
+		);
 	}
 
-	state.emit_conversion(ToPointerConversion(ref_param.mutability), right.expr);
+	if(state.result)
+		*state.result = left.arg;
+
 	return true;
 }
 

@@ -2,6 +2,7 @@
 
 #include "syntax/ast.hpp"
 #include "semantics/error.hpp"
+#include <expected>
 
 struct SemaContext;
 class StructInstance;
@@ -192,3 +193,20 @@ void unify(
 	UnifierOperand const &right,
 	UnifierState const &state
 );
+
+inline std::expected<void, string> try_unify(
+	UnifierOperand const &left,
+	UnifierOperand const &right,
+	UnifierState const &state
+)
+{
+	try
+	{
+		unify(left, right, state);
+		return {};
+	}
+	catch(ParseError const &exc)
+	{
+		return std::unexpected(exc.what());
+	}
+}
